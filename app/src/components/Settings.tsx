@@ -153,7 +153,7 @@ export function SystemCard() {
           <Label><Input type="checkbox" role="switch" checked={s.system.telemetry.enabled} disabled={busy || s.system.telemetry.forced_off}
             onChange={(e) => void run(s.co, () => post("telemetry-settings", { co: s.co, on: e.target.checked ? "1" : "0" }), undefined, () => false)} />
             Statistici anonime</Label>
-          <p className="mt-1 text-xs text-muted">În Live, trimite zilnic un ID aleatoriu, numărul de firme, versiunea și versiunea schemei bazei de date. Nicio altă dată.</p>
+          <p className="mt-1 text-xs text-muted">În Live, trimite zilnic un ID aleatoriu, numărul de firme, versiunea și versiunea schemei bazei de date. Nu trimite alte date.</p>
           {s.system.telemetry.forced_off && <p className="mt-1 text-xs text-muted">Oprite pe server prin FISCALM_TELEMETRY=0.</p>}
         </div>}
         {firms && <Row icon="clock" title="Ultima verificare" sub={s.system.last_run ? dmt(s.system.last_run, s.today) : "Nicio verificare încă"} />}
