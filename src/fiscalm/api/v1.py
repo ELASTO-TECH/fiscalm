@@ -176,7 +176,16 @@ def execute_as(
         tokens.authorize(current, credential, admin=shared)
 
     with L.guard_writes(guard if route.scope == "write" else None):
-        return _execute_as(L, credential, route, params, query, body, idempotency_key=idempotency_key)
+        return _execute_as(
+            L,
+            credential,
+            route,
+            params,
+            query,
+            body,
+            authorize=guard if route.scope == "write" else None,
+            idempotency_key=idempotency_key,
+        )
 
 
 def _execute_as(
@@ -188,6 +197,7 @@ def _execute_as(
     body: object = None,
     *,
     idempotency_key: str | None = None,
+    authorize: Callable[[Ledger], None] | None = None,
 ) -> object:
 
     if "co" in params and not companies.all(L):
@@ -251,7 +261,7 @@ def _execute_as(
             params,
             query,
             body,
-            authorize=(lambda current: tokens.authorize(current, credential)) if route.scope == "write" else None,
+            authorize=authorize,
         )
     finally:
         audit.actor.reset(reset)
