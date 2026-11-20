@@ -186,7 +186,7 @@ def missing_accounts(st: statements.Statement) -> list[str]:
     """The company's accounts at the statement's banks that the statement leaves out: a statement covers every
     account the company held at its bank in its period, so none of them is silently skipped. An account opened after
     the period's last month (set by a person) or retired before its first day is not owed; without a period, or with
-    sections naming different periods, every account is. Accounts at other banks come
+    sections naming different periods, or a period that ends before it starts, every account is. Accounts at other banks come
     from their own statements. An account's bank is the one configured for it, else the catalogue's for its IBAN code,
     else the IBAN code itself: two accounts with the same code outside the catalogue are one bank, so a statement
     with one of them must carry both; a different code is another bank, with its own statements."""
@@ -204,7 +204,9 @@ def missing_accounts(st: statements.Statement) -> list[str]:
 
     present = {(companies.normalize_iban(a.iban), a.currency) for a in st.accounts}
     held = {bank_of(i) for i, _ in present}
-    first, last = (st.period_start, st.period_end or st.period_start) if st.one_period else (None, None)
+    first, last = st.period_start, st.period_end or st.period_start
+    if not st.one_period or (first and last and last < first):  # periods that disagree or run backwards: all owed
+        first = last = None
     expected = {(a.iban, a.currency) for a in co.accounts if bank_of(a.iban) in held and a.held_between(first, last)}
     return sorted(f"{ccy} {iban[-4:]}" for iban, ccy in expected - present)
 

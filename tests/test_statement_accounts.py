@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+from datetime import date
 
 import pytest
 from firms import iban, set_firm
@@ -54,15 +55,18 @@ def test_all_configured_accounts_required(ledger, tmp_path):
         ([(USD, "USD", "bt", {"opened": "2026-11"})], complete(), []),  # opened after October: not owed yet
         ([(USD, "USD", "bt", {"opened": "2026-10"})], complete(), ["USD 0001"]),  # opened that month: owed
         ([(USD, "USD", "bt", {"opened": "2026-11"})], "two periods", ["USD 0001"]),  # which month? owed
+        ([(USD, "USD", "bt", {"opened": "2026-11"})], "backwards", ["USD 0001"]),  # ends before it starts: owed
         ([(USD, "USD", "bt", {"retired": "2026-10-15"})], complete(), ["USD 0001"]),  # retired later: owed
         ([(USD, "USD", "bt", {"retired": "2026-09-30"})], complete(), []),  # retired before October: not owed
     ],
 )
 def test_a_statement_needs_every_account_at_its_bank_and_none_elsewhere(monkeypatch, tmp_path, accounts, data, missing):
     nord_with(monkeypatch, *accounts)
-    st = parse(tmp_path, complete() if data == "two periods" else data)
+    st = parse(tmp_path, data if isinstance(data, bytes) else complete())
     if data == "two periods":  # a PDF whose sections name different periods
         st = dataclasses.replace(st, one_period=False)
+    if data == "backwards":  # December 1 to September 30
+        st = dataclasses.replace(st, period_start=date(2026, 12, 1), period_end=date(2026, 9, 30))
     assert statement_intake.missing_accounts(st) == missing
 
 
