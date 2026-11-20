@@ -85,8 +85,10 @@ def open_encrypted(path: Path, password_lookup=secrets.bt_statement_password, on
 
 
 def names_cui(text: str, cui: str) -> bool:
-    """The statement header names this CUI: `CUI: 123` or, on older BT statements, `CUI:123`, never a longer number."""
-    return re.search(rf"CUI:[ \t]*{re.escape(cui)}(?!\d)", text) is not None
+    """The header, before the first account section, names this CUI: `CUI: 123` or, on older BT statements,
+    `CUI:123`, never a longer number. A CUI in a transaction's text (a payer's, a reference) is not the holder's."""
+    header = re.split(r"^[ \t]*CONT .*Valuta", text, maxsplit=1, flags=re.M)[0]
+    return re.search(rf"CUI:[ \t]*{re.escape(cui)}(?!\d)", header) is not None
 
 
 def decrypt_to(

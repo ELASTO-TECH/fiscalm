@@ -192,11 +192,20 @@ def fake_pdf_import(monkeypatch, accounts, parse_error=None, decrypt_error=None)
     monkeypatch.setattr(statements, "parse", parse)
 
 
-@pytest.mark.parametrize("header,ours", [("CUI: {}", True), ("CUI:{}", True), ("CUI:{}9", False)])
+@pytest.mark.parametrize(
+    "header,ours",
+    [
+        ("CUI: {}", True),
+        ("CUI:{}", True),
+        ("CUI:{}9", False),  # a longer number that starts with the CUI is another firm
+        ("CUI:99999999\nCONT 123 Valuta\nTransfer;Atelier Nord;CUI:{}", False),  # ours only in a transaction
+    ],
+)
 def test_a_pdf_names_the_firm_with_or_without_a_space_but_never_by_a_prefix(tmp_path, header, ours):
-    """Older BT statements print `CUI:<n>`; a longer number that starts with the CUI is another firm."""
+    """Older BT statements print `CUI:<n>`. Only the header, before the first account, names the holder."""
     pdf = tmp_path / "statement.pdf"
-    pdf.write_bytes(text_pdf([header.format(companies.get("NORD").cui), "din 01/10/2026 - 31/10/2026"]))
+    lines = [*header.format(companies.get("NORD").cui).split("\n"), "din 01/10/2026 - 31/10/2026"]
+    pdf.write_bytes(text_pdf(lines))
     if ours:
         assert statements.decrypt_to(pdf, tmp_path / "out", lambda _key: "", "NORD")[:2] == ("NORD", "2026-10")
     else:

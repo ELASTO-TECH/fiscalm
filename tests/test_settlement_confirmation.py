@@ -89,7 +89,7 @@ def report(L, rid):
 def pdf_statement(home, closing="98.00", payer="Synthetic Courier SRL"):
     header = "Data Descriere".ljust(63) + "Debit".rjust(5) + "Credit".rjust(16)
     lines = [
-        f"CUI: {companies.get('NORD').cui}",
+        f"CUI:{companies.get('NORD').cui}",  # older BT statements print no space
         "din 01/10/2026 - 31/10/2026",
         "CONT 123 Valuta",
         "RON Cod IBAN: " + companies.get("NORD").ron_iban,
