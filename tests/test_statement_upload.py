@@ -14,7 +14,7 @@ from test_api import (
 from test_camt import complete
 from test_mt940 import EUR, block
 
-from fiscalm import recon
+from fiscalm import pack, recon
 from fiscalm.api import web
 from fiscalm.bank import statements, upload as su
 from fiscalm.ledger import finance_home
@@ -223,6 +223,16 @@ def test_a_pdfs_accounts_must_be_the_companys_and_complete(ledger, monkeypatch, 
         su.accept(ledger, "NORD", "", b"%PDF-1.7 synthetic", "application/pdf")
     assert e.value.message == message
     assert not ledger.documents(kind="statement") and leftovers() == []
+
+
+def test_a_pdf_accepted_in_the_app_goes_in_its_months_pack(ledger, monkeypatch):
+    fake_pdf_import(monkeypatch, [(NORD_RON, "RON"), (NORD_EUR, "EUR")])
+    assert su.accept(ledger, "NORD", "", b"%PDF-1.7 synthetic", "application/pdf")["status"] == "added"
+    (doc,) = ledger.documents(kind="statement")
+    assert doc["source"] == "statement-import"  # checked by the firm's password and accounts: not a held upload
+    assert pack.ready(ledger, "NORD", "2026-10") and [
+        d["sha"] for d in pack.pending_docs(ledger, "NORD", "2026-10")
+    ] == [doc["sha"]]
 
 
 def test_a_symlinked_company_directory_is_refused(ledger, tmp_path):

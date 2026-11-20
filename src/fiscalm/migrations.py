@@ -585,6 +585,24 @@ def product_catalog(db: sqlite3.Connection) -> None:
         FOREIGN KEY(company,product_id) REFERENCES products(company,id))""")
 
 
+def app_statements_imported(db: sqlite3.Connection) -> None:
+    # A statement accepted in the app was stored as an "upload:" (an unchecked file), so every pack held it back.
+    # It is a checked import, like the XML one. A pack already sent for its month or a later one went without it:
+    # it counts as sent, so it never reaches the accountant later as an old document; the meta row lists those.
+    late = [
+        r[0]
+        for r in db.execute(
+            "SELECT sha FROM documents d WHERE source='upload:app' AND kind='statement' AND sent_at IS NULL "
+            "AND month <= (SELECT MAX(month) FROM packs p WHERE p.company=d.company AND p.status='sent')"
+        )
+    ]
+    for sha in late:
+        db.execute("UPDATE documents SET sent_at=strftime('%Y-%m-%dT%H:%M:%S','now','localtime') WHERE sha=?", (sha,))
+    if late:
+        db.execute("INSERT INTO meta(key,value) VALUES('app-statements-counted-sent',?)", (json.dumps(late),))
+    db.execute("UPDATE documents SET source='statement-import' WHERE source='upload:app' AND kind='statement'")
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     baseline,
     transaction_links,
@@ -624,6 +642,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     spv_upload_delay_per_firm,
     product_catalog,
     one_off_switch,
+    app_statements_imported,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 
