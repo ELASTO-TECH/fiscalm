@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 import pytest
 from conftest import go_live
+from pdf_fake import text_pdf
 from test_api import (
     _req,  # noqa: F401
     server as server,
@@ -15,7 +16,7 @@ from test_api import (
 from test_camt import complete
 from test_mt940 import EUR, block
 
-from fiscalm import pack, recon
+from fiscalm import companies, pack, recon
 from fiscalm.api import receipts as intake, uploads as upload_links, web
 from fiscalm.bank import statements, upload as su
 from fiscalm.ledger import finance_home
@@ -189,6 +190,18 @@ def fake_pdf_import(monkeypatch, accounts, parse_error=None, decrypt_error=None)
 
     monkeypatch.setattr(statements, "decrypt_to", decrypt)
     monkeypatch.setattr(statements, "parse", parse)
+
+
+@pytest.mark.parametrize("header,ours", [("CUI: {}", True), ("CUI:{}", True), ("CUI:{}9", False)])
+def test_a_pdf_names_the_firm_with_or_without_a_space_but_never_by_a_prefix(tmp_path, header, ours):
+    """Older BT statements print `CUI:<n>`; a longer number that starts with the CUI is another firm."""
+    pdf = tmp_path / "statement.pdf"
+    pdf.write_bytes(text_pdf([header.format(companies.get("NORD").cui), "din 01/10/2026 - 31/10/2026"]))
+    if ours:
+        assert statements.decrypt_to(pdf, tmp_path / "out", lambda _key: "", "NORD")[:2] == ("NORD", "2026-10")
+    else:
+        with pytest.raises(statements.StatementError):
+            statements.decrypt_to(pdf, tmp_path / "out", lambda _key: "", "NORD")
 
 
 def leftovers():

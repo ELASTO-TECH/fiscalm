@@ -84,6 +84,11 @@ def open_encrypted(path: Path, password_lookup=secrets.bt_statement_password, on
     raise StatementError(f"{Path(path).name}: no company password opens it (not a statement of a configured company)")
 
 
+def names_cui(text: str, cui: str) -> bool:
+    """The statement header names this CUI: `CUI: 123` or, on older BT statements, `CUI:123`, never a longer number."""
+    return re.search(rf"CUI:[ \t]*{re.escape(cui)}(?!\d)", text) is not None
+
+
 def decrypt_to(
     path: Path, out_dir: Path, password_lookup=secrets.bt_statement_password, only: str | None = None
 ) -> tuple[str, str, Path]:
@@ -105,7 +110,7 @@ def decrypt_to(
                 raise StatementError("output is still encrypted")
         text = pdf_text(tmp)
         company = companies.get(key)
-        if f"CUI: {company.cui}" not in text:
+        if not names_cui(text, company.cui):
             raise StatementError(f"decrypted with {key} password but CUI {company.cui} not in text")
         if month is None:
             m = re.search(r"din (\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})", text)
