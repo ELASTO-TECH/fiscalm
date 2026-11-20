@@ -1,0 +1,50 @@
+name: Bug report
+description: Something doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not post real data: IBANs, CUIs, client names, statement amounts, passwords or tokens.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Open Cheltuieli\n2. ..."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `fiscalm --version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options: [Sandbox, Live]
+  - type: input
+    id: env
+    attributes:
+      label: Install and browser
+      placeholder: "Docker Compose on Linux, Safari on iPhone"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Synthetic or redacted data only.
