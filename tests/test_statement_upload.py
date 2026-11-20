@@ -213,6 +213,12 @@ def test_a_pdf_names_the_firm_with_or_without_a_space_but_never_by_a_prefix(tmp_
             statements.decrypt_to(pdf, tmp_path / "out", lambda _key: "", "NORD")
 
 
+def test_the_holder_check_ends_where_the_parser_starts_an_account():
+    """Extracted text may indent the account line with any whitespace; the parser and the check agree on it."""
+    text = "CUI:99999999\n\u00a0CONT 123 Valuta\nTransfer;Atelier Nord;CUI:11111111\n"
+    assert not statements.names_cui(text, "11111111")
+
+
 def leftovers():
     d = finance_home() / "state" / "tmp"
     return [p for p in d.rglob("*")] if d.exists() else []

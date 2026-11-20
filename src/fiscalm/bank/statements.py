@@ -8,6 +8,7 @@ within one statement period; otherwise the section cannot settle anything.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import re
 from dataclasses import asdict, dataclass, field
@@ -87,8 +88,14 @@ def open_encrypted(path: Path, password_lookup=secrets.bt_statement_password, on
 def names_cui(text: str, cui: str) -> bool:
     """The header, before the first account section, names this CUI: `CUI: 123` or, on older BT statements,
     `CUI:123`, never a longer number. A CUI in a transaction's text (a payer's, a reference) is not the holder's."""
-    header = re.split(r"^[ \t]*CONT .*Valuta", text, maxsplit=1, flags=re.M)[0]
+    lines = text.splitlines()
+    header = "\n".join(itertools.takewhile(lambda ln: not _opens_account(ln), lines))
     return re.search(rf"CUI:[ \t]*{re.escape(cui)}(?!\d)", header) is not None
+
+
+def _opens_account(line: str) -> bool:
+    """The line that starts an account section, for the parser and the holder check alike."""
+    return line.strip().startswith("CONT ") and "Valuta" in line
 
 
 def decrypt_to(
@@ -343,7 +350,7 @@ def parse_text(text: str, company: str) -> Statement:
     lines = text.splitlines()
     for i, ln in enumerate(lines):
         s = ln.strip()
-        if s.startswith("CONT ") and "Valuta" in ln:
+        if _opens_account(ln):
             close()
             nxt = lines[i + 1] if i + 1 < len(lines) else ""
             acct = _pdf_account(nxt)
