@@ -10091,6 +10091,7 @@
     "receipt-invoice-confirm": "local",
     "setup-card-dismiss": "local",
     "setup-card-show": "local",
+    "telemetry-settings": "local",
     "update-checks": "local",
     "accountant-save": "local",
     "settlement-withdraw": "local",
@@ -10180,6 +10181,7 @@
     "receipt-invoice-confirm": "member",
     "setup-card-dismiss": "manage_firms",
     "setup-card-show": "manage_firms",
+    "telemetry-settings": "manage_firms",
     "update-checks": "manage_firms",
     "accountant-save": "manage_firms",
     "settlement-withdraw": "member",
@@ -10292,6 +10294,7 @@
     "receipt-invoice-confirm": "id: receipt SHA; revision; invoice: displayed unique proposal ID. Rechecks under lock, never confirms payment. Local operation.",
     "setup-card-dismiss": "Close the selected firm's Configurează card on Acasă; the items it listed stay in Setări, and `setup-card-show` reopens it. Administrator only; repeating it changes nothing.",
     "setup-card-show": "Show the selected firm's closed Configurează card on Acasă again, while something is left to set up. Administrator only; repeating it changes nothing.",
+    "telemetry-settings": "on (\"1\" or \"0\"). Administrator only. Daily anonymous Live install statistics, enabled by default; FISCALM_TELEMETRY=0 overrides this local preference.",
     "update-checks": "on (\"1\" or \"0\"). App administrator only. Enable or disable the anonymous daily GitHub Releases check, also allowed in shadow mode.",
     "accountant-save": "cui (existing partner), senders (newline-separated addresses, at most ten), recipient, co. App admin configuration.",
     "settlement-withdraw": "Withdraw pending settlement evidence; never release a reserved credit.",
@@ -14857,7 +14860,7 @@
           },
           "system": {
             "type": "object",
-            "description": "Installation health, running version, and updates: enabled (daily anonymous GitHub Releases check), release (validated tag_name, html_url, published_at of a newer stable SemVer, or null), command (manual update command for this install kind)."
+            "description": "Installation health, running version, telemetry (enabled, forced_off by FISCALM_TELEMETRY=0), and updates: enabled (daily anonymous GitHub Releases check), release (validated tag_name, html_url, published_at of a newer stable SemVer, or null), command (manual update command for this install kind)."
           },
           "rules": {
             "type": "array",

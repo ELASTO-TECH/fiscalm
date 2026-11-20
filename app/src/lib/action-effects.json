@@ -17,6 +17,7 @@
   "receipt-invoice-confirm": "local",
   "setup-card-dismiss": "local",
   "setup-card-show": "local",
+  "telemetry-settings": "local",
   "update-checks": "local",
   "accountant-save": "local",
   "settlement-withdraw": "local",

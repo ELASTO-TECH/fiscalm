@@ -7,10 +7,12 @@ import json
 from datetime import date
 from http.client import IncompleteRead
 from unittest.mock import Mock
+from uuid import UUID
 
 import pytest
+from conftest import go_live
 
-from fiscalm import cli, updates
+from fiscalm import __version__, cli, companies, telemetry, updates
 from fiscalm.api import actions, auth
 from fiscalm.ledger import is_live
 
@@ -106,3 +108,90 @@ def test_unusable_notice_cache_does_not_break_state(ledger, stored):
     ledger.set_meta("updates:state", stored)
     assert updates.state(ledger)["release"] is None
     assert updates.state(ledger)["enabled"] is True
+
+
+@pytest.mark.parametrize("gate", ["sandbox", "switch", "env"])
+def test_telemetry_refusals(ledger, home, monkeypatch, gate):
+
+    if gate != "sandbox":
+        go_live(home)
+    if gate == "switch":
+        telemetry.set_enabled(ledger, False)
+    if gate == "env":
+        monkeypatch.setenv("FISCALM_TELEMETRY", "0")
+    opener = Mock()
+    monkeypatch.setattr(telemetry, "build_opener", opener)
+    telemetry.ping(ledger, TODAY)
+    opener.assert_not_called()
+    assert ledger.get_meta("telemetry:install") is None
+
+
+def test_telemetry_payload_daily_identity_and_failure(ledger, live, monkeypatch, caplog):
+
+    response = Mock()
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+    response.status, response.read.return_value = 204, b""
+    opener = Mock()
+    opener.open.return_value = response
+
+    def hardened_opener(proxy, redirect):
+        assert proxy.proxies == {} and isinstance(redirect, updates.NoRedirect)
+        return opener
+
+    monkeypatch.setattr(telemetry, "build_opener", hardened_opener)
+    telemetry.ping(ledger, TODAY)
+    telemetry.ping(ledger, TODAY)
+    assert opener.open.call_count == 1
+    request = opener.open.call_args.args[0]
+    payload = json.loads(request.data)
+    assert UUID(payload["install"]).version == 4
+    assert payload == {
+        "install": ledger.get_meta("telemetry:install"),
+        "version": __version__,
+        "firms": len(companies.all(ledger)),
+        "schema": ledger.db.execute("PRAGMA user_version").fetchone()[0],
+    }
+    assert request.full_url == telemetry.ENDPOINT and request.method == "POST"
+    assert opener.open.call_args.kwargs == {"timeout": 4}
+    opener.open.side_effect = TimeoutError("private server details")
+    updates.set_enabled(ledger, False)
+    assert cli.main(["update-check"]) == 0
+    assert json.loads(opener.open.call_args.args[0].data)["install"] == payload["install"]
+    assert "Anonymous statistics unavailable" in caplog.text
+    assert "private server details" not in caplog.text
+
+
+def test_telemetry_admin_preference(ledger):
+
+    for role, ok in (("member", False), ("admin", True)):
+        result = actions.act(
+            "telemetry-settings",
+            "NORD",
+            {"on": "0"},
+            require=lambda permission, role=role: auth.require({"role": role}, permission),
+        )
+        assert result["ok"] is ok
+    assert not telemetry.state(ledger)["enabled"]
+    assert not actions.act(
+        "telemetry-settings",
+        "NORD",
+        {"on": "bad"},
+        require=lambda permission: auth.require({"role": "admin"}, permission),
+    )["ok"]
+
+
+@pytest.mark.parametrize("status,body", [(302, b""), (500, b""), (200, b"x" * (updates.LIMIT + 1))])
+def test_telemetry_bad_responses_skip_the_day(ledger, live, monkeypatch, status, body):
+    response = Mock()
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+    response.status, response.read.return_value = status, body
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr(telemetry, "build_opener", lambda *handlers: opener)
+    telemetry.ping(ledger, TODAY)
+    telemetry.ping(ledger, TODAY)
+    assert opener.open.call_count == 1
+    if status == 200:
+        response.read.assert_called_once_with(updates.LIMIT + 1)

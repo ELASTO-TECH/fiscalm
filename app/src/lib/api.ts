@@ -308,7 +308,7 @@ export type ProductAction = "product-add" | "product-update" | "product-archive"
 
 
 /** Configuration action names; shadow policy comes from the generated effect contract. */
-export const CONFIG_ACTIONS = ["update-checks", "setup-card-dismiss", "setup-card-show", "accountant-save", "rule-pause", "rule-resume", "rule-supplier-autopay", "rule-partner-not-mailed", "rule-reminders", "rule-spv-delay", "mail-detect", "mail-test", "mail-microsoft-start", "mail-microsoft-poll", "integration-add", "integration-update", "integration-clear", "integration-enable",
+export const CONFIG_ACTIONS = ["telemetry-settings", "update-checks", "setup-card-dismiss", "setup-card-show", "accountant-save", "rule-pause", "rule-resume", "rule-supplier-autopay", "rule-partner-not-mailed", "rule-reminders", "rule-spv-delay", "mail-detect", "mail-test", "mail-microsoft-start", "mail-microsoft-poll", "integration-add", "integration-update", "integration-clear", "integration-enable",
   "integration-default", "integration-remove", "upload-link-create", "upload-link-revoke", "token-create", "token-revoke",
   "company-lookup", "company-add", "company-update", "company-bank", "company-account", "company-statement-password", "company-alias-add", "company-alias-remove",
   "statement-csv-format", "bank-connect", "bank-disconnect", "bank-accounts", "bank-setup",

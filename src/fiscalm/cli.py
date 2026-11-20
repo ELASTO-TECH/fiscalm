@@ -30,6 +30,7 @@ from fiscalm import (
     recon,
     scheduler,
     setup,
+    telemetry,
     updates,
 )
 from fiscalm.api import state as api, tokens, uploads as upload_links
@@ -69,6 +70,7 @@ def _recent_months(n: int = 2) -> list[str]:
 
 
 def cmd_update_check(a, L: Ledger) -> int:
+    telemetry.ping(L, date.today())
     updates.check(L, date.today())
     return 0
 
