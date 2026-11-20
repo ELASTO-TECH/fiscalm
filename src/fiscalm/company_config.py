@@ -375,7 +375,10 @@ def bank(*, key: str, iban: str, replace: bool = False, today: date | None = Non
             if a.iban != iban
         ]
         b = banks.for_iban(iban)
-        accounts.append(companies.Account(iban, "RON", b.id if b else "", pays=True))
+        kept = own.account(iban)  # the same account again keeps the month it opened
+        accounts.append(
+            companies.Account(iban, "RON", b.id if b else "", pays=True, opened=kept.opened if kept else "")
+        )
         L.save_company(dataclasses.replace(own, accounts=tuple(accounts)), expected=own)
     from fiscalm.api.actions import log
 

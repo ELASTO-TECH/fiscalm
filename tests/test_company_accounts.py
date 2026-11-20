@@ -169,3 +169,10 @@ def test_an_accounts_opening_month_is_set_from_the_cli(config, ledger, month, re
     own = nord.ron_iban if retired else nord.ibans["EUR"]
     code = cli.main(["company", "opened", "--company", "NORD", "--iban", own, "--month", month])
     assert (code, companies.get("NORD").account(own).opened) == ((2, "") if refused else (0, month))
+
+
+def test_choosing_the_paying_account_again_keeps_its_opening_month(config, ledger):
+    ron = companies.get("NORD").ron_iban
+    cc.set_opened(key="NORD", iban=ron, month="2021-08", L=ledger)
+    cc.bank(key="NORD", iban=ron, replace=True, today=date(2026, 11, 2), L=ledger)
+    assert companies.get("NORD").account(ron).opened == "2021-08"

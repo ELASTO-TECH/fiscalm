@@ -279,6 +279,7 @@ class Statement:
     period_end: date | None
     accounts: list[Account]
     partial: bool = field(default=False, kw_only=True)  # covers only its own dates (a CSV), not a whole month
+    one_period: bool = field(default=True, kw_only=True)  # False: a PDF whose sections name different periods
     source: str = field(
         default="file", kw_only=True
     )  # "file": a statement document; "ob": from the bank (open banking)
@@ -415,7 +416,9 @@ def parse_text(text: str, company: str) -> Statement:
             cur_lines.append(s)
     close()
     _pdf_trust(accounts, opening, final, one_period, period_end)
-    return Statement(company=company, period_start=period_start, period_end=period_end, accounts=accounts)
+    return Statement(
+        company=company, period_start=period_start, period_end=period_end, accounts=accounts, one_period=one_period
+    )
 
 
 def _pdf_columns(line: str) -> tuple[int, int] | None:

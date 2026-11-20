@@ -333,3 +333,8 @@ def test_report_upload_refuses_untrusted_or_wrong_context(server, ledger, home, 
         query = "co=NORD&format=ignored"
     assert _post(server, data, "text/csv", query, **headers)[0] == status
     assert ledger.db.execute("SELECT count(*) FROM settlement_reports").fetchone()[0] == 0
+
+
+def test_a_file_naming_accounts_in_an_error_never_reads_as_missing_accounts():
+    """Review: a CSV column name comes from the file; only the engine's typed list names a missing account."""
+    assert su._say(["CSV columns not found: missing configured accounts: EUR 9999; x"]) == su.KNOWN[0][1]

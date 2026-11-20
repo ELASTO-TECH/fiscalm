@@ -4,7 +4,7 @@ import dataclasses
 import json
 
 import pytest
-from firms import set_firm
+from firms import iban, set_firm
 from test_camt import complete, fake_pdf, parse, write, xml
 
 from fiscalm import companies, pack, recon
@@ -12,6 +12,7 @@ from fiscalm.bank import intake as statement_intake, statements
 
 ING = "RO00INGB0000000000000009"
 X1, X2, Y = "RO00XXXX0000000000000001", "RO00XXXX0000000000000002", "RO00YYYY0000000000000002"
+USD = iban("RO00BTRLUSDCRT0000000001")
 
 
 def nord_with(monkeypatch, *accounts, keep=True):
@@ -50,13 +51,19 @@ def test_all_configured_accounts_required(ledger, tmp_path):
         ([(X1, "EUR", ""), (Y, "EUR", "")], xml(iban=Y, currency="EUR"), []),
         ([(X1, "EUR", ""), (X2, "EUR", "")], xml(iban=X1, currency="EUR"), ["EUR 0002"]),  # one bank's code: both owed
         ([(X1, "USD", "bt")], complete(), ["USD 0001"]),  # a configured bank wins over the IBAN's code
-        ([(X1, "USD", "bt", {"opened": "2026-11"})], complete(), []),  # opened after October: not owed yet
-        ([(X1, "USD", "bt", {"opened": "2026-10"})], complete(), ["USD 0001"]),  # opened that month: owed
+        ([(USD, "USD", "bt", {"opened": "2026-11"})], complete(), []),  # opened after October: not owed yet
+        ([(USD, "USD", "bt", {"opened": "2026-10"})], complete(), ["USD 0001"]),  # opened that month: owed
+        ([(USD, "USD", "bt", {"opened": "2026-11"})], "two periods", ["USD 0001"]),  # which month? owed
+        ([(USD, "USD", "bt", {"retired": "2026-10-15"})], complete(), ["USD 0001"]),  # retired later: owed
+        ([(USD, "USD", "bt", {"retired": "2026-09-30"})], complete(), []),  # retired before October: not owed
     ],
 )
 def test_a_statement_needs_every_account_at_its_bank_and_none_elsewhere(monkeypatch, tmp_path, accounts, data, missing):
     nord_with(monkeypatch, *accounts)
-    assert statement_intake.missing_accounts(parse(tmp_path, data)) == missing
+    st = parse(tmp_path, complete() if data == "two periods" else data)
+    if data == "two periods":  # a PDF whose sections name different periods
+        st = dataclasses.replace(st, one_period=False)
+    assert statement_intake.missing_accounts(st) == missing
 
 
 @pytest.mark.parametrize("currencies,missing", [(("RON", "EUR"), []), (("RON",), ["EUR 0001"])])

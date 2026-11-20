@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import calendar
 import os
-import re
 import secrets
 import shutil
 import time
@@ -185,7 +184,6 @@ KNOWN = (
     ),
 )
 OWN = (WRONG_BANK, WRONG_COMPANY, OTHER_ACCOUNT, NOT_READ)
-_MISSING = re.compile(r"missing configured accounts: ([A-Z]{3} [A-Z0-9]{4}(?:, [A-Z]{3} [A-Z0-9]{4})*);")
 
 
 def incomplete(accounts: list[str]) -> str:
@@ -198,8 +196,6 @@ def _say(errors) -> str:
     text = " ".join(errors or [])
     if text in OWN:
         return text
-    if m := _MISSING.search(text):  # the import's own words, read back: only currencies and last four characters
-        return incomplete(m.group(1).split(", "))
     return next((m for k, m in KNOWN if k in text), NOT_READ)
 
 
@@ -270,7 +266,8 @@ def accept(L: Ledger, company: str, bank: str, data: bytes, content_type: str, a
                 errors = result.get("errors") or []
                 raise Refused(409, _say(errors) if _say(errors) != NOT_READ else NO_PASSWORD)
             if result["status"] == "refused":
-                raise Refused(422, _say(result.get("errors")))
+                missing = result.get("missing")  # the engine's own list, never words read back from an error text
+                raise Refused(422, incomplete(missing) if missing else _say(result.get("errors")))
         if result.get("company") != company:  # defence in depth: the import named another company
             raise Refused(422, WRONG_COMPANY)
         result["message"] = DUPLICATE if result["status"] == "duplicate" else ADDED

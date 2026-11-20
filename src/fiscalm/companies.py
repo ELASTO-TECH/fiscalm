@@ -149,9 +149,12 @@ class Account:
             d["opened"] = self.opened
         return d
 
-    def held_in(self, month: str) -> bool:
-        """The account existed in `month` (YYYY-MM): opened by then, or its opening month is unknown."""
-        return not self.opened or self.opened <= month
+    def held_between(self, first: date | None, last: date | None) -> bool:
+        """The account may have existed between these days: not opened after `last`'s month, not retired before
+        `first`. An unknown day or date counts as held."""
+        opened_later = bool(self.opened and last and self.opened > last.strftime("%Y-%m"))
+        retired_before = bool(self.retired and first and self.retired < first.isoformat())
+        return not (opened_later or retired_before)
 
 
 @dataclass(frozen=True)
