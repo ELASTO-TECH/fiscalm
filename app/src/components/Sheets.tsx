@@ -394,25 +394,26 @@ function MailBody({ mailKey, onClose }: { mailKey: string; onClose: () => void }
   const s = useCompany();
   const m = s.to_check.find((x) => x.key === mailKey);
   if (!m) return null;
-  const title = m.supplier || m.subject || "Document din e-mail";
+  const title = m.reason === "upload-firm" ? "Pentru ce firmă e documentul?" : m.supplier || m.subject || "Document din e-mail";
+  const fileUrl = (png = false) => m.reason === "upload-firm" && m.file ? docFile(s.co, { id: m.key, type: m.file === "pdf" ? "pdf" : "image" }, png) : mailFile(s.co, m.key, png);
   const one = m.totals.length === 1 ? m.totals[0] : null;
   return (
     <Sheet onClose={onClose} cls={SHEET_SHAPES.mail.cls} label={title}>
       <CloseX onClose={onClose} />
       <DetailPages />
       {one ? <SheetHead amount={one.amount} cur={curOf(one.currency)} sub={title} /> : <SheetHead title={title} />}
-      <p className={noteLeftStyle}>{questionLine(m)}</p>
+      {m.reason !== "upload-firm" && <p className={noteLeftStyle}>{questionLine(m)}</p>}
       <div className="my-4"><MailAnswer m={m} /></div>
-      {m.file === "pdf" ? (
-        <a href={mailFile(s.co, m.key)} target="_blank" rel="noopener noreferrer">
+      {m.file ? (
+        <a href={fileUrl()} target="_blank" rel="noopener noreferrer">
           {/* eslint-disable-next-line @next/next/no-img-element -- a token-scoped URL from the engine, not an optimisable asset */}
-          <img src={mailFile(s.co, m.key, true)} alt={`Documentul de la ${title}`} loading="lazy"
+          <img src={fileUrl(true)} alt={m.reason === "upload-firm" ? "Documentul încărcat" : `Documentul de la ${title}`} loading="lazy"
             className="my-4 block max-h-[60vh] w-full rounded-control bg-inset object-contain" />
         </a>
       ) : null}
       <Panel className="my-4">
-        <dl className={`${detailListStyle} py-2`}><dt>De la</dt><dd>{m.sender}</dd></dl>
-        <dl className={`${detailListStyle} py-2`}><dt>Subiect</dt><dd>{m.subject || "-"}</dd></dl>
+        {m.reason !== "upload-firm" && <dl className={`${detailListStyle} py-2`}><dt>De la</dt><dd>{m.sender}</dd></dl>}
+        {m.reason !== "upload-firm" && <dl className={`${detailListStyle} py-2`}><dt>Subiect</dt><dd>{m.subject || "-"}</dd></dl>}
         <dl className={`${detailListStyle} py-2`}><dt>Primit</dt><dd>{dmt(m.at, s.today)}</dd></dl>
         {m.date ? <dl className={`${detailListStyle} py-2`}><dt>Data documentului</dt><dd>{dm(m.date, s.today)}</dd></dl> : null}
         {m.number ? <dl className={`${detailListStyle} py-2`}><dt>Număr</dt><dd>{m.number}</dd></dl> : null}

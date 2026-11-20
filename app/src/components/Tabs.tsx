@@ -121,6 +121,7 @@ export function MaiMult() {
 /** Why a mailed document waits for an answer, in one sentence. */
 export function questionLine(m: MailQuestion): string {
   return {
+    "upload-firm": "Pentru ce firmă e documentul?",
     "no-firm": "Pe document nu apare nicio firmă.",
     "two-firms": "Pe document apar mai multe firme.",
     "other-firm": "Documentul numește altă firmă decât cea aleasă pentru acest expeditor.",
@@ -136,7 +137,7 @@ export function MailAnswer({ m }: { m: MailQuestion }) {
   const state = useCompany();
   const [total, setTotal] = useState<number | null>(m.totals.length > 1 ? null : 0);
   // The sender's next documents go the same way; not for a document outside the inbox's firms (the engine ignores it).
-  const scoped = m.reason === "outside-scope";
+  const scoped = m.reason === "outside-scope" || m.reason === "upload-firm";
   const [remember, setRemember] = useState(!scoped);
   const id = `qa${useId().replace(/:/g, "")}`; // one per instance: Rapoarte and its sheet show the same question
   const firms = state.companies.filter((c) => m.companies.includes(c.key));
@@ -163,11 +164,11 @@ export function MailAnswer({ m }: { m: MailQuestion }) {
       </Label>}
       <Actions>
         {firms.map((c) => (
-          <Act key={c.key} action="mail-answer" body={{ key: m.key, who: c.key, ...extra }} label={`Atribuie ${c.name}`}
+          <Act key={c.key} action={m.reason === "upload-firm" ? "upload-assign" : "mail-answer"} body={{ key: m.key, who: c.key, ...(m.reason === "upload-firm" ? {} : extra) }} label={`Atribuie ${c.name}`}
             cls={c.key === state.co ? "btn" : "btn g"} off={pick} describedBy={pick ? `${id}-pick` : undefined} />
         ))}
-        <Act action="mail-answer" body={{ key: m.key, who: "none", ...(remember ? { remember: "1" } : {}) }}
-          label="Nu este factură" cls="btn g" />
+        {m.reason !== "upload-firm" && <Act action="mail-answer" body={{ key: m.key, who: "none", ...(remember ? { remember: "1" } : {}) }}
+          label="Nu este factură" cls="btn g" />}
       </Actions>
     </div>
   );

@@ -118,3 +118,10 @@ It returns `identity` (the `/web/api/me` shape), `state` (the compact summary wi
 and `live`. All three belong to the request cookie; recovery-only sessions receive no state.
 Missing or unknown firm keys select `ALL`. The app discards responses across session-change generations
 and checks the user, role, authentication and current session digest before applying a firm switch.
+
+Upload links can accept documents for every configured firm: pass `all_firms: true`
+when creating a link, or use `fiscalm upload-link create --all-firms --label Phone`.
+The upload page identifies this scope as « Toate firmele ». The next tick reads the
+buyer using the same ownership evidence as mail intake. Unclear documents remain
+in install-level staging, outside every firm's inbox, until a person answers
+« Pentru ce firmă e documentul? » in Sarcini. Assignment then starts normal receipt processing.

@@ -33,7 +33,7 @@ from fiscalm import (
     telemetry,
     updates,
 )
-from fiscalm.api import state as api, tokens, uploads as upload_links
+from fiscalm.api import state as api, tokens, upload_assignment, uploads as upload_links
 from fiscalm.api.mcp import stdio
 from fiscalm.bank import connections as bank_connect, enablebanking as eb, feed as bank_feed, statements
 from fiscalm.bank.intake import recover
@@ -107,6 +107,7 @@ def cmd_sync(a, L: Ledger) -> int:
                 actions.append(
                     f"PACK: {co} {mo} ready for the accountant (fiscalm pack build --company {co} --month {mo})"
                 )
+    upload_assignment.process_pending(L)
     receipt_items.extract_pending(L)
     _out(
         {
@@ -758,11 +759,11 @@ def cmd_mcp(a, L: Ledger) -> int:
 
 def cmd_upload_link(a, L: Ledger) -> int:
     if a.upload_cmd == "create":
-        _out(upload_links.create(L, a.company, a.label, a.expires_in_days, a.max_files))
+        _out(upload_links.create(L, "ALL" if a.all_firms else a.company, a.label, a.expires_in_days, a.max_files))
     elif a.upload_cmd == "list":
-        _out(upload_links.list_links(L, a.company))
+        _out(upload_links.list_links(L, "ALL" if a.all_firms else a.company))
     else:
-        _out({"revoked": upload_links.revoke(L, a.id, a.company)})
+        _out({"revoked": upload_links.revoke(L, a.id, "ALL" if a.all_firms else a.company)})
     return 0
 
 
@@ -942,7 +943,9 @@ def build_parser() -> argparse.ArgumentParser:
         ("revoke", "stop a link from accepting uploads"),
     ):
         s = u.add_parser(name, help=hlp)
-        s.add_argument("--company", required=True)
+        scope = s.add_mutually_exclusive_group(required=True)
+        scope.add_argument("--company")
+        scope.add_argument("--all-firms", action="store_true")
         s.set_defaults(fn=cmd_upload_link)
         if name == "create":
             s.add_argument("--label", required=True)

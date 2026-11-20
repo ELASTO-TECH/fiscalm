@@ -631,6 +631,11 @@ def document_correct(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     return _res(True, "Datele documentului au fost salvate.")
 
 
+def upload_assign(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    ok = api.upload_assignment.assign(L, ctx.get("key"), ctx.get("who"))
+    return _res(ok, "Documentul a fost atribuit firmei." if ok else "Documentul nu mai așteaptă un răspuns.")
+
+
 def mail_answer(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     """A mailed document in doubt (mail_invoices.answer): `who` a firm offered for it or "none" (not an invoice),
     `total` the index of the total picked when several were offered, `remember` "1" to tie the sender to the answer.
@@ -1130,6 +1135,8 @@ class Action:
             return len(json.dumps(args).encode()) <= 4096 and self.valid(
                 {k: v for k, v in args.items() if k != "firm_scope"}
             )
+        if self.handler == _upload_link_create and "all_firms" in self.fields.split() and "all_firms" in args:
+            return type(args["all_firms"]) is bool and self.valid({k: v for k, v in args.items() if k != "all_firms"})
         allowed = set(self.fields.split()) | {"co"}
         if self.handler == integration:
             allowed |= {FIELD + f.key for kind in ig.KINDS.values() for f in kind.fields if not f.rule}
@@ -1218,6 +1225,7 @@ ACTIONS = {
     'pack-unsent': Action(pack_action, 'month version mark', public=False, description='month, version: the sent ZIP SHA-256; mark: the report\'s mark as shown. Undoes pack-sent: the snapshot is prepared again and the documents only it covers are unsent. Local operation.'),
     'check': Action(check, '', public_description='No fields. Starts the tick; permitted in shadow mode, which the tick respects.'),
     'document-correct': Action(document_correct, 'id amount currency date number', public=False, strings=True, actor=True, description='Correct receipt/document metadata only. amount: exact two-decimal string; currency: engine currency code; date and number optional. Refuses settled proof and sent accountant packs; records actor, time and previous values. Never settles money.'),
+    'upload-assign': Action(upload_assign, 'key who', public=False, strings=True, description='Assign an unassigned upload to a configured firm. First answer wins.'),
     'mail-answer': Action(mail_answer, 'key who total remember', public_description='In v1 who must equal the URL company or none (else wrong_company). key (a to_check[].key this co is offered for), who (one of its companies, or none: not an invoice), optional total (the index into its totals as a digit string, needed when it has several), optional remember (1: the exact sender address goes the same way next time)'),
     'rule-pause': Action(_rule_pause, 'id', role='manage_rules', public=False, description='id (company-qualified rule id)'),
     'rule-resume': Action(_rule_pause, 'id', role='manage_rules', public=False, description='id (company-qualified rule id)'),
@@ -1235,8 +1243,8 @@ ACTIONS = {
     'memory-forget': Action(memory_forget, 'id', public=False, description='id (a transactions.remembered[].id)'),
     'token-create': Action(_token_create, 'name scope', role='own_tokens', firm=False, public=False, actor=True, description='name, scope (read/write). Fresh normal session; owner is the current user; read-only accounts can create read tokens only. Returns secret once.'),
     'token-revoke': Action(_token_create, 'id', role='own_tokens', firm=False, public=False, actor=True, description='id. Normal session; revokes own credential, administrator may revoke any.'),
-    'upload-link-create': Action(_upload_link_create, 'label expires_in_days max_files', public_description='label; optional expires_in_days (1..365), max_files (positive integer). Write scope required; explicit upload-link routes are also available.'),
-    'upload-link-revoke': Action(_upload_link_create, 'id', public_description='id: upload link ID. Write scope required; explicit upload-link routes are also available.'),
+    'upload-link-create': Action(_upload_link_create, 'label expires_in_days max_files all_firms', role='manage_tokens', public_description='label; optional all_firms (boolean), expires_in_days (1..365), max_files (positive integer). Write scope required; explicit upload-link routes are also available.'),
+    'upload-link-revoke': Action(_upload_link_create, 'id', role='manage_tokens', public_description='id: upload link ID. Write scope required; explicit upload-link routes are also available.'),
     'mail-microsoft-start': Action(_mail_microsoft, 'address id firm_scope', role='manage_integrations', firm=False, public=False, strings=True, actor=True, description='Start read-only Microsoft device flow. address required, id optional for reconnect. Optional firm_scope (all or firm-key array) is stored before a new inbox can connect; default all. A supplied scope is refused when reconnecting an existing inbox, including address-based reuse. done: code=authorization_pending, id, user_code, verification_uri, expires_in seconds, interval seconds. Persist id for poll. No device code or tokens returned. Errors: not_configured, invalid_settings, admin_consent_required, tenant_policy_blocked, connection_failed.'),
     'mail-microsoft-poll': Action(_mail_microsoft, 'id', role='manage_integrations', firm=False, public=False, strings=True, actor=True, description='Poll Microsoft device flow by integration id from start, same user. done.code: authorization_pending or slow_down (wait done.interval seconds), connected (done.id), expired_token, authorization_declined, admin_consent_required, tenant_policy_blocked, account_mismatch, connection_changed, reconnect_required, invalid_scopes, connection_failed. Stop on terminal errors. integration.config.method=microsoft; reading.code=reconnect_required means Reconectează.'),
     'mail-detect': Action(_mail_setup, 'address', role='manage_integrations', firm=False, public=False, strings=True, description='address: email. done: method (microsoft offers device button, imap offers password), provider, host, port (993), username, app_password_required, app_password_url, hint, supported, hosts (ordered fallback candidates). Invalid address: done.code=invalid_settings. MX discovery is bounded; no credentials.'),
@@ -1319,6 +1327,7 @@ def act(
 
 ROLE_REFUSALS = {
     "manage_users": "Doar administratorii pot gestiona utilizatorii.",
+    "manage_tokens": "Doar administratorii pot gestiona linkurile de încărcare.",
     "own_tokens": "Contul nu poate gestiona cheile API.",
     "manage_firms": "Doar administratorii pot gestiona firmele.",
     "manage_rules": rules.ADMIN_REFUSAL,

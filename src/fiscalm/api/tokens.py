@@ -67,11 +67,18 @@ def _current(L: Ledger, ident: str) -> dict | None:
     return (_metadata(row) | {"scope": "read" if row["owner_role"] == "readonly" else row["scope"]}) if row else None
 
 
-def authorize(L: Ledger, credential: dict) -> None:
+def authorize(L: Ledger, credential: dict, *, admin: bool = False) -> None:
     """Recheck token and owner together under the financial writer's lock."""
     current = _current(L, credential.get("id", ""))
     if not current or current["user_id"] != credential.get("user_id"):
         fail(401, "invalid_token", "The token is no longer authorized. Use an active token.")
+    if (
+        admin
+        and not L.db.execute(
+            "SELECT 1 FROM users WHERE id=? AND role='admin' AND disabled_at IS NULL", (current["user_id"],)
+        ).fetchone()
+    ):
+        fail(403, "admin_required", "Only administrators can manage install-wide upload links.")
     if current["scope"] != "write":
         fail(403, "insufficient_scope", "The token or its owner is read-only.")
 
