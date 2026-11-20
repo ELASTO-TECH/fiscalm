@@ -77,7 +77,7 @@ def _archive_number(head: list[str]) -> str:
             return found[1].strip()
     if not re.match(r"\s*Factura\b", head[0], re.I):
         return ""
-    series = {m[0].strip() for line in head[1:8] if (m := re.match(r"^\s*[A-Z]{1,6}[\s-]*\d+(?=\s{2,}|\s*$)", line))}
+    series = {m[0].strip() for line in head[1:] if (m := re.match(r"^\s*[A-Z]{1,6}[\s-]*\d+(?=\s{2,}|\s*$)", line))}
     return series.pop() if len(series) == 1 else ""
 
 
@@ -326,7 +326,6 @@ def answer(L: Ledger, company: str, sha: str, data: dict, *, target: str | None 
             ("dismissed" if discard else "accepted", json.dumps(data), company, sha),
         ).rowcount:
             raise ReviewError("Documentul nu mai așteaptă verificarea.")
-        db.execute("DELETE FROM history WHERE company=? AND xml_sha=?", (company, sha))  # a reopened PDF's old row
         if not discard:
             if target != company:
                 db.execute(
@@ -338,26 +337,35 @@ def answer(L: Ledger, company: str, sha: str, data: dict, *, target: str | None 
             file_history(L, target, sha, data, str(path))
 
 
-def reopen(L: Ledger, company: str, sha: str) -> None:
-    """Send an accepted PDF that filed this firm's history row back to review. The row stays, still a matching
-    rival, until `answer` replaces or removes it; the document stays.
+def correct(L: Ledger, company: str, sha: str, number: str | None) -> str:
+    """Owner fix for an accepted PDF that filed this firm's history row: a new number, or None to remove it.
 
-    Refused for an XML invoice or companion, a PDF that filed no row here (a duplicate, superseded by XML or filed
-    in another firm) and a row the firm now tracks, so a correction never touches tracked or paid invoices."""
+    One transaction replaces the row, so matching never sees a gap and no review answer can land later. A corrected
+    invoice already known (XML, issued, e-Factura) files nothing, as on import. Refused for an XML invoice or
+    companion, a PDF that filed no row here, an invalid number and a row the firm now tracks."""
     with L.tx() as db:
         row = db.execute(
-            "SELECT h.*,d.data FROM history h JOIN history_documents d ON d.company=h.company AND d.sha=h.xml_sha "
+            "SELECT h.raw_path,h.number,h.issue_date,h.direction,h.party_tax_id,d.data FROM history h "
+            "JOIN history_documents d ON d.company=h.company AND d.sha=h.xml_sha "
             "WHERE h.company=? AND h.xml_sha=? AND d.status='accepted'",
             (company, sha),
         ).fetchone()
-        if not row or "xml_sha" in json.loads(row["data"]):
+        data = json.loads(row["data"]) if row else {"xml_sha": ""}
+        if "xml_sha" in data:
             raise ReviewError("Documentul nu are o factură în istoric.")
         if tracked(L, company, dict(row)):
             raise ReviewError("Factura este urmărită. Corectarea nu se face din istoric.")
+        data = data | {"number": (number or "").strip()}
+        if number is not None and not valid(data):
+            raise ReviewError("Numărul nu este valid.")
+        db.execute("DELETE FROM history WHERE company=? AND xml_sha=?", (company, sha))
         db.execute(
-            "UPDATE history_documents SET status='pending' WHERE company=? AND sha=? AND status='accepted'",
-            (company, sha),
+            "UPDATE history_documents SET status=?,data=? WHERE company=? AND sha=? AND status='accepted'",
+            ("dismissed" if number is None else "accepted", json.dumps(data), company, sha),
         )
+        if number is None:
+            return "removed"
+        return "corrected" if file_history(L, company, sha, data, row["raw_path"]) else "duplicate"
 
 
 def supersede(L: Ledger, company: str, way: str, inv: Invoice) -> None:

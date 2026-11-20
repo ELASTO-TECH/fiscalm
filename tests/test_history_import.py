@@ -1112,40 +1112,42 @@ def test_archive_pdf_with_bare_heading_and_no_single_series_stays_in_review(ledg
     assert history.rows(ledger, "NORD") == []
 
 
-def test_owner_reopens_an_accepted_pdf_to_correct_or_exclude_it(ledger, capsys):
+def test_owner_corrects_or_removes_a_pdf_history_row_atomically(ledger, capsys):
     raw = archive_pdf(["Factura TEST-42", "Data emitere: 12.09.2026"])
     run(ledger, raw)
     sha = hashlib.sha256(raw).hexdigest()
+    with pytest.raises(history_pdf.ReviewError):  # a label is never accepted as the number
+        history_pdf.correct(ledger, "NORD", sha, "Data emitere: 12.09.2026")
+    assert history_pdf.correct(ledger, "NORD", sha, "TEST-43") == "corrected"
+    assert [r["number"] for r in history.rows(ledger, "NORD")] == ["TEST-43"]
+    run(ledger, ubl(number="TEST-50", issue="2026-09-12", total="119.00", client_cui="RO77777777"))
+    assert cli.main(["history", "correct", "NORD", sha, "--number", "TEST 50"]) == 0  # the XML already has it
+    assert [r["number"] for r in history.rows(ledger, "NORD")] == ["TEST-50"] and count(ledger, "history") == 1
+    assert cli.main(["history", "correct", "NORD", sha, "--remove"]) == 1  # no PDF row left to fix
+    assert history_pdf.document(ledger, "NORD", sha) == raw and not history_pdf.pending(ledger, "NORD")
+
+
+def test_two_connections_removing_one_pdf_row_one_wins(ledger):
+    raw = archive_pdf(["Factura TEST-42", "Data emitere: 12.09.2026"])
+    run(ledger, raw)
     results = []
 
-    def reopen():
+    def remove():
         try:
-            history_pdf.reopen(Ledger(timeout=30), "NORD", sha)
-            results.append("ok")
+            results.append(history_pdf.correct(Ledger(timeout=30), "NORD", hashlib.sha256(raw).hexdigest(), None))
         except history_pdf.ReviewError:
             results.append("refused")
 
-    threads = [threading.Thread(target=reopen) for _ in range(2)]
+    threads = [threading.Thread(target=remove) for _ in range(2)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert sorted(results) == ["ok", "refused"]
-    assert len(history.rivals(ledger, "NORD", "issued")) == 1  # still a rival until the answer
-    assert history_pdf.document(ledger, "NORD", sha) == raw
-    (pending,) = history_pdf.pending(ledger, "NORD")
-    fields = {k: pending[k] for k in ("direction", "issue_date", "total", "currency", "party_name", "party_tax_id")}
-    with pytest.raises(history_pdf.ReviewError):  # a label is never confirmed as the number
-        history_pdf.answer(ledger, "NORD", sha, fields | {"number": "Data emitere: 12.09.2026"})
-    history_pdf.answer(ledger, "NORD", sha, fields | {"number": "TEST-43"})
-    assert [r["number"] for r in history.rows(ledger, "NORD")] == ["TEST-43"]
-    assert cli.main(["history", "reopen", "NORD", sha]) == 0
-    assert cli.main(["history", "reopen", "NORD", sha]) == 1
-    history_pdf.answer(ledger, "NORD", sha, {"direction": "none"})
-    assert history.rows(ledger, "NORD") == [] and count(ledger, "issued") == count(ledger, "efactura") == 0
+    assert sorted(results) == ["refused", "removed"] and history.rows(ledger, "NORD") == []
+    assert count(ledger, "issued") == count(ledger, "efactura") == 0
 
 
-def test_reopen_refuses_xml_and_tracked_rows(ledger):
+def test_correct_refuses_xml_companion_and_tracked_rows(ledger):
     run(ledger, ubl(number="TEST-50", issue="2026-09-12", total="119.00", client_cui="RO77777777"))
     (xml_row,) = history.rows(ledger, "NORD")
     raw = archive_pdf(["Factura TEST-42", "Data emitere: 12.09.2026"])
@@ -1158,7 +1160,7 @@ def test_reopen_refuses_xml_and_tracked_rows(ledger):
     ledger.db.execute("UPDATE issued SET number='TEST-42'")  # the PDF's invoice is now tracked
     for sha in (xml_row["xml_sha"], pdf["xml_sha"], hashlib.sha256(companion).hexdigest()):
         with pytest.raises(history_pdf.ReviewError):
-            history_pdf.reopen(ledger, "NORD", sha)
+            history_pdf.correct(ledger, "NORD", sha, None)
     assert count(ledger, "history") == 3 and not history_pdf.pending(ledger, "NORD")
 
 

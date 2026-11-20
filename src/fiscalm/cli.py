@@ -504,14 +504,21 @@ def cmd_history_archive(a, L: Ledger) -> int:
     return 0
 
 
-def cmd_history_reopen(a, L: Ledger) -> int:
+def cmd_history_correct(a, L: Ledger) -> int:
     try:
-        history_pdf.reopen(L, a.company, a.sha)
+        result = history_pdf.correct(L, a.company, a.sha, None if a.remove else a.number)
     except history_pdf.ReviewError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    actions.log(f"history-reopen {a.company} {a.sha[:12]}")
-    print("The PDF is back in review (Setări › Firme); its history row was removed. No payment changed.")
+    actions.log(f"history-correct {a.company} {a.sha[:12]} {result}")
+    print(
+        {
+            "corrected": f"History row now has number {a.number}.",
+            "duplicate": f"{a.number} was already known; the duplicate history row was removed.",
+            "removed": "History row removed; the PDF stays stored.",
+        }[result]
+        + " No payment or tracked invoice changed."
+    )
     return 0
 
 
@@ -1108,10 +1115,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("direction", choices=("issued", "received"))
     s.add_argument("ids", nargs="+")
     s.set_defaults(fn=cmd_history_archive)
-    s = hi.add_parser("reopen", help="owner sends an accepted history PDF back to review, to correct or exclude it")
+    s = hi.add_parser("correct", help="owner fixes the number of a history row read from a PDF, or removes it")
     s.add_argument("company")
     s.add_argument("sha", help="the row's xml_sha from `history list --json`")
-    s.set_defaults(fn=cmd_history_reopen)
+    fix = s.add_mutually_exclusive_group(required=True)
+    fix.add_argument("--number", help="the invoice number printed on the PDF")
+    fix.add_argument("--remove", action="store_true", help="the PDF is not an invoice or is a duplicate")
+    s.set_defaults(fn=cmd_history_correct)
     s = hi.add_parser("list", help="the firm's start date and its history invoices")
     s.add_argument("company")
     s.add_argument("--json", action="store_true")
