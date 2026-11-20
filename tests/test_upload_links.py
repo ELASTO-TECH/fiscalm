@@ -1,4 +1,5 @@
 import json
+from contextlib import closing
 
 import pytest
 from test_api import _req, quiet, server as server, world as world  # noqa: F401
@@ -6,6 +7,7 @@ from test_api_v1 import request
 
 from fiscalm import cli
 from fiscalm.api import actions, mcp_tools, tokens, uploads as upload_links
+from fiscalm.ledger import Ledger
 
 
 def test_lifecycle(ledger, capsys, monkeypatch):
@@ -30,7 +32,7 @@ def test_lifecycle(ledger, capsys, monkeypatch):
 @pytest.mark.parametrize(
     "kw",
     [
-        {"company": "ALL"},
+        {"company": "UNKNOWN"},
         {"label": ""},
         {"expires_in_days": 0},
         {"expires_in_days": 366},
@@ -103,3 +105,57 @@ def test_app_management_survives_log_failure(ledger, monkeypatch):
     result = actions.act("upload-link-revoke", "NORD", {"id": made["id"]})
     assert result["ok"] and result["done"]["revoked"] and result["message"] == "Linkul a fost revocat."
     assert not upload_links.verify(ledger, made["path"][3:])
+
+
+def test_all_firms_cli(ledger, capsys):
+    assert cli.main(["upload-link", "create", "--all-firms", "--label", "Phone"]) == 0
+    made = json.loads(capsys.readouterr().out)
+    assert upload_links.verify(ledger, made["path"][3:])["company"] == "ALL"
+    assert upload_links.list_links(ledger, "NORD")[0]["id"] == made["id"]
+
+
+@pytest.mark.parametrize("route", ["explicit", "action"])
+def test_shared_link_api_requires_admin(token_owner, ledger, server, world, route):
+    writer = tokens.create(ledger, "Writer", "write", user_id=token_owner)["token"]
+    path = "/companies/NORD/upload-links"
+    assert request(server, writer, path, "POST", {"label": "Phone", "all_firms": True})[0] == 403
+    with ledger.tx() as db:
+        db.execute("UPDATE users SET role='admin' WHERE id=?", (token_owner,))
+    code, result = request(server, writer, path, "POST", {"label": "Phone", "all_firms": True})
+    assert code == 200 and result["ok"]
+    with ledger.tx() as db:
+        db.execute("UPDATE users SET role='member' WHERE id=?", (token_owner,))
+    ident = result["done"]["id"]
+    revoke_path = (
+        path + "/" + ident + "/revoke" if route == "explicit" else "/companies/NORD/actions/upload-link-revoke"
+    )
+    body = {} if route == "explicit" else {"id": ident}
+    assert request(server, writer, revoke_path, "POST", body)[0] == 403
+    assert ledger.db.execute("SELECT revoked_at FROM upload_links WHERE id=?", (ident,)).fetchone()[0] is None
+    with ledger.tx() as db:
+        db.execute("UPDATE users SET role='admin' WHERE id=?", (token_owner,))
+    assert request(server, writer, revoke_path, "POST", body)[1]["done"]["revoked"]
+
+
+@pytest.mark.parametrize("route", ["explicit", "action"])
+def test_shared_revocation_rechecks_admin_at_writer(token_owner, ledger, server, world, monkeypatch, route):
+    with ledger.tx() as db:
+        db.execute("UPDATE users SET role='admin' WHERE id=?", (token_owner,))
+    writer = tokens.create(ledger, "Writer", "write", user_id=token_owner)["token"]
+    made = upload_links.create(ledger, "ALL", "Phone")
+    original = actions.act
+
+    def demote_before_writer(*args, **kwargs):
+        with closing(Ledger()) as current, current.tx() as db:
+            db.execute("UPDATE users SET role='member' WHERE id=?", (token_owner,))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(actions, "act", demote_before_writer)
+    path = (
+        "/companies/NORD/upload-links/" + made["id"] + "/revoke"
+        if route == "explicit"
+        else "/companies/NORD/actions/upload-link-revoke"
+    )
+    body = {} if route == "explicit" else {"id": made["id"]}
+    assert request(server, writer, path, "POST", body)[0] == 403
+    assert ledger.db.execute("SELECT revoked_at FROM upload_links WHERE id=?", (made["id"],)).fetchone()[0] is None

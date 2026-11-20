@@ -23,6 +23,7 @@ from fiscalm import (
     companies,
     docs,
     history,
+    history_pdf,
     integrations as ig,
     links,
     pack,
@@ -33,7 +34,7 @@ from fiscalm import (
     telemetry,
     updates,
 )
-from fiscalm.api import state as api, tokens, uploads as upload_links
+from fiscalm.api import actions, state as api, tokens, upload_assignment, uploads as upload_links
 from fiscalm.api.mcp import stdio
 from fiscalm.bank import connections as bank_connect, enablebanking as eb, feed as bank_feed, statements
 from fiscalm.bank.intake import recover
@@ -107,6 +108,7 @@ def cmd_sync(a, L: Ledger) -> int:
                 actions.append(
                     f"PACK: {co} {mo} ready for the accountant (fiscalm pack build --company {co} --month {mo})"
                 )
+    upload_assignment.process_pending(L)
     receipt_items.extract_pending(L)
     _out(
         {
@@ -502,6 +504,24 @@ def cmd_history_archive(a, L: Ledger) -> int:
     return 0
 
 
+def cmd_history_correct(a, L: Ledger) -> int:
+    try:
+        result = history_pdf.correct(L, a.company, a.sha, None if a.remove else a.number)
+    except history_pdf.ReviewError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    actions.log(f"history-correct {a.company} {a.sha[:12]} {result}")
+    print(
+        {
+            "corrected": f"History row now has number {a.number}.",
+            "duplicate": f"{a.number} was already known; the duplicate history row was removed.",
+            "removed": "History row removed; the PDF stays stored.",
+        }[result]
+        + " No payment or tracked invoice changed."
+    )
+    return 0
+
+
 def cmd_history_list(a, L: Ledger) -> int:
     rows = history.rows(L, a.company)
     if a.json:
@@ -758,11 +778,11 @@ def cmd_mcp(a, L: Ledger) -> int:
 
 def cmd_upload_link(a, L: Ledger) -> int:
     if a.upload_cmd == "create":
-        _out(upload_links.create(L, a.company, a.label, a.expires_in_days, a.max_files))
+        _out(upload_links.create(L, "ALL" if a.all_firms else a.company, a.label, a.expires_in_days, a.max_files))
     elif a.upload_cmd == "list":
-        _out(upload_links.list_links(L, a.company))
+        _out(upload_links.list_links(L, "ALL" if a.all_firms else a.company))
     else:
-        _out({"revoked": upload_links.revoke(L, a.id, a.company)})
+        _out({"revoked": upload_links.revoke(L, a.id, "ALL" if a.all_firms else a.company)})
     return 0
 
 
@@ -942,7 +962,9 @@ def build_parser() -> argparse.ArgumentParser:
         ("revoke", "stop a link from accepting uploads"),
     ):
         s = u.add_parser(name, help=hlp)
-        s.add_argument("--company", required=True)
+        scope = s.add_mutually_exclusive_group(required=True)
+        scope.add_argument("--company")
+        scope.add_argument("--all-firms", action="store_true")
         s.set_defaults(fn=cmd_upload_link)
         if name == "create":
             s.add_argument("--label", required=True)
@@ -1093,6 +1115,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("direction", choices=("issued", "received"))
     s.add_argument("ids", nargs="+")
     s.set_defaults(fn=cmd_history_archive)
+    s = hi.add_parser("correct", help="owner fixes the number of a history row read from a PDF, or removes it")
+    s.add_argument("company")
+    s.add_argument("sha", help="the row's xml_sha from `history list --json`")
+    fix = s.add_mutually_exclusive_group(required=True)
+    fix.add_argument("--number", help="the invoice number printed on the PDF")
+    fix.add_argument("--remove", action="store_true", help="the PDF is not an invoice or is a duplicate")
+    s.set_defaults(fn=cmd_history_correct)
     s = hi.add_parser("list", help="the firm's start date and its history invoices")
     s.add_argument("company")
     s.add_argument("--json", action="store_true")

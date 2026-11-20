@@ -49,3 +49,17 @@ describe("mailed invoices", () => {
     expect(api.posts().map((c) => c.body)).toEqual([{ co: "NORD", key: q.key, who: "none" }]);
   });
 });
+
+it("assigns an uploaded photo from its preview without a sender rule", async () => {
+  const s = fixture();
+  const q = { ...s.to_check[0], reason: "upload-firm" as const, companies: ["NORD", "STUDIO9"], totals: [], file: "jpg" as const };
+  s.to_check = [q];
+  at(`?co=NORD&tab=sarcini&mail=${q.key}`);
+  const api = renderApp({ state: () => json(s) });
+  const dialog = within(await screen.findByRole("dialog", { name: "Pentru ce firmă e documentul?", busy: false }));
+  expect(dialog.queryByRole("checkbox")).toBeNull();
+  expect(dialog.queryByRole("button", { name: "Nu este factură" })).toBeNull();
+  expect(dialog.getByRole("img")).toHaveAttribute("src", expect.stringContaining("docfile?"));
+  await userEvent.click(dialog.getByRole("button", { name: "Atribuie STUDIO9" }));
+  expect(api.posts()).toEqual([{ url: "/web/api/upload-assign", method: "POST", body: { co: "NORD", key: q.key, who: "STUDIO9" } }]);
+});

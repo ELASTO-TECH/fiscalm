@@ -244,7 +244,7 @@ def accept(L: Ledger, company: str, bank: str, data: bytes, content_type: str, a
 
             try:
                 result = recon.ingest_statement(
-                    L, path, finance_home(), only=company, check=check, source="upload:app", tmp_dir=staging
+                    L, path, finance_home(), only=company, check=check, source="statement-import", tmp_dir=staging
                 )
             except (ValueError, ArithmeticError, IndexError, KeyError):  # a damaged or hostile PDF's text
                 raise Refused(422, NOT_READ) from None

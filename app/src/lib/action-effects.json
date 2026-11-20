@@ -44,6 +44,7 @@
   "pack-unsent": "local",
   "check": "local",
   "document-correct": "local",
+  "upload-assign": "local",
   "mail-answer": "local",
   "rule-pause": "local",
   "rule-resume": "local",

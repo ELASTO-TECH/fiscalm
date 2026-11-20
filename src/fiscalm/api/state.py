@@ -39,7 +39,7 @@ from fiscalm import (
     turnover,
     updates,
 )
-from fiscalm.api import dashboard_rows, tasks
+from fiscalm.api import dashboard_rows, tasks, upload_assignment
 from fiscalm.api.receipts import inbox
 from fiscalm.api.responses import fail, page
 from fiscalm.bank import connections as bank_connect, statements
@@ -1316,7 +1316,7 @@ def _news(L: Ledger, co: str, since: datetime, recurrences: list[dict]) -> list[
 def _to_check(L: Ledger, co: str) -> list[dict]:
     """Mailed documents in doubt that this firm is one of the answers to (fiscalm.mail.invoices), oldest first: what was
     read on it and the answers to pick. Untrusted text (sender, subject, supplier), shown as text."""
-    out = []
+    out = upload_assignment.questions(L)
     for q in mail_invoices.questions(L):
         d = q["data"]
         if co not in d["companies"]:

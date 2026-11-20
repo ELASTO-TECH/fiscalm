@@ -21,7 +21,7 @@ function useLinks(co: string) {
 }
 
 export function Acces() {
-  const receipts = useCan("member");
+  const receipts = useCan("manage_tokens");
   return <div className={settingsPageStyle}>
     <L to={{ tab: "setari" }} className={backLinkStyle} label="Înapoi la Setări"><I n="arrow-left" />Setări</L><Title>Linkuri și chei API</Title>
     {receipts && <ReceiptLinks />}<Tokens />
@@ -57,10 +57,11 @@ function Links({ links, failed, company, reload }: { links: UploadLink[] | null;
   const back = () => setTimeout(() => opener.current?.focus());
   const [label, setLabel] = useState("");
   const [days, setDays] = useState("30");
+  const [allFirms, setAllFirms] = useState(false);
   const create = async (e: FormEvent) => {
     e.preventDefault();
     if (busy || !label.trim()) return;
-    const r = await send("upload-link-create", { label: label.trim(), expires_in_days: Number(days) });
+    const r = await send("upload-link-create", { label: label.trim(), expires_in_days: Number(days), ...(allFirms ? { all_firms: true } : {}) });
     if (r?.ok && r.done?.path) {
       setAdding(false);
       // The engine's public address for receipt links when the install has one; else the address the app is open on
@@ -83,6 +84,10 @@ function Links({ links, failed, company, reload }: { links: UploadLink[] | null;
           <Input id="link-label" value={label} onChange={(e) => setLabel(e.target.value)} maxLength={100} autoComplete="off" autoFocus
             placeholder="De exemplu: telefonul de serviciu" aria-describedby="link-label-hint" />
           <p id="link-label-hint" className={noteLeftStyle}>Numele apare pe pagina Bondrop.</p>
+          <Label htmlFor="link-firms">Firmă</Label>
+          <Select id="link-firms" value={allFirms ? "all" : "one"} onChange={(e) => setAllFirms(e.target.value === "all")}>
+            <option value="one">{company}</option><option value="all">Toate firmele</option>
+          </Select>
           <Label htmlFor="link-days">Valabil</Label>
           <Select id="link-days" value={days} onChange={(e) => setDays(e.target.value)}>
             {DAYS.map(([d, text]) => <option key={d} value={d}>{text}</option>)}
@@ -108,6 +113,7 @@ function Links({ links, failed, company, reload }: { links: UploadLink[] | null;
               <span className={`${rowIconStyle} ${ROW_TINT[st.tone] ?? ICON_TINT}`}><I n="link-simple" /></span>
               <span className={rowTextStyle}>
                 <b>{l.label}</b>
+                <small>{l.company === "ALL" ? "Toate firmele" : company}</small>
                 <small className={TONE_TEXT[st.tone]}>{st.text}</small>
               </span>
               {st.order === 0 ? (

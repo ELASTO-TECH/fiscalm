@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager, suppress
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import BinaryIO
 
 from fiscalm import companies
@@ -75,13 +76,19 @@ def sniff(data: bytes) -> str:
     raise Refused(415)
 
 
+def storage_root(company: str) -> Path:
+    root = finance_home().resolve()
+    return root / "inbox" / "uploads" if company == "ALL" else root / company / "documents" / "inbox"
+
+
 @contextmanager
 def directory(company: str, day: str) -> Iterator[int]:
     """Pin and validate every directory component without following symlinks."""
     root = finance_home().resolve()
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for segment in (company, "documents", "inbox", day):
+        segments = ("inbox", "uploads", day) if company == "ALL" else (company, "documents", "inbox", day)
+        for segment in segments:
             if segment in ("", ".", "..") or "/" in segment or "\\" in segment:
                 raise Refused(409)
             with suppress(FileExistsError):
@@ -89,7 +96,7 @@ def directory(company: str, day: str) -> Iterator[int]:
             child = os.open(segment, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = child
-        expected = root / company / "documents" / "inbox" / day
+        expected = storage_root(company) / day
         if not os.path.samestat(os.fstat(fd), os.stat(expected, follow_symlinks=False)):
             raise Refused(409)
         if os.fstatvfs(fd).f_bavail * os.fstatvfs(fd).f_frsize < MIN_FREE + REQUEST_MAX:
@@ -415,7 +422,7 @@ def _store(
     one set. Returns (sha, newly recorded)."""
     source = "upload:" + (owner[0] or "user:" + str(owner[1]))
     at = upload_links.timestamp()
-    folder = finance_home().resolve() / company / "documents" / "inbox" / at[:10]
+    folder = storage_root(company) / at[:10]
     try:
         with directory(company, at[:10]) as fd, ExitStack() as cleanup:
             # Always do identical disk work, even for bytes known in another company.
@@ -488,11 +495,12 @@ def sweep_temps(now: float | None = None) -> int:
     cutoff = (time.time() if now is None else now) - MAX_DEADLINE
     removed = 0
     with ExitStack() as stack:
-        for company in companies.all():
+        for company in (*companies.all(), "ALL"):
             try:
                 fd = os.open(finance_home(), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 stack.callback(os.close, fd)
-                for segment in (company, "documents", "inbox"):
+                segments = ("inbox", "uploads") if company == "ALL" else (company, "documents", "inbox")
+                for segment in segments:
                     fd = os.open(segment, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                     stack.callback(os.close, fd)
                 for _, _, names, parent in os.fwalk(".", follow_symlinks=False, dir_fd=fd):

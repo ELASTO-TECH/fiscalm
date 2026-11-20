@@ -186,7 +186,9 @@ def test_browser_tokens_are_owned_filtered_and_limited_by_role(ledger, server, r
     assert not _api(server, "token-create", {"name": "Forged", "scope": "read", "user_id": "u_admin"}, user=role)[1][
         "ok"
     ]
-    if role != "readonly":
+    if role != "admin":
+        assert _api(server, "upload-link-create", {"co": "NORD", "label": "Phone"}, user=role)[0] == 403
+    else:
         made = _api(server, "upload-link-create", {"co": "NORD", "label": "Phone"}, user=role)[1]["done"]
         assert _get_json(server, "/web/api/upload-links?co=NORD", user=role)[1][0]["id"] == made["id"]
         assert _api(server, "upload-link-revoke", {"co": "NORD", "id": made["id"]}, user=role)[1]["done"]["revoked"]
@@ -328,3 +330,10 @@ def test_mail_setup_http_contract(ledger, server, monkeypatch, caplog):
     assert _api(server, "mail-test", body, Origin="https://evil.example")[0] == 403
     logs = "\n".join(p.read_text() for p in (finance_home() / "logs").glob("*.log")) + caplog.text
     assert body["password"] not in logs + json.dumps(result)
+
+
+@pytest.mark.parametrize("all_firms", [False, True])
+def test_browser_link_scope(ledger, server, all_firms):
+    code, result = _api(server, "upload-link-create", {"co": "NORD", "label": "Phone", "all_firms": all_firms})
+    assert code == 200 and result["ok"]
+    assert upload_links.verify(ledger, result["done"]["path"][3:])["company"] == ("ALL" if all_firms else "NORD")

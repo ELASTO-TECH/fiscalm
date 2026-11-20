@@ -2,11 +2,13 @@
 through the same import as mail. Synthetic data only."""
 
 import json
+import zipfile
 from datetime import date
 from urllib.parse import urlencode
 
 import pytest
 from conftest import go_live
+from pdf_fake import text_pdf
 from test_api import (
     _req,  # noqa: F401
     server as server,
@@ -14,8 +16,8 @@ from test_api import (
 from test_camt import complete
 from test_mt940 import EUR, block
 
-from fiscalm import recon
-from fiscalm.api import web
+from fiscalm import companies, pack, recon
+from fiscalm.api import receipts as intake, uploads as upload_links, web
 from fiscalm.bank import statements, upload as su
 from fiscalm.ledger import finance_home
 
@@ -190,6 +192,33 @@ def fake_pdf_import(monkeypatch, accounts, parse_error=None, decrypt_error=None)
     monkeypatch.setattr(statements, "parse", parse)
 
 
+@pytest.mark.parametrize(
+    "header,ours",
+    [
+        ("CUI: {}", True),
+        ("CUI:{}", True),
+        ("CUI:{}9", False),  # a longer number that starts with the CUI is another firm
+        ("CUI:99999999\nCONT 123 Valuta\nTransfer;Atelier Nord;CUI:{}", False),  # ours only in a transaction
+    ],
+)
+def test_a_pdf_names_the_firm_with_or_without_a_space_but_never_by_a_prefix(tmp_path, header, ours):
+    """Older BT statements print `CUI:<n>`. Only the header, before the first account, names the holder."""
+    pdf = tmp_path / "statement.pdf"
+    lines = [*header.format(companies.get("NORD").cui).split("\n"), "din 01/10/2026 - 31/10/2026"]
+    pdf.write_bytes(text_pdf(lines))
+    if ours:
+        assert statements.decrypt_to(pdf, tmp_path / "out", lambda _key: "", "NORD")[:2] == ("NORD", "2026-10")
+    else:
+        with pytest.raises(statements.StatementError):
+            statements.decrypt_to(pdf, tmp_path / "out", lambda _key: "", "NORD")
+
+
+def test_the_holder_check_ends_where_the_parser_starts_an_account():
+    """Extracted text may indent the account line with any whitespace; the parser and the check agree on it."""
+    text = "CUI:99999999\n\u00a0CONT 123 Valuta\nTransfer;Atelier Nord;CUI:11111111\n"
+    assert not statements.names_cui(text, "11111111")
+
+
 def leftovers():
     d = finance_home() / "state" / "tmp"
     return [p for p in d.rglob("*")] if d.exists() else []
@@ -223,6 +252,19 @@ def test_a_pdfs_accounts_must_be_the_companys_and_complete(ledger, monkeypatch, 
         su.accept(ledger, "NORD", "", b"%PDF-1.7 synthetic", "application/pdf")
     assert e.value.message == message
     assert not ledger.documents(kind="statement") and leftovers() == []
+
+
+@pytest.mark.parametrize("link", [None, "NORD", "ALL"])  # the same bytes sent first through an upload link
+def test_a_pdf_accepted_in_the_app_goes_in_its_months_pack(ledger, monkeypatch, link):
+    fake_pdf_import(monkeypatch, [(NORD_RON, "RON"), (NORD_EUR, "EUR")])
+    if link:
+        intake.accept(ledger, upload_links.create(ledger, link, "Phone")["path"][3:], [("pdf", b"%PDF-1.7 synthetic")])
+    assert su.accept(ledger, "NORD", "", b"%PDF-1.7 synthetic", "application/pdf")["status"] == "added"
+    (doc,) = ledger.documents(kind="statement")
+    assert doc["source"] == "statement-import"  # checked by the firm's password and accounts: not a held upload
+    assert [d["sha"] for d in pack.pending_docs(ledger, "NORD", "2026-10")] == [doc["sha"]]
+    with zipfile.ZipFile(pack.build(ledger, "NORD", "2026-10")["zip_path"]) as made:  # the checked, decrypted copy
+        assert made.read("2026-10_extras_BT_EUR_RON.pdf") == b"%PDF-decrypted"
 
 
 def test_a_symlinked_company_directory_is_refused(ledger, tmp_path):

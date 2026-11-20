@@ -1454,6 +1454,11 @@ def openapi() -> dict:
                 "properties": {
                     "co": STRING,
                     "label": {"type": "string", "minLength": 1, "maxLength": 100},
+                    "all_firms": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Accept documents for every configured firm; unclear buyers wait for assignment.",
+                    },
                     "expires_in_days": {"type": "integer", "minimum": 1, "maximum": 365, "default": 30},
                     "max_files": {"type": "integer", "minimum": 1, "maximum": 2**63 - 1, "default": 100},
                 },

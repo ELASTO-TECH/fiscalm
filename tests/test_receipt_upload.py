@@ -1,7 +1,9 @@
 import hashlib
 import io
 import json
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from copy import deepcopy
 from datetime import date
 from decimal import Decimal
@@ -10,11 +12,12 @@ import pytest
 from test_api import _req, quiet, server as server, world as world  # noqa: F401
 from test_efactura import anaf_zip, ubl
 
-from fiscalm import ai, companies, docs, integrations, links, pack, receipt_items, recon, transactions
-from fiscalm.api import actions, receipts as intake, state as api, uploads as upload_links
+from fiscalm import ai, backup, companies, docs, integrations, links, pack, receipt_items, recon, transactions
+from fiscalm.api import actions, receipts as intake, state as api, upload_assignment, uploads as upload_links
 from fiscalm.bank import statements
 from fiscalm.efactura import inbox as ef
 from fiscalm.ledger import Ledger, LinkRefused
+from fiscalm.mail import invoices
 from fiscalm.receipt_lines import signatures
 
 JPEG = b"\xff\xd8\xffexample"
@@ -1088,3 +1091,118 @@ def test_two_connections_naming_one_bon_for_two_debits_have_one_winner(ledger):
     with ThreadPoolExecutor(2) as pool:
         won = [k for k in pool.map(attempt, keys) if k]
     assert len(won) == 1 and ledger.linked_receipts("NORD") == {stored["sha"]}
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Buyer: Atelier Nord SRL\nCUI: 11111111", "NORD"),
+        ("Buyer: CUI RO11111111", "NORD"),
+        ("Client: Atelier Nord", "NORD"),
+        ("Buyer: Atelier Nord SRL\nBuyer: Studio 9 SRL", None),
+        ("Bon fiscal\nTOTAL 10.00 RON", None),
+        ("", None),
+        ("Seller: Atelier Nord SRL", None),
+    ],
+)
+def test_all_firms_assignment(ledger, home, monkeypatch, text, expected):
+
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
+    monkeypatch.setattr(upload_assignment, "document_text", lambda *args: text)
+    upload_assignment.process_pending(ledger)
+    doc = ledger.document(sha)
+    assert doc["company"] == (expected or "ALL")
+    if expected:
+        assert "/NORD/documents/inbox/" in doc["path"]
+        assert not upload_assignment.questions(ledger)
+        assert api.read_doc(ledger, "NORD", sha)[1] == JPEG
+    else:
+        question = upload_assignment.questions(ledger)[0]
+        assert question["key"] == sha
+        assert set(question["companies"]) == {"NORD", "STUDIO9"}
+        assert upload_assignment.pending_file(ledger, sha)[1] == JPEG
+        result = actions.act("upload-assign", "NORD", {"key": sha, "who": "STUDIO9"})
+        assert result["ok"]
+        assert ledger.document(sha)["company"] == "STUDIO9"
+        assert api.read_doc(ledger, "STUDIO9", sha)[1] == JPEG
+        assert not upload_assignment.assign(ledger, sha, "NORD")
+        assert not upload_assignment.pending_file(ledger, sha)
+
+
+def test_staged_upload_path_confinement(ledger, home):
+
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
+    original = ledger.document(sha)["path"]
+    outside = home / "outside.jpg"
+    outside.write_bytes(JPEG)
+    with ledger.tx() as db:
+        db.execute("UPDATE documents SET path=? WHERE sha=?", (str(outside), sha))
+    assert not upload_assignment.pending_file(ledger, sha)
+    assert not upload_assignment.assign(ledger, sha, "NORD")
+    with ledger.tx() as db:
+        db.execute("UPDATE documents SET path=? WHERE sha=?", (original, sha))
+    target = home / "NORD" / "documents"
+    target.parent.mkdir(exist_ok=True)
+    target.symlink_to(home / "ALL" / "documents", target_is_directory=True)
+    with pytest.raises(intake.Refused):
+        upload_assignment.assign(ledger, sha, "NORD")
+
+
+def test_assignment_race(ledger):
+
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
+
+    def assign(co):
+        with closing(Ledger()) as other:
+            return upload_assignment.assign(other, sha, co)
+
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(assign, ["NORD", "STUDIO9"]))
+    assert sorted(results) == [False, True]
+
+
+def test_staged_upload_in_backup(ledger, home):
+
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
+    archive = backup.create(home.parent / (home.name + "-backup.zip"))
+    with zipfile.ZipFile(archive) as stored:
+        matches = [n for n in stored.namelist() if n.endswith(sha + ".jpg")]
+        assert len(matches) == 1 and matches[0].startswith("inbox/uploads/")
+        assert stored.read(matches[0]) == JPEG
+
+
+@pytest.mark.parametrize("ext", ["pdf", "jpg"])
+def test_shared_upload_reading(ledger, monkeypatch, ext):
+
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    data = b"%PDF-example" if ext == "pdf" else JPEG
+    sha = intake.accept(ledger, token, [(ext, data)])[0]["sha"]
+    text = "Buyer: Atelier Nord SRL"
+    monkeypatch.setattr(invoices, "pdf_text", lambda data: text)
+    monkeypatch.setattr(ai, "available", lambda L: True)
+
+    def ask(*args, **kwargs):
+        assert kwargs["image"] == ("image/jpeg", JPEG)
+        return {"text": text}
+
+    monkeypatch.setattr(ai, "ask_json", ask)
+    upload_assignment.process_pending(ledger)
+    assert ledger.document(sha)["company"] == "NORD"
+
+
+def test_shared_upload_disk_refusal_waits(ledger, monkeypatch):
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
+    monkeypatch.setattr(upload_assignment, "document_text", lambda *args: "Buyer: Atelier Nord SRL")
+
+    def refuse(*args):
+        raise intake.Refused(507)
+
+    monkeypatch.setattr(upload_assignment, "assign", refuse)
+    upload_assignment.process_pending(ledger)
+    assert ledger.document(sha)["company"] == "ALL"
+    assert upload_assignment.questions(ledger)[0]["key"] == sha

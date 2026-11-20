@@ -112,7 +112,7 @@ def extract_pending(L: store.Ledger) -> None:
         return
     rows = L.db.execute(
         "SELECT d.* FROM documents d JOIN receipt_uploads u ON u.sha=d.sha "
-        "LEFT JOIN receipt_items i ON i.sha=d.sha WHERE i.sha IS NULL AND d.kind='receipt' AND d.efactura_id IS NULL ORDER BY u.uploaded_at LIMIT 3"
+        "LEFT JOIN receipt_items i ON i.sha=d.sha WHERE i.sha IS NULL AND d.company!='ALL' AND d.kind='receipt' AND d.efactura_id IS NULL ORDER BY u.uploaded_at LIMIT 3"
     ).fetchall()
     for row in rows:
         root = store.finance_home().resolve() / row["company"] / "documents" / "inbox"

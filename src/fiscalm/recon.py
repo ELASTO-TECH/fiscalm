@@ -173,7 +173,7 @@ def _ingest_statement(
         out.unlink()
         return {"file": str(path), "status": "refused", "errors": [str(exc)]}
     existing = ledger.document(digest)
-    if existing:
+    if existing and not (existing["source"] or "").startswith("upload:"):
         dest = Path(existing["path"])
         out.unlink()
     else:

@@ -2598,6 +2598,17 @@ class Ledger:
         with self.tx() as db:
             return db.execute("UPDATE documents SET note=? WHERE sha=?", (note, sha)).rowcount > 0
 
+    def assign_upload(self, sha: str, company: str, path: str) -> bool:
+        """First assignment wins; the file has already been safely copied into the firm inbox."""
+        with self.tx() as db:
+            changed = db.execute(
+                "UPDATE documents SET company=?,path=?,issues='[\"to-check\"]' WHERE sha=? AND company='ALL' AND source LIKE 'upload:%'",
+                (company, path, sha),
+            ).rowcount
+            if changed:
+                db.execute("UPDATE receipt_uploads SET company=? WHERE sha=? AND company='ALL'", (company, sha))
+            return bool(changed)
+
     def document(self, sha: str):
         return self.db.execute("SELECT * FROM documents WHERE sha=?", (sha,)).fetchone()
 
@@ -2625,13 +2636,14 @@ class Ledger:
                     "upload:"
                 ):
                     return False
-                # Trusted ingestion owns metadata and company; preserve the stored bytes. A bon a person linked to its
-                # card payment (links.receipt) keeps that payment's data and source: its link stays the one answer.
+                # Trusted ingestion owns metadata and company; a receipt keeps its stored bytes, a statement points
+                # at the copy its importer checked and stored in the firm's own storage (a PDF one decrypted). A bon a
+                # person linked to its card payment (links.receipt) keeps that payment's data and source.
                 if not db.execute(
                     """UPDATE documents SET company=?,month=?,kind=?,path=?,vendor=?,doc_date=?,
                     amount=?,currency=?,card_last4=?,issues=?,source=?,created_at=?,accounts=? WHERE sha=? AND source LIKE 'upload:%'
                     AND NOT EXISTS (SELECT 1 FROM tx_link_items WHERE item='receipt '||documents.sha)""",
-                    values[:3] + (existing["path"],) + values[4:] + (accounts, sha),
+                    values[:3] + (path if kind == "statement" else existing["path"],) + values[4:] + (accounts, sha),
                 ).rowcount:
                     return False
                 db.execute(

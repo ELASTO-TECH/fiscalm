@@ -20,7 +20,7 @@ import pytest
 from firms import seed
 from test_invoicing import DATA, LINE, PARTY
 
-from fiscalm import __version__, backup, bnr, cli, migrations as m
+from fiscalm import __version__, backup, bnr, cli, migrations as m, pack
 from fiscalm.api import state as api
 from fiscalm.invoicing import engine as invoicing, issued, ubl
 from fiscalm.ledger import Ledger
@@ -710,6 +710,37 @@ def test_the_spv_day_moves_from_the_anaf_connection_to_each_firm(tmp_path, monke
         assert all("upload_after_days" not in c for c in configs)
 
 
+def test_app_statements_join_packs_on_upgrade_but_never_after_a_sent_pack(tmp_path, monkeypatch):
+    path = tmp_path / "previous.db"
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.app_statements_imported))
+        Ledger(path).close()
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "INSERT INTO packs(company,month,status) VALUES('EXAMPLE','2026-09','sent'),('EXAMPLE','2026-10','built')"
+        )
+        for sha, month, kind, source in (
+            ("aug", "2026-08", "statement", "upload:app"),  # before a sent pack's month: it would have gone with it
+            ("sep", "2026-09", "statement", "upload:app"),
+            ("oct", "2026-10", "statement", "upload:app"),  # its month's pack is not sent: it goes in it now
+            ("bon", "2026-10", "receipt", "upload:phone"),  # an upload link's file still waits for its card payment
+        ):
+            db.execute(
+                "INSERT INTO documents(sha,company,month,kind,path,source,created_at) "
+                "VALUES(?,'EXAMPLE',?,?,'/synthetic.pdf',?,'2026-10-01')",
+                (sha, month, kind, source),
+            )
+    with closing(Ledger(path)) as ledger:
+        assert [d["sha"] for d in pack.pending_docs(ledger, "EXAMPLE", "2026-11")] == ["oct"]
+        assert sorted(json.loads(ledger.get_meta("app-statements-counted-sent"))) == ["aug", "sep"]
+        assert dict(ledger.db.execute("SELECT sha, source FROM documents")) == {
+            "aug": "statement-import",
+            "sep": "statement-import",
+            "oct": "statement-import",
+            "bon": "upload:phone",
+        }
+
+
 @pytest.mark.parametrize(
     "ai, kept",
     [
@@ -727,7 +758,7 @@ def test_the_spv_day_moves_from_the_anaf_connection_to_each_firm(tmp_path, monke
 def test_reading_off_and_no_ai_become_a_stopped_integration(tmp_path, monkeypatch, ai, kept):
     path = tmp_path / "switch.db"
     with monkeypatch.context() as patch:
-        patch.setattr(m, "SCHEMA_VERSION", m.SCHEMA_VERSION - 1)
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.one_off_switch))
         old = Ledger(path)
         with old.tx() as db:
             rows = [

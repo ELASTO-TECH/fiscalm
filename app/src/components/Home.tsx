@@ -234,8 +234,8 @@ export function taskCards(s: State, { tag = false }: TaskOpts = {}): Card[] {
   }
   for (const m of s.to_check) {
     add(
-      <Task key={`m${m.key}`} icon="envelope-simple" title="Factură din e-mail de verificat"
-        body={`${m.supplier || m.subject}. ${questionLine(m)}`}>
+      <Task key={`m${m.key}`} icon="envelope-simple" title={m.reason === "upload-firm" ? "Pentru ce firmă e documentul?" : "Factură din e-mail de verificat"}
+        body={m.reason === "upload-firm" ? "Document încărcat" : `${m.supplier || m.subject}. ${questionLine(m)}`}>
         <L to={{ mail: m.key }} className="btn g">Vezi documentul</L>
       </Task>,
     );

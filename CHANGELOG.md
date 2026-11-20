@@ -3,6 +3,16 @@
 Product versions describe fiscalm releases. The API and the ledger schema have their own
 version numbers. Back up before upgrading; see [self-hosting](docs/self-hosting.md).
 
+## 0.1.3 (2026-11-20)
+
+- Ledger schema 39, upgraded automatically at startup. Back up first.
+- One receipt upload link can serve every firm of the install; the buyer on the receipt
+  decides the firm.
+- Bank statements accepted in the app now go into the accountant's pack.
+- BT statements that print `CUI:<n>` without a space are accepted.
+- History import never files a label or a date as an invoice number; such PDFs wait in
+  review. New `fiscalm history correct` fixes or removes a wrong history PDF row.
+
 ## 0.1.1 (2026-11-20)
 
 - Anonymous daily install statistics in Live, on by default. Administrators can turn them
