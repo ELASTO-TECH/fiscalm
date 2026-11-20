@@ -55,6 +55,46 @@ def _archive_party(lines: list[str]) -> tuple[str, str] | None:
     return None
 
 
+def plausible_number(number: str) -> bool:
+    """An invoice number has a digit and is neither a label nor a date (`Data emitere: 06.02.2026`)."""
+    return bool(
+        re.search(r"\d", number)
+        and len(number) <= 100
+        and ":" not in number
+        and not re.search(r"\bdata\b|\d{1,2}[./-]\d{1,2}[./-]\d{4}", number, re.I)
+    )
+
+
+def _archive_number(head: list[str]) -> str:
+    """The number beside `Factura` or before `Data Scadenta`; else the one series line under a bare heading."""
+    if not head:
+        return ""
+    for found in (
+        re.search(r"^\s*Factura\s+(.+?)\s*$", head[0], re.I),
+        re.match(r"^\s*(.+?)\s{2,}Data Scadenta:?", head[1] if len(head) > 1 else "", re.I),
+    ):
+        if found and plausible_number(found[1].strip()):
+            return found[1].strip()
+    if not re.match(r"\s*Factura\b", head[0], re.I):
+        return ""
+    series = {m[0].strip() for line in head[1:8] if (m := re.match(r"^\s*([A-Z]{1,6})[\s-]*(\d+)\b", line))}
+    return series.pop() if len(series) == 1 else ""
+
+
+def _archive_total(text: str) -> tuple[str, str] | None:
+    """The one `TOTAL ... LEI|RON|EUR` line, as a two-decimal string and its currency."""
+    totals = re.findall(r"^\s*TOTAL:?\s+([0-9][0-9 .,]*)\s+(LEI|RON|EUR)\s*$", text, re.M | re.I)
+    if len(totals) != 1:
+        return None
+    value, currency = totals[0]
+    value = value.strip().replace(" ", "")
+    if "," in value:
+        value = value.replace(".", "").replace(",", ".")
+    if not re.fullmatch(r"\d{1,12}(?:\.\d{1,2})?", value):
+        return None
+    return f"{Decimal(value):.2f}", "RON" if currency.upper() == "LEI" else currency.upper()
+
+
 def _archive_fields(text: str, co: companies.Company) -> dict:
     """Read the export's two explicit party columns, never a filename's claims."""
     lines = text.splitlines()
@@ -77,18 +117,10 @@ def _archive_fields(text: str, co: companies.Company) -> dict:
     ours = [tax_token(co.cui) == value for value in ids]
     if sum(ours) != 1:
         return {}
-    number = re.search(r"^\s*Factura\s+(.+?)\s*$", lines[0], re.I)
-    if not number:
-        number = re.match(r"^\s*(.+?)\s{2,}Data Scadenta:?", lines[1], re.I)
+    number = _archive_number(lines[:i])
     day = re.search(r"Data emitere:?\s*(\d{2}\.\d{2}\.\d{4})", text)
-    totals = re.findall(r"^\s*TOTAL:?\s+([0-9][0-9 .,]*)\s+(LEI|RON|EUR)\s*$", text, re.M | re.I)
-    if not number or not re.search(r"\d", number[1]) or len(number[1]) > 100 or not day or len(totals) != 1:
-        return {}
-    value, currency = totals[0]
-    value = value.strip().replace(" ", "")
-    if "," in value:
-        value = value.replace(".", "").replace(",", ".")
-    if not re.fullmatch(r"\d{1,12}(?:\.\d{1,2})?", value):
+    total = _archive_total(text)
+    if not number or not day or not total:
         return {}
     try:
         issue = datetime.strptime(day[1], "%d.%m.%Y").date().isoformat()
@@ -97,10 +129,10 @@ def _archive_fields(text: str, co: companies.Company) -> dict:
     party = 1 if ours[0] else 0
     return dict(
         direction="issued" if ours[0] else "received",
-        number=number[1].strip(),
+        number=number,
         issue_date=issue,
-        total=f"{Decimal(value):.2f}",
-        currency="RON" if currency.upper() == "LEI" else currency.upper(),
+        total=total[0],
+        currency=total[1],
         party_name=names[party],
         party_tax_id=ids[party],
         reason="",
@@ -121,7 +153,7 @@ def valid(data: dict) -> bool:
         return False
     return bool(
         data.get("direction") in ("issued", "received")
-        and data.get("number")
+        and plausible_number(data["number"])
         and re.fullmatch(r"\d{1,12}\.\d{2}", data.get("total", ""))
         and Decimal(data["total"]) > 0
         and re.fullmatch(r"[A-Z]{3}", data.get("currency", ""))
@@ -303,6 +335,28 @@ def answer(L: Ledger, company: str, sha: str, data: dict, *, target: str | None 
                 )
             path = finance_home().resolve() / "history" / target / "pdf" / (sha + ".pdf")
             file_history(L, target, sha, data, str(path))
+
+
+def reopen(L: Ledger, company: str, sha: str) -> None:
+    """Send an accepted PDF that filed this firm's history row back to review: the row goes, the document stays.
+
+    Refused for an XML invoice or its companion, a PDF that filed no row here (a duplicate, superseded by XML or
+    filed in another firm) and a row the firm now tracks, so a correction never touches tracked or paid invoices."""
+    with L.tx() as db:
+        row = db.execute(
+            "SELECT h.* FROM history h JOIN history_documents d ON d.company=h.company AND d.sha=h.xml_sha "
+            "WHERE h.company=? AND h.xml_sha=? AND d.status='accepted'",
+            (company, sha),
+        ).fetchone()
+        if not row:
+            raise ReviewError("Documentul nu are o factură în istoric.")
+        if tracked(L, company, dict(row)):
+            raise ReviewError("Factura este urmărită. Corectarea nu se face din istoric.")
+        db.execute(
+            "UPDATE history_documents SET status='pending' WHERE company=? AND sha=? AND status='accepted'",
+            (company, sha),
+        )
+        db.execute("DELETE FROM history WHERE company=? AND xml_sha=?", (company, sha))
 
 
 def supersede(L: Ledger, company: str, way: str, inv: Invoice) -> None:

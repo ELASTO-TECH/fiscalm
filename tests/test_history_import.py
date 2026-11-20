@@ -1081,6 +1081,83 @@ def test_archive_pdf_without_a_certain_full_number_stays_in_review(ledger, numbe
     assert history.rows(ledger, "NORD") == []
 
 
+def archive_pdf(head: list[str], name: str = "Firma Exemplu SRL") -> bytes:
+    """An FGO-style archive PDF for NORD as supplier, with `head` above the two party columns."""
+    parties = [f"{'Furnizor':<60}Client", f"{'Atelier Nord SRL':<60}{name}", f"{'CUI: RO11111111':<60}CUI: RO77777777"]
+    return text_pdf(head + parties + ["TOTAL 119.00 LEI"])
+
+
+FGO_BARE = ["              FACTURA" + " " * 37 + "Data emitere:      12.09.2026", " " * 57 + "Data scadenta"]
+
+
+@pytest.mark.parametrize(
+    "head,number",
+    [
+        (FGO_BARE + ["              ABC 0065" + " " * 54 + "30.09.2026"], "ABC 0065"),
+        ([f"{'Factura':<20}Data emitere   12.09.2026", f"{'ABC 0042':<20}Data Scadenta   30.09.2026"], "ABC 0042"),
+        (["Factura TEST-42", "Data emitere: 12.09.2026"], "TEST-42"),
+        (["FACTURA", f"{'TEST-42':<20}Data Scadenta: 30.09.2026", "Data emitere: 12.09.2026"], "TEST-42"),
+    ],
+)
+def test_archive_pdf_number_is_never_a_label_and_xml_still_supersedes_it(ledger, head, number):
+    assert run(ledger, archive_pdf(head)).history_issued == 1
+    assert [r["number"] for r in history.rows(ledger, "NORD")] == [number]
+    run(ledger, ubl(number=number.replace(" ", ""), issue="2026-09-12", total="119.00", client_cui="RO77777777"))
+    assert count(ledger, "history") == 1 and not history_pdf.pending(ledger, "NORD")
+
+
+@pytest.mark.parametrize("series", [["ABC 0065", "XYZ 0066"], ["Data scadenta 30.09.2026"]])
+def test_archive_pdf_with_bare_heading_and_no_single_series_stays_in_review(ledger, series):
+    assert run(ledger, archive_pdf(FGO_BARE + series)).review == 1
+    assert history.rows(ledger, "NORD") == []
+
+
+def test_owner_reopens_an_accepted_pdf_to_correct_or_exclude_it(ledger, capsys):
+    raw = archive_pdf(["Factura TEST-42", "Data emitere: 12.09.2026"])
+    run(ledger, raw)
+    sha = hashlib.sha256(raw).hexdigest()
+    results = []
+
+    def reopen():
+        try:
+            history_pdf.reopen(Ledger(timeout=30), "NORD", sha)
+            results.append("ok")
+        except history_pdf.ReviewError:
+            results.append("refused")
+
+    threads = [threading.Thread(target=reopen) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == ["ok", "refused"]
+    assert history.rows(ledger, "NORD") == [] and history_pdf.document(ledger, "NORD", sha) == raw
+    (pending,) = history_pdf.pending(ledger, "NORD")
+    fields = {k: pending[k] for k in ("direction", "issue_date", "total", "currency", "party_name", "party_tax_id")}
+    with pytest.raises(history_pdf.ReviewError):  # a label is never confirmed as the number
+        history_pdf.answer(ledger, "NORD", sha, fields | {"number": "Data emitere: 12.09.2026"})
+    history_pdf.answer(ledger, "NORD", sha, fields | {"number": "TEST-43"})
+    assert [r["number"] for r in history.rows(ledger, "NORD")] == ["TEST-43"]
+    assert cli.main(["history", "reopen", "NORD", sha]) == 0
+    assert cli.main(["history", "reopen", "NORD", sha]) == 1
+    history_pdf.answer(ledger, "NORD", sha, {"direction": "none"})
+    assert history.rows(ledger, "NORD") == [] and count(ledger, "issued") == count(ledger, "efactura") == 0
+
+
+def test_reopen_refuses_xml_and_tracked_rows(ledger):
+    run(ledger, ubl(number="TEST-50", issue="2026-09-12", total="119.00", client_cui="RO77777777"))
+    (xml_row,) = history.rows(ledger, "NORD")
+    raw = archive_pdf(["Factura TEST-42", "Data emitere: 12.09.2026"])
+    run(ledger, raw)
+    pdf = history.rows(ledger, "NORD")[1]
+    history.track(ledger, "NORD", xml_row["xml_sha"])
+    ledger.db.execute("UPDATE issued SET number='TEST-42'")  # the PDF's invoice is now tracked
+    for sha in (xml_row["xml_sha"], pdf["xml_sha"]):
+        with pytest.raises(history_pdf.ReviewError):
+            history_pdf.reopen(ledger, "NORD", sha)
+    assert count(ledger, "history") == 2 and not history_pdf.pending(ledger, "NORD")
+
+
 def test_oversized_archive_companion_is_not_attached_truncated(ledger, monkeypatch):
     xml = ubl(issue="2026-09-12")
     monkeypatch.setattr(history, "MAX_MEMBER", len(xml) + 1)
