@@ -526,6 +526,7 @@ export type State = {
   news: News[];
   system: {
     version: string;
+    telemetry: { enabled: boolean; forced_off: boolean };
     updates: { enabled: boolean; release: { tag_name: string; html_url: string; published_at: string } | null; command: string };
     configuration_error?: string | null;
     /** not_set_up also covers a deliberately disabled ANAF integration. */

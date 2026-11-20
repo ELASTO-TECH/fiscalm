@@ -800,6 +800,21 @@ is stored in the ledger for the whole installation. Turning it off also hides an
 cached notice. No update is downloaded or executed. The update notice displays
 `git pull && docker compose up -d --build`; back up and follow the upgrade steps below.
 
+### Anonymous usage statistics
+
+On by default, the same scheduled command also POSTs to the fixed endpoint
+`https://fiscalm.ro/api/v1/ping`, at most once a day, only in Live. The JSON contains
+exactly `install` (a random UUIDv4 stored once in ledger meta), `version` (fiscalm version),
+`firms` (active firm count) and `schema` (ledger schema version). No CUIs, names, IBANs,
+amounts, hostnames or user counts are sent. The receiver sees the connecting IP.
+
+Administrators can turn off **Statistici anonime** in Setări › Sistem. Setting
+`FISCALM_TELEMETRY=0` overrides that preference, including in Docker Compose: put it
+in the Compose `.env` and recreate the services. Sandbox never sends statistics.
+Requests refuse proxies and redirects, use a four-second socket timeout and a 64 KiB
+response limit. Failures, including non-2xx responses, skip the day without interrupting
+the tick; logs contain only a fixed failure message.
+
 ## Upgrade and uninstall
 
 Back up before upgrades. For a stopped-volume backup, stop all services, copy all

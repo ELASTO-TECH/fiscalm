@@ -17,6 +17,7 @@
   "receipt-invoice-confirm": "member",
   "setup-card-dismiss": "manage_firms",
   "setup-card-show": "manage_firms",
+  "telemetry-settings": "manage_firms",
   "update-checks": "manage_firms",
   "accountant-save": "manage_firms",
   "settlement-withdraw": "member",
