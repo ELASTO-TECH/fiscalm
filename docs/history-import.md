@@ -36,12 +36,13 @@ Both use the same reader, which detects each file by content:
   suppliers. They are always history. Uncertain ones wait in a review table (not Sarcini), where a person fills in
   the fields or marks the document as not an invoice. The AI service narrows a total only in Live; in Sandbox no
   document text leaves the installation. A number that reads as a label or a date (`Data emitere: 06.02.2026`) is
-  never accepted. When an FGO archive prints a bare `FACTURA` heading, the number is the one series line under it
-  (`ABC 0065`); none or several send the PDF to review.
+  never accepted, on import or in review. When an FGO archive prints a bare `FACTURA` heading, the number is the
+  one series line under it (`ABC 0065`); none, several or a longer number send the PDF to review.
 - **Correcting an accepted PDF.** `fiscalm history list COMPANY --json` shows each row's `xml_sha`; for a PDF row,
-  `fiscalm history reopen COMPANY SHA` removes that history row and puts the PDF back in the review table, where a
-  person fixes the fields or marks it as not an invoice. It is one logged transaction, keeps the stored PDF and
-  refuses XML rows, a PDF that filed no row in this firm, and an invoice now tracked in Vânzări or Cheltuieli.
+  `fiscalm history reopen COMPANY SHA` puts the PDF back in the review table, where a person fixes the fields or
+  marks it as not an invoice. Until then the old row stays in history and still holds back matching; the answer
+  replaces or removes it. The command logs the reopen and refuses XML rows, a PDF paired with an XML, a PDF that
+  filed no row in this firm and an invoice now tracked in Vânzări or Cheltuieli.
 - **SAGA XML** (`F_*.xml`, `CLI_*.xml`, `I_*.xml`), standalone or in the mixed ZIP, detected by its root. The total
   is the lines' net plus VAT; non-RON amounts, nonzero excise and reverse-charge documents with nonzero VAT are left
   unreadable rather than guessed. An invoice is the same one as its e-Factura copy only with the same full number,

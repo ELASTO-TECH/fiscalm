@@ -1106,7 +1106,7 @@ def test_archive_pdf_number_is_never_a_label_and_xml_still_supersedes_it(ledger,
     assert count(ledger, "history") == 1 and not history_pdf.pending(ledger, "NORD")
 
 
-@pytest.mark.parametrize("series", [["ABC 0065", "XYZ 0066"], ["Data scadenta 30.09.2026"]])
+@pytest.mark.parametrize("series", [["ABC 0065", "XYZ 0066"], ["Data scadenta 30.09.2026"], ["ABC 0065/2026"]])
 def test_archive_pdf_with_bare_heading_and_no_single_series_stays_in_review(ledger, series):
     assert run(ledger, archive_pdf(FGO_BARE + series)).review == 1
     assert history.rows(ledger, "NORD") == []
@@ -1131,7 +1131,8 @@ def test_owner_reopens_an_accepted_pdf_to_correct_or_exclude_it(ledger, capsys):
     for t in threads:
         t.join()
     assert sorted(results) == ["ok", "refused"]
-    assert history.rows(ledger, "NORD") == [] and history_pdf.document(ledger, "NORD", sha) == raw
+    assert len(history.rivals(ledger, "NORD", "issued")) == 1  # still a rival until the answer
+    assert history_pdf.document(ledger, "NORD", sha) == raw
     (pending,) = history_pdf.pending(ledger, "NORD")
     fields = {k: pending[k] for k in ("direction", "issue_date", "total", "currency", "party_name", "party_tax_id")}
     with pytest.raises(history_pdf.ReviewError):  # a label is never confirmed as the number
@@ -1150,12 +1151,22 @@ def test_reopen_refuses_xml_and_tracked_rows(ledger):
     raw = archive_pdf(["Factura TEST-42", "Data emitere: 12.09.2026"])
     run(ledger, raw)
     pdf = history.rows(ledger, "NORD")[1]
+    companion = archive_pdf(["Factura TEST-44", "Data emitere: 12.09.2026"])
+    run(ledger, companion)
+    history_pdf.attach(ledger, "NORD", xml_row["xml_sha"], companion)  # later paired with an XML
     history.track(ledger, "NORD", xml_row["xml_sha"])
     ledger.db.execute("UPDATE issued SET number='TEST-42'")  # the PDF's invoice is now tracked
-    for sha in (xml_row["xml_sha"], pdf["xml_sha"]):
+    for sha in (xml_row["xml_sha"], pdf["xml_sha"], hashlib.sha256(companion).hexdigest()):
         with pytest.raises(history_pdf.ReviewError):
             history_pdf.reopen(ledger, "NORD", sha)
-    assert count(ledger, "history") == 2 and not history_pdf.pending(ledger, "NORD")
+    assert count(ledger, "history") == 3 and not history_pdf.pending(ledger, "NORD")
+
+
+def test_received_invoice_tracked_by_cui_alone_is_known(ledger):
+    run(ledger, supplier_ubl(number="FZ 7", issue="2026-10-12"))
+    ledger.db.execute("UPDATE efactura SET supplier_tax_id=NULL")
+    data = dict(direction="received", number="FZ 7", issue_date="2026-10-12", party_tax_id="77777777")
+    assert history_pdf.tracked(ledger, "NORD", data)
 
 
 def test_oversized_archive_companion_is_not_attached_truncated(ledger, monkeypatch):
