@@ -14,6 +14,7 @@ from fiscalm import companies
 from fiscalm.efactura.inbox import Invoice, tax_token
 from fiscalm.ledger import Ledger, finance_home, is_live, now
 from fiscalm.mail import invoices as reader
+from fiscalm.payments.engine import pay_lock
 
 
 class ReviewError(ValueError):
@@ -61,7 +62,7 @@ def plausible_number(number: str) -> bool:
         re.search(r"\d", number)
         and len(number) <= 100
         and ":" not in number
-        and not re.search(r"\bdata\b|\d{1,2}[./-]\d{1,2}[./-]\d{4}", number, re.I)
+        and not re.search(r"\bdata\b|\d{1,2}[./-]\d{1,2}[./-]\d{4}|\d{4}-\d{2}-\d{2}", number, re.I)
     )
 
 
@@ -343,21 +344,21 @@ def correct(L: Ledger, company: str, sha: str, number: str | None) -> str:
     One transaction replaces the row, so matching never sees a gap and no review answer can land later. A corrected
     invoice already known (XML, issued, e-Factura) files nothing, as on import. Refused for an XML invoice or
     companion, a PDF that filed no row here, an invalid number and a row the firm now tracks."""
-    with L.tx() as db:
+    with pay_lock(), L.tx() as db:  # like an import: never between a matcher's read and its write
         row = db.execute(
-            "SELECT h.raw_path,h.number,h.issue_date,h.direction,h.party_tax_id,d.data FROM history h "
+            "SELECT h.*,d.data FROM history h "
             "JOIN history_documents d ON d.company=h.company AND d.sha=h.xml_sha "
             "WHERE h.company=? AND h.xml_sha=? AND d.status='accepted'",
             (company, sha),
         ).fetchone()
-        data = json.loads(row["data"]) if row else {"xml_sha": ""}
-        if "xml_sha" in data:
+        if not row or "xml_sha" in json.loads(row["data"]):
             raise ReviewError("Documentul nu are o factură în istoric.")
         if tracked(L, company, dict(row)):
             raise ReviewError("Factura este urmărită. Corectarea nu se face din istoric.")
-        data = data | {"number": (number or "").strip()}
-        if number is not None and not valid(data):
-            raise ReviewError("Numărul nu este valid.")
+        keys = ("direction", "issue_date", "currency", "total", "party_name", "party_tax_id")
+        data = {k: row[k] or "" for k in keys} | {"number": (number or "").strip(), "reason": ""}
+        if number is not None and not (valid(data) and data["party_tax_id"]):  # certain, as on import
+            raise ReviewError("Numărul nu este valid sau partenerul nu are CUI.")
         db.execute("DELETE FROM history WHERE company=? AND xml_sha=?", (company, sha))
         db.execute(
             "UPDATE history_documents SET status=?,data=? WHERE company=? AND sha=? AND status='accepted'",

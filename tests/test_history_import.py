@@ -1116,8 +1116,9 @@ def test_owner_corrects_or_removes_a_pdf_history_row_atomically(ledger, capsys):
     raw = archive_pdf(["Factura TEST-42", "Data emitere: 12.09.2026"])
     run(ledger, raw)
     sha = hashlib.sha256(raw).hexdigest()
-    with pytest.raises(history_pdf.ReviewError):  # a label is never accepted as the number
-        history_pdf.correct(ledger, "NORD", sha, "Data emitere: 12.09.2026")
+    for wrong in ("Data emitere: 12.09.2026", "2026-09-12"):  # a label or a date is never the number
+        with pytest.raises(history_pdf.ReviewError):
+            history_pdf.correct(ledger, "NORD", sha, wrong)
     assert history_pdf.correct(ledger, "NORD", sha, "TEST-43") == "corrected"
     assert [r["number"] for r in history.rows(ledger, "NORD")] == ["TEST-43"]
     run(ledger, ubl(number="TEST-50", issue="2026-09-12", total="119.00", client_cui="RO77777777"))
@@ -1162,6 +1163,15 @@ def test_correct_refuses_xml_companion_and_tracked_rows(ledger):
         with pytest.raises(history_pdf.ReviewError):
             history_pdf.correct(ledger, "NORD", sha, None)
     assert count(ledger, "history") == 3 and not history_pdf.pending(ledger, "NORD")
+
+
+def test_correct_refuses_a_number_for_a_partner_without_tax_id(ledger):
+    raw = archive_pdf(["Factura TEST-42", "Data emitere: 12.09.2026"])
+    run(ledger, raw)
+    ledger.db.execute("UPDATE history SET party_tax_id=''")  # as a manual review may leave it
+    with pytest.raises(history_pdf.ReviewError):
+        history_pdf.correct(ledger, "NORD", hashlib.sha256(raw).hexdigest(), "TEST-43")
+    assert [r["number"] for r in history.rows(ledger, "NORD")] == ["TEST-42"]
 
 
 def test_received_invoice_tracked_by_cui_alone_is_known(ledger):
