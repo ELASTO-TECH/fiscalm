@@ -1,0 +1,433 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Offline release gate. Findings are leads for human review, never proof of safety."""
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from datetime import date
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Iterator
+import unicodedata
+
+CATEGORIES = ("secrets", "denylist", "structural", "files", "errors")
+TOKEN = re.compile(
+    r"-----BEGIN (?:(?:[A-Z0-9 ]+ )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----|"
+    r"(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+    r"AIza[A-Za-z0-9_-]{30,}|(?:ya29\.|GOCSPX-)[A-Za-z0-9_-]{20,}|"
+    r"sk-(?:ant-)?[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|"
+    r"xox[bap]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|"
+    r"\d{6,12}:[A-Za-z0-9_-]{30,}|"
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
+)
+URL_CREDENTIAL = re.compile(r"://[^\s/:@]+:[^\s/@]+@")
+URL_VALUE = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>)]*")
+ASSIGN = re.compile(r'''["']?([\w.-]+)["']?\s*[:=]\s*(?:"([^"\n]*)"|'([^'\n]*)'|(\$\{[A-Za-z_][A-Za-z0-9_]*\}|[^\s,;}]+))''')
+SENSITIVE = {"password", "passwd", "secret", "token", "apikey"}
+IBAN = re.compile(r"RO\d{2}(?:[\s-]?[A-Z0-9]){20}", re.I)
+NUMBER = re.compile(r"(?<!\d)(?:(RO|CUI|CIF)[\s-]*)?(\d{2,13})(?!\d)", re.I)
+TAX_LABEL = r"(?:c\.?u\.?i\.?|c\.?i\.?f\.?|vat(?:[_ ](?:id|number))?|cod[ _]+fiscal|tax_id)"
+TAX_SEP = r"[ \t\"'`*|()\[\]:=<>]"
+CONTEXT = re.compile(
+    rf"(?:\b{TAX_LABEL}(?!\w)|<cbc:CompanyID>)(?:-ul)?"
+    rf"(?:{TAX_SEP}|\b(?:nr\.|no\.|id\b|number\b))*$", re.I)
+TABLE_LABEL = re.compile(rf"{TAX_LABEL}", re.I)
+CONFIG_EXT = {".json", ".toml", ".yaml", ".yml", ".ini", ".conf", ".cfg", ".env", ".properties", ".xml", ".cnf", ".config"}
+FORBIDDEN = {".pdf", ".csv", ".db", ".zip", ".jpg", ".jpeg", ".heic", ".png", ".xml", ".xlsx", ".ods", ".sqlite", ".p12", ".pfx", ".key", ".eml", ".mbox"}
+PUBLIC_EMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.uk", "yahoo.fr", "ymail.com",
+    "outlook.com", "hotmail.com", "hotmail.co.uk", "live.com", "msn.com",
+    "icloud.com", "me.com", "mac.com", "proton.me", "protonmail.com", "pm.me",
+    "aol.com", "gmx.com", "gmx.net", "mail.com", "fastmail.com", "hey.com",
+}
+MAX_BLOB = 16 * 1024 * 1024
+POLICY_ROOT = Path(__file__).resolve().parents[1] / "tests"
+
+
+def text_normalized(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    plain = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return re.sub(r"[\W_]+", " ", plain).strip()
+
+
+def term_match(value: str, terms: list[str]) -> bool:
+    value = text_normalized(value)
+    joined = value.replace(" ", "")
+    return any(normal in value or normal.replace(" ", "") in joined
+               for term in terms if (normal := text_normalized(term)))
+
+
+def safe_path(path: str, terms: list[str]) -> str:
+    if term_match(path, terms):
+        return "[redacted filename]"
+    path = TOKEN.sub("[redacted]", path)
+    path = IBAN.sub("[redacted]", path)
+    path = re.sub(r"[^\W_]{16,}", "[redacted]", path)
+    return re.sub(r"\d{2,}", "[redacted]", path)
+
+
+def lockfile(path: str) -> bool:
+    return Path(path).name == "package-lock.json" or path.endswith(".lock")
+
+
+def sensitive_key(key: str) -> bool:
+    key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    parts = re.split(r"[_.-]+", key.casefold())
+    return bool(SENSITIVE.intersection(parts)) or any(a == "api" and b == "key" for a, b in zip(parts, parts[1:]))
+
+
+def fake_secrets() -> set[str]:
+    allowed = set()
+    for line in (POLICY_ROOT / "release-allow-secrets.txt").read_text(encoding="utf-8-sig").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        value, separator, reason = line.partition(" # ")
+        if value.startswith("assignment | "):
+            parts = value.split(" | ")
+            if (len(parts) != 3 or not parts[1] or parts[1].startswith("/")
+                    or ".." in Path(parts[1]).parts or not re.fullmatch(r"[a-f0-9]{64}", parts[2])
+                    or not separator or not reason.strip()):
+                raise ValueError("invalid assignment exemption")
+            allowed.add(value)
+            continue
+        if not separator or not reason.strip() or not re.search(r"fake|synthetic|example|dummy|invented|test", value, re.I):
+            raise ValueError("invalid fake secret entry")
+        allowed.add(value)
+    return allowed
+
+
+def synthetic_ids() -> dict[str, set[str]]:
+    """Exempt reviewed values only at their declared repository paths."""
+    result: dict[str, set[str]] = {}
+    for line in (POLICY_ROOT / "synthetic-ids.txt").read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        entry, separator, reason = line.partition(" # ")
+        value, paths = entry.split(" | ", 1)
+        if not separator or not reason.strip():
+            raise ValueError("synthetic ID needs a reason")
+        for path in [*paths.split(","), "tests/synthetic-ids.txt"]:
+            if not path or path.startswith("/") or ".." in Path(path).parts:
+                raise ValueError("invalid synthetic ID path")
+            result.setdefault(path, set()).add(normalized(value))
+    return result
+
+
+def assets() -> dict[str, str]:
+    result = {}
+    for line in (POLICY_ROOT / "release-assets.txt").read_text().splitlines():
+        if line and not line.startswith("#"):
+            oid, path = line.split("  ", 1)
+            if not re.fullmatch(r"[a-f0-9]{40}", oid) or path in result:
+                raise ValueError("invalid asset entry")
+            result[path] = oid
+    return result
+
+
+def blob_oid(content: bytes) -> str:
+    return hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+
+
+def is_binary(content: bytes) -> bool:
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return b"\0" in content
+
+
+def git(root: Path, *args: str, data: bytes | None = None) -> bytes:
+    return subprocess.run(["git", "-C", str(root), *args], input=data,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True).stdout
+
+
+def normalized(value: str) -> str:
+    value = re.sub(r"[\s-]", "", value).upper()
+    return value[2:] if re.fullmatch(r"RO\d{2,10}", value) else value
+
+
+def valid_iban(value: str) -> bool:
+    value = re.sub(r"[\s-]", "", value).upper()
+    if not re.fullmatch(r"RO\d{2}[A-Z]{4}[A-Z0-9]{16}", value):
+        return False
+    digits = "".join(str(ord(c) - 55) if c.isalpha() else c for c in value[4:] + value[:4])
+    return int(digits) % 97 == 1
+
+
+def valid_cui(value: str) -> bool:
+    if not re.fullmatch(r"[1-9]\d{1,9}", value):
+        return False
+    padded = value.zfill(10)
+    check = sum(int(a) * int(b) for a, b in zip(padded[:9], "753217532")) * 10 % 11
+    return (0 if check == 10 else check) == int(padded[-1])
+
+
+def valid_cnp(value: str) -> bool:
+    if not re.fullmatch(r"[1-9]\d{12}", value):
+        return False
+    century = {1: 1900, 2: 1900, 3: 1800, 4: 1800, 5: 2000, 6: 2000}.get(int(value[0]), 1900)
+    try:
+        date(century + int(value[1:3]), int(value[3:5]), int(value[5:7]))
+    except ValueError:
+        return False
+    county = int(value[7:9])
+    if county not in {*range(1, 49), 51, 52, 99} or value[9:12] == "000":
+        return False
+    check = sum(int(a) * int(b) for a, b in zip(value[:12], "279146358279")) % 11
+    return (1 if check == 10 else check) == int(value[-1])
+
+
+def entropy(value: str) -> float:
+    return -sum((n / len(value)) * math.log2(n / len(value)) for n in Counter(value).values())
+
+
+def findings(path: str, content: bytes, terms: list[str], allowed: set[str],
+             history: bool = False, fake: set[str] | None = None) -> Iterator[tuple[int, str]]:
+    text = content.decode("utf-8", errors="replace")
+    binary = is_binary(content)
+    config = Path(path).suffix.lower() in CONFIG_EXT or Path(path).name.startswith(".env")
+    fake = fake or set()
+    if TOKEN.search(path) and any(m.group() not in fake for m in TOKEN.finditer(path)):
+        yield 1, "secrets"
+    if term_match(path, terms):
+        yield 1, "denylist"
+    env = Path(path).name == ".env" or Path(path).name.startswith(".env.")
+    if env and Path(path).name != ".env.example":
+        yield 1, "secrets"
+    table_columns: set[int] = set()
+    for lineno, line in enumerate(text.splitlines(), 1):
+        # Markdown headers apply only within their contiguous table and own column.
+        cells = list(re.finditer(r"(?<=\|)[^|]*(?=\|)", line)) if line.strip().startswith("|") else []
+        if not cells:
+            table_columns = set()
+        labels = {i for i, cell in enumerate(cells)
+                  if TABLE_LABEL.fullmatch(cell.group().strip(" \t*`"))}
+        if labels:
+            table_columns = labels
+
+        # Suppress individual exact matches, never a whole line containing a fake.
+        secret = any(m.group() not in fake for m in TOKEN.finditer(line))
+        fake_urls = [m.span() for m in URL_VALUE.finditer(line) if m.group() in fake]
+        secret |= any(not any(a <= m.start() and m.end() <= b for a, b in fake_urls)
+                      for m in URL_CREDENTIAL.finditer(line))
+        if not lockfile(path):
+            for match in ASSIGN.finditer(line):
+                key = match[1]
+                value = next(v for v in match.groups()[1:] if v is not None)
+                if not value or value in fake or (env and match[4] is not None and value.startswith("#")):
+                    continue
+                # Pin only this assignment; token/URL detectors above still run on the whole line.
+                digest = hashlib.sha256((key + "\0" + value).encode()).hexdigest()
+                if f"assignment | {path} | {digest}" in fake:
+                    continue
+                pure_path = bool(re.fullmatch(r"(?:/|\./|\.\./|~/|[A-Za-z]:[\\/])[^\s]*|[A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+)+", value))
+                env_ref = bool(re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", value))
+                if config and sensitive_key(key) and value.lower() not in {"null", "none", "false", "true"} and not pure_path and not env_ref:
+                    secret = True
+                words = re.split(r"[_-]+", value)
+                prose = len(words) >= 3 and all(w.isalpha() for w in words)
+                if (not binary and len(value) >= 24 and re.fullmatch(r"[A-Za-z0-9_+/=-]+", value)
+                        and not re.search(r"\d{4}-\d{2}-\d{2}", value) and not prose
+                        and not (key.lower() in {"integrity", "hash", "sha256", "sha512"}
+                                 and re.fullmatch(r"(?:sha(?:256|384|512)-[A-Za-z0-9+/=]+|[A-Fa-f0-9]{32,128})", value))
+                        and entropy(value) >= 4.3):
+                    secret = True
+        if secret:
+            yield lineno, "secrets"
+        if term_match(line, terms):
+            yield lineno, "denylist"
+        if history or binary or lockfile(path):
+            continue
+        identifiers = [m.group() for m in IBAN.finditer(line) if valid_iban(m.group())]
+        dates = [m.span() for m in re.finditer(r"\d{4}-\d{2}-\d{2}", line)]
+        spaced = list(re.finditer(r"\bRO[ \t]+(\d{2,5}(?:[ \t]+\d{2,5})+)", line, re.I))
+        for match in spaced:
+            value = re.sub(r"\s", "", match[1])
+            if valid_cui(value):
+                identifiers.append(value)
+        for match in NUMBER.finditer(line):
+            if any(a <= match.start() < b for a, b in dates + [m.span() for m in spaced]):
+                continue
+            value = match[2]
+            before, after = line[:match.start()], line[match.end():]
+            if re.search(r"\.$", before) or re.match(r"\.\d|\s*(?:%|px)\b", after, re.I) or re.match(r"\s*%", after):
+                continue
+            # Digits within arbitrary words are data only when introduced by CUI/RO.
+            column = next((i for i, cell in enumerate(cells)
+                           if cell.start() <= match.start() < cell.end()), None)
+            contextual = bool(match[1] or CONTEXT.search(before)
+                              or (column is not None and (column in table_columns
+                                  or any(i < column for i in labels))))
+            if before and (before[-1].isalnum() or before[-1] == "_") and not match[1]:
+                continue
+            if after and after[0].isalnum():
+                continue
+            if valid_cnp(value) or (valid_cui(value) and (contextual or 6 <= len(value) <= 10)):
+                identifiers.append(value)
+        if any(normalized(value) not in allowed for value in identifiers):
+            yield lineno, "structural"
+
+
+def config_terms(value: object, key: str = "") -> Iterator[str]:
+    if isinstance(value, bool):
+        return
+    if isinstance(value, dict):
+        for name, child in value.items():
+            if "foreign_entities" in key:
+                yield from config_terms(str(name), "foreign_entities")
+            yield from config_terms(child, str(name) if not key else key + "." + str(name))
+    elif isinstance(value, list):
+        for child in value:
+            yield from config_terms(child, key)
+    elif isinstance(value, (str, int)):
+        field = key.rsplit(".", 1)[-1].lower()
+        relevant = (field in {"name", "owner_name", "key", "bic", "aliases"}
+                    or "foreign_entities" in key
+                    or any(part in key.lower() for part in ("cui", "vat_id", "iban", "legal_name", "email", "sender", "recipient", "address")))
+        term = str(value).strip()
+        if not relevant or re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ].*)?", term):
+            return
+        candidates = [term]
+        if re.fullmatch(r"RO\d+", term, re.I):
+            candidates.append(term[2:])
+        if "@" in term:
+            domain = term.rsplit("@", 1)[1]
+            if domain.casefold().rstrip(".") not in PUBLIC_EMAIL_DOMAINS:
+                candidates.append(domain)
+        for candidate in candidates:
+            if len(candidate) >= 4 and candidate.casefold().rstrip(".") not in PUBLIC_EMAIL_DOMAINS:
+                yield candidate
+
+
+def blobs(root: Path, ref: str | None) -> Iterator[tuple[str, bytes]]:
+    if ref:
+        for entry in git(root, "ls-tree", "-rz", "--full-tree", ref).split(b"\0"):
+            if not entry:
+                continue
+            info, name = entry.split(b"\t", 1)
+            mode, kind, oid = info.split()
+            if kind != b"blob":
+                raise ValueError("unsupported tree entry")
+            yield os.fsdecode(name), git(root, "cat-file", "blob", oid.decode())
+    else:
+        for name in git(root, "ls-files", "-z", "--cached").split(b"\0"):
+            if not name:
+                continue
+            path = root / os.fsdecode(name)
+            # Never follow symlinks into private data outside the selected tree.
+            if path.is_symlink():
+                yield os.fsdecode(name), os.fsencode(os.readlink(path))
+            elif path.is_file() and path.resolve().is_relative_to(root.resolve()):
+                yield os.fsdecode(name), path.read_bytes()
+            else:
+                raise ValueError("tracked file missing or unsupported")
+
+
+def history_blobs(root: Path, max_blob: int = MAX_BLOB) -> Iterator[tuple[str, bytes]]:
+    # No path is printed in history mode. Object IDs frame batch requests safely.
+    objects: dict[bytes, str] = {}
+    for entry in git(root, "-c", "core.quotePath=false", "rev-list", "--objects", "--all").splitlines():
+        oid, _, name = entry.partition(b" ")
+        if re.fullmatch(rb"[a-f0-9]{40,64}", oid):
+            objects.setdefault(oid, os.fsdecode(name))
+    if not objects:
+        return
+    headers = git(root, "cat-file", "--batch-check", data=b"\n".join(objects) + b"\n").splitlines()
+    process = subprocess.Popen(["git", "-C", str(root), "cat-file", "--batch"],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL)
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        if len(headers) != len(objects):
+            raise ValueError("incomplete object metadata")
+        for (oid, path), metadata in zip(objects.items(), headers):
+            # Ask for type and size before requesting potentially enormous content.
+            header = metadata.split()
+            if len(header) != 3:
+                raise ValueError("missing object")
+            if header[1] != b"blob":
+                continue
+            size = int(header[2])
+            if size > max_blob:
+                raise ValueError("blob exceeds limit")
+            process.stdin.write(oid + b"\n")
+            process.stdin.flush()
+            if process.stdout.readline().split() != header:
+                raise ValueError("invalid blob header")
+            content = process.stdout.read(size)
+            if len(content) != size or process.stdout.read(1) != b"\n":
+                raise ValueError("incomplete blob")
+            yield path, content
+    finally:
+        process.stdin.close()
+        process.stdout.close()
+        if process.wait() != 0:
+            raise ValueError("cat-file failed")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("tree", nargs="?", type=Path, default=Path.cwd())
+    parser.add_argument("--ref", help="scan tracked blobs at this revision instead of working files")
+    listed = parser.add_mutually_exclusive_group(required=True)
+    listed.add_argument("--denylist", type=Path, help="external UTF-8 file, one literal term per line")
+    listed.add_argument("--no-denylist", action="store_true", help="explicitly omit the external list")
+    parser.add_argument("--config", type=Path, help="derive private terms in memory from this JSON config")
+    parser.add_argument("--history", action="store_true", help="count secrets/denylist across all reachable commits")
+    parser.add_argument("--summary", action="store_true", help="category counts only")
+    args = parser.parse_args()
+    counts: Counter[str] = Counter()
+    denylist_checked = False
+    try:
+        root = Path(os.fsdecode(git(args.tree, "rev-parse", "--show-toplevel")).strip())
+        denylist = args.denylist
+        terms: list[str] = []
+        if denylist:
+            if denylist.resolve().is_relative_to(root.resolve()):
+                raise ValueError("denylist must be outside repository")
+            terms.extend(line.strip() for line in denylist.read_text(encoding="utf-8-sig").splitlines() if line.strip() and not line.lstrip().startswith("#"))
+            denylist_checked = True
+        if args.config:
+            terms.extend(config_terms(json.loads(args.config.read_text(encoding="utf-8-sig"))))
+        terms = sorted({text_normalized(term) for term in terms if text_normalized(term)})
+        fake = fake_secrets()
+        approved_assets = assets()
+        allowed = synthetic_ids()
+        ignored = set(os.fsdecode(p) for p in git(root, "ls-files", "-ci", "--exclude-standard", "-z").split(b"\0") if p)
+        source = history_blobs(root) if args.history else blobs(root, args.ref)
+        for path, content in source:
+            hits = list(findings(path, content, terms, allowed.get(path, set()), args.history, fake))
+            if not args.history:
+                risky = Path(path).suffix.lower() in FORBIDDEN or is_binary(content)
+                approved = approved_assets.get(path) == blob_oid(content)
+                forbidden = risky and not approved
+                if forbidden or "tests_private" in Path(path).parts or path in ignored:
+                    hits.append((1, "files"))
+            for line, category in hits:
+                counts[category] += 1
+                if not args.history and not args.summary:
+                    # Never include source snippets. Redact terms/tokens in filenames too.
+                    safe = safe_path(path, terms)
+                    print(f"{ascii(safe)}:{line}: {category} [redacted]")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        counts["errors"] += 1
+        print("Scan incomplete: cannot read input or Git objects; check paths, JSON and repository access.", file=sys.stderr)
+    report = {category: counts[category] for category in CATEGORIES}
+    report["denylist_checked"] = denylist_checked
+    report["baseline_only"] = args.no_denylist
+    print(json.dumps(report, sort_keys=True))
+    return 2 if counts["errors"] else int(bool(sum(counts.values())))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

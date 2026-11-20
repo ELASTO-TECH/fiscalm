@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Local development only (docs/development.md). Never points at an installation's data or secrets.
+#   bin/dev                  the app with synthetic fixtures, no engine, nothing stored
+#   bin/dev engine           the app with a real engine in shadow; its data stays in .dev/engine between runs
+#   bin/dev engine --fresh   discards that data first
+set -euo pipefail
+umask 077
+cd "$(dirname "$0")/.."
+case "${1:-fixtures} ${2:-}" in
+'fixtures ' | 'engine ' | 'engine --fresh') mode=${1:-fixtures} ;;
+*) echo 'usage: bin/dev [fixtures | engine [--fresh]]' >&2; exit 2 ;;
+esac
+uv sync --locked
+# npm ci only when the lock file changed since the last install (bin/test.sh uses the same stamp).
+cmp -s app/package-lock.json app/node_modules/.fiscalm-lock ||
+  { (cd app && npm ci --no-audit --no-fund) && cp app/package-lock.json app/node_modules/.fiscalm-lock; }
+unset "${!FISCALM_@}" NEXT_PUBLIC_FIXTURES NEXT_PUBLIC_FISCALM_ENGINE
+set -m  # each background job gets its own process group, so cleanup stops its whole tree
+pids=()
+cleanup() {
+  trap - EXIT INT TERM
+  for pid in ${pids[@]+"${pids[@]}"}; do kill -- -"$pid" 2>/dev/null || true; done
+  wait 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+app_port=3000 app_url=http://localhost:3000
+if [[ "$mode" == engine ]]; then
+  command -v openssl >/dev/null || { echo 'Install prerequisite: openssl' >&2; exit 1; }
+  root=$PWD/.dev/engine
+  if [[ -L .dev || -L "$root" ]] || [[ -e "$root" && ! -f "$root/.fiscalm-dev" ]]; then
+    echo "$root was not created by bin/dev; move it away first." >&2; exit 1
+  fi
+  [[ "${2:-}" != --fresh ]] || rm -rf "$root"
+  # The marker is what bin/dev-engine.py and bin/dev-proxy.mjs require before they run.
+  [[ -d "$root" ]] || { mkdir -p "$root" && : > "$root/.fiscalm-dev"; }
+  export FISCALM_DEV_ROOT="$root" FISCALM_HOME="$root/home" FISCALM_SECRETS="$root/secrets"
+  export FISCALM_BACKUPS="$root/backups" FISCALM_TRUST_PROXY=1
+  export FISCALM_PUBLIC_URL=https://localhost:3000 NEXT_PUBLIC_FISCALM_ENGINE=1
+  app_port=3001 app_url=https://localhost:3000
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$root/key.pem" -out "$root/cert.pem" \
+    -days 1 -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1 >/dev/null 2>&1
+  nice -n 10 node bin/dev-proxy.mjs &
+  pids+=($!)
+  nice -n 10 env PYTHONUNBUFFERED=1 PYTHONPATH="$PWD/tests" uv run python bin/dev-engine.py &
+  pids+=($!)
+fi
+(cd app && exec nice -n 10 npm run dev -- --hostname 127.0.0.1 --port "$app_port") &
+pids+=($!)
+echo "fiscalm: $app_url (Ctrl-C stops development)"
+while sleep 1; do  # stop everything as soon as one part stops
+  for pid in "${pids[@]}"; do kill -0 "$pid" 2>/dev/null || { echo 'A development process stopped.' >&2; exit 1; }; done
+done

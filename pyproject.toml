@@ -1,0 +1,66 @@
+[project]
+name = "fiscalm"
+version = "0.1.0"
+description = "fiscalm's engine: e-Factura, invoices, bank reconciliation and the accountant's pack for Romanian companies"
+readme = "README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [
+    { name = "GeorgeFL7", email = "77577235+GeorgeFL7@users.noreply.github.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=46,<47",
+    "dnspython>=2.8,<3",
+    "fonttools>=4.61,<5",
+    "pikepdf>=10.13.0.post1",
+]
+
+[project.scripts]
+fiscalm = "fiscalm:main"
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.9"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "lxml>=6,<7",
+    "pillow>=12.3.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7",
+    "pytest-xdist>=3.8",
+    "ruff>=0.17.3,<0.18",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/fiscalm"]
+# Ignored by git, so checks leave the tree clean (bin/release verifies it).
+data_file = ".pytest_cache/coverage"
+relative_files = true
+
+[tool.coverage.report]
+skip_empty = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+include = ["src/**/*.py", "tests/**/*.py", "bin/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "SIM", "UP", "C90"]
+# Pytest discovers imported fixtures by name; review unused imports by hand.
+unfixable = ["F401"]
+# The formatter wraps code; long prose, SQL and fixture strings stay readable.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
+# Existing complexity debt only; remove entries as area refactors land. Do not expand.
+[tool.ruff.lint.per-file-ignores]
+"tests/test_cius_ro_official.py" = ["C901"]  # corpus_xml: keep independent case tweaks beside the shared issue/storno recipe.

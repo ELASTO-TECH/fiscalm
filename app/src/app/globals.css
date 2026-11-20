@@ -1,0 +1,120 @@
+/* fiscalm's stylesheet: Tailwind's Preflight reset, the design tokens and a few base rules, then Tailwind's utilities.
+   Components carry their look in utilities (Controls.tsx holds the shared ones); nothing here styles a class. */
+@layer theme, base, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css" layer(utilities);
+@theme inline {
+  --color-canvas: var(--bg);
+  --color-surface: var(--sf);
+  --color-inset: var(--sf2);
+  --color-ink: var(--ink);
+  --color-muted: var(--mu);
+  --color-line: var(--ln);
+  --color-brand: var(--brand);
+  --color-ok: var(--ok);
+  --color-wait: var(--wait);
+  --color-action: var(--acc);
+  --color-action-ink: var(--acc-ink);
+  --color-danger: var(--no);
+  --color-selected: var(--sel);
+  --color-focus: var(--focus);
+  --color-info: var(--info);
+  --color-money-in: var(--in);
+  --color-money-out: var(--out);
+  --color-chart-in: var(--chart-in);
+  --color-chart-out: var(--chart-out);
+  --color-hero: var(--hero);
+  --color-hero-ink: var(--hero-ink);
+  --color-hero-muted: var(--hero-mu);
+  --color-hero-in: var(--hero-in);
+  --color-hero-out: var(--hero-out);
+  --color-side: var(--side);
+  --color-dock: var(--dock);
+  --color-dock-line: var(--dock-ln);
+  --color-dock-selected: var(--dock-sel);
+  --shadow-card: var(--sh-card);
+  --shadow-pop: var(--sh-pop);
+}
+/* Contra's measured radii (PR #672 has the table): badges, controls (tabs, menu and nav rows), fields (inputs, selects,
+   the firm switch), cards (panels, menus), panels (list tables, sheets, dialogs). Buttons, chips and search fields are
+   full pills (rounded-full), as are dots, spinners and the phone's floating nav. test/contrast.test.ts keeps it so. */
+@theme {
+  --radius-badge: 3px;
+  --radius-control: 6px;
+  --radius-field: 8px;
+  --radius-card: 12px;
+  --radius-panel: 16px;
+}
+/* Calm motion: it shows where something comes from, never decorates. Entries ease out in 180-220ms; an exit is a shorter
+   fade (Controls.tsx `fadeOut`). Opacity and small transforms only, nothing loops or overshoots, and amounts never move.
+   Components use them through Controls.tsx `motion`, under `motion-safe:`, so reduced motion shows everything at once. */
+@theme {
+  --ease-calm: cubic-bezier(.2,.8,.2,1);
+  --animate-enter-fade: enter-fade 180ms var(--ease-calm);
+  --animate-enter-pop: enter-pop 180ms var(--ease-calm);
+  --animate-enter-rise: enter-rise 200ms var(--ease-calm);
+  --animate-enter-sheet: enter-sheet 220ms var(--ease-calm);
+  --animate-exit-fade: exit-fade 150ms var(--ease-calm) forwards;
+  --animate-exit-collapse: exit-collapse 180ms var(--ease-calm) forwards;
+  @keyframes enter-fade { from { opacity: 0 } }
+  @keyframes enter-pop { from { opacity: 0; transform: scale(.98) } }
+  @keyframes enter-rise { from { opacity: 0; transform: translateY(8px) } }
+  @keyframes enter-sheet { from { transform: translateY(100%) } }
+  @keyframes exit-fade { to { opacity: 0 } }
+  /* A row that leaves its list: from its own height (--h, measured as it left) to nothing, so the rows below close up. */
+  /* Its content fades out over the first half at its full height; the empty box then closes. */
+  @keyframes exit-collapse { from { height: var(--h); min-height: 0 } 50% { height: var(--h); min-height: 0; opacity: 0 } to { height: 0; min-height: 0; padding-block: 0; border-width: 0; opacity: 0 } }
+}
+@layer base {
+/* Mona Sans (OFL, public/fiscalm/fonts): the authors' variable woff2, unchanged, with its weight, width and optical size axes. */
+@font-face{font-family:"Mona Sans";font-weight:200 900;font-stretch:75% 125%;font-display:swap;src:url(/fiscalm/fonts/mona-sans-vf.woff2) format('woff2')}
+/* A company's colour (--co, text on it --co-ink) marks only the company: its mark, the switch, the palette swatches. An
+   element can carry its own data-pal (a mark in the switch's menu). One rule per palette a company can pick
+   (the engine's companies.PALETTES, app/src/lib/palette.ts). */
+:root,[data-pal=amber]{--co:#f47427;--co-ink:#14110c}[data-pal=green]{--co:#1fc486;--co-ink:#04140d}
+[data-pal=blue]{--co:#4c8ff7;--co-ink:#06101f}[data-pal=violet]{--co:#9d74f8;--co-ink:#120a1f}
+[data-pal=rose]{--co:#f2646f;--co-ink:#1d0a0c}[data-pal=slate]{--co:#9fb0c4;--co-ink:#0d1116}
+/* The tokens, dark first; the engine's manifest uses the dark --bg. Surfaces, lines and text are neutral greys, hairline borders
+   and no card shadows; colour carries meaning only. The primary button and focus (--acc, --focus) are the ink itself, so dark is
+   light inverted; a selection (--sel) is grey; --brand is fiscalm's teal, the app icon's (public/fiscalm/icon.svg), only on
+   its mark and the current navigation item's icon; --side is the desktop navigation column. The states
+   have their own hues: --ok done or proved, --wait on its way or soon due, --no late or refused, --info only informative
+   (from history, a draft). Money in and out (--in, --out) have theirs too, apart from the companies' and the states'
+   colours; their marks in charts (--chart-in, --chart-out: columns, legend keys, a balance line) are brighter steps that
+   pass colour-blind separation in both modes, never used for text. --hero carries a page's key numbers (Acasă's money): Contra's bordered balance card, so it takes the surface's colours. Cards rest on the page with --sh-card; sheets and menus float with --sh-pop.
+   The phone's floating nav (--dock) is raised off the page, with an edge (--dock-ln) and a selected tab (--dock-sel) seen over
+   any content. test/contrast.test.ts checks every pair that carries text. */
+:root{color-scheme:dark light;--bg:#0f1112;--sf:#151819;--sf2:#1c2022;--side:#121415;--ink:#eceef0;--mu:#9ba2a7;--ln:#272b2e;--acc:#eceef0;--acc-ink:#0f1112;--brand:#6cc3b2;
+--ok:#5bc98f;--wait:#e9b955;--no:#f7848d;--info:#8db7f0;--sel:#212528;--focus:#eceef0;--chip:var(--sf2);--in:#5ccab4;--out:#ef9e78;--chart-in:#36a892;--chart-out:#dc7424;
+--hero:var(--sf);--hero-ink:var(--ink);--hero-mu:var(--mu);--hero-in:var(--in);--hero-out:var(--out);
+--sh-card:none;--sh-pop:0 16px 40px -12px rgb(0 0 0/.7),0 0 0 1px rgb(255 255 255/.06);
+--dock:#2b3034;--dock-ln:#5e6266;--dock-sel:#565d63}
+@media(prefers-color-scheme:light){:root{--bg:#fff;--sf:#fff;--sf2:#f4f5f6;--side:#f9fafa;--ink:#16191d;--mu:#5c636b;--ln:#e5e7ea;--acc:#1b1f25;--acc-ink:#fff;--brand:#0d7763;
+--ok:#12774a;--wait:#895900;--no:#b01e35;--info:#2257c2;--sel:#eff1f3;--focus:#1b1f25;--chip:color-mix(in srgb,var(--ink) 6%,transparent);--in:#0a7765;--out:#b0431f;--chart-in:#11937c;--chart-out:#ea7a28;
+--hero:var(--sf);--hero-ink:var(--ink);--hero-mu:var(--mu);--hero-in:var(--in);--hero-out:var(--out);
+--sh-card:none;--sh-pop:0 16px 40px -12px rgb(20 24 28/.22),0 0 0 1px rgb(20 24 28/.06);
+--dock:#fff;--dock-ln:#8f949a;--dock-sel:#dfe2e6}}
+/* The phone's tab bar (App.tsx TabBar) is --tabbar tall; a focused element scrolls clear of it. */
+:root{--tabbar:64px}
+/* How long a navigation's marker takes to slide to the current item (Controls.tsx `markerStyle`). */
+:root{--motion-slide:200ms}
+@media(max-width:1099.98px){html{scroll-padding-bottom:calc(var(--tabbar) + 16px + env(safe-area-inset-bottom))}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html{background:var(--bg);scrollbar-gutter:stable}
+body{margin:0;min-height:100vh;color:var(--ink);font:400 13px/20px "Mona Sans",-apple-system,system-ui,sans-serif;-webkit-font-smoothing:antialiased;background:var(--bg)}
+/* Its own rule: the CSS minifier puts the font shorthand last, which would reset it to normal figures. */
+:root body{font-feature-settings:"tnum"}
+/* An icon's size until its component sets one. */
+svg{width:22px;height:22px;flex:none}
+a{color:inherit}
+::selection{background:var(--acc);color:var(--acc-ink)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+/* A page's h1 takes focus when the page changes (App.tsx); it is not a control, so it shows no ring. */
+h1[tabindex="-1"]:focus{outline:none}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+/* A modal keeps the page in place, including wheel input over its backdrop. Identity revalidation hides the private sheets,
+   portalled ones too, and leaves its page scrollable. */
+html:has(.sheet):not(:has(.auth-checking)){overflow:hidden}
+body:has(.auth-checking) :is(.sheet,.scrim,[data-leaving]){display:none}
+}

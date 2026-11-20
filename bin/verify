@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Agent verification (.claude/skills/verify): a disposable fiscalm for this worktree only, in shadow, offline,
+# on its own ports, with a clean environment. Never touches an installation, the shared Sandbox or bin/dev's data.
+#   bin/verify              fast checks, fresh stack, safety report, API smoke, browser sign-in and screenshots
+#   bin/verify up | safety | smoke | browser | urls | totp | stop
+set -euo pipefail
+umask 077
+cd "$(dirname "$0")/.."
+repo=$PWD root=$PWD/.dev/verify
+base=$((20000 + $(printf %s "$repo" | cksum | cut -d' ' -f1) % 3333 * 3)) # one block of 3 ports per worktree
+pub=$base app=$((base + 1)) eng=$((base + 2)) url=https://localhost:$base
+session=verify-$(printf %s "$repo" | sha256sum | cut -c1-16) # browser session: unique per worktree, unlike ports
+say() { echo "[verify] $*"; }
+# Programs the engine may start that reach the network (AI CLIs, rclone) resolve to refusing stubs in $root/offline;
+# its PATH holds only those, the venv and the system directories. Node's directory is added for Node processes only.
+path=$root/offline:$repo/.venv/bin:/usr/bin:/bin
+node_path=$(dirname "$(command -v node)"):$path
+# Nothing from the caller's shell (tokens, FISCALM_* of another install); HOME is disposable, AI is disabled.
+clean=(
+  env -i PATH="$path" HOME="$root/user" LANG=C.UTF-8 TERM=dumb PYTHONUNBUFFERED=1 NEXT_TELEMETRY_DISABLED=1 \
+    UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}" npm_config_cache="$HOME/.npm" FISCALM_CLAUDE=false \
+    FISCALM_DEV_ROOT="$root" FISCALM_HOME="$root/home" FISCALM_SECRETS="$root/secrets" FISCALM_BACKUPS="$root/backups" \
+    FISCALM_PUBLIC_URL="$url" FISCALM_TRUST_PROXY=1 FISCALM_ANAF_ENV=test FISCALM_DEV_OFFLINE=1 NEXT_PUBLIC_FISCALM_ENGINE=1 \
+    FISCALM_DEV_PORT=$pub FISCALM_DEV_APP_PORT=$app FISCALM_DEV_ENGINE_PORT=$eng PYTHONPATH="$repo/tests"
+)
+py() { "${clean[@]}" "$repo/.venv/bin/python" "$repo/bin/verify_smoke.py" "$@"; }
+mine() { # every process of this worktree's stack, orphans included: all of them carry its FISCALM_DEV_ROOT
+  grep -lsxzF "FISCALM_DEV_ROOT=$root" /proc/[0-9]*/environ | cut -d/ -f3 || true
+}
+guard() { # everything verify writes or deletes stays in this worktree's own .dev/verify
+  if [[ -L .dev || -L "$root" || ( -e "$root" && ! -f "$root/.fiscalm-dev" ) || -L "$root/.fiscalm-dev" ]]; then
+    say "$root is a symlink or not made by bin/verify; refusing." >&2
+    exit 1
+  fi
+}
+stop() {
+  guard
+  local pids
+  pids=$(mine)
+  if [[ -n "$pids" ]]; then # wait until all are gone, so nothing writes into .dev/verify afterwards
+    kill $pids 2>/dev/null || true
+    for _ in $(seq 40); do [[ -z "$(mine)" ]] && break; sleep 0.25; done
+    pids=$(mine)
+    if [[ -n "$pids" ]]; then kill -KILL $pids 2>/dev/null || true; sleep 0.5; fi
+    if [[ -n "$(mine)" ]]; then say "processes of $root survive: $(mine)" >&2; exit 1; fi
+  fi
+  rm -f "$root"/*.pid
+  if command -v agent-browser >/dev/null; then agent-browser --session "$session" close >/dev/null 2>&1 || true; fi
+}
+start() { # name, then the command; each part gets its own process group and log
+  (cd "${dir:-$repo}" && exec "${clean[@]}" setsid nice -n 10 "$@" >"$root/logs/$name.log" 2>&1 </dev/null) &
+  echo $! >"$root/$name.pid"
+}
+wait_for() { # path, seconds
+  for _ in $(seq "$(($2 * 4))"); do
+    [[ "$(curl -sk -o /dev/null -w '%{http_code}' "$url$1")" == 200 ]] && return 0
+    sleep 0.25
+  done
+  return 1
+}
+up() {
+  stop
+  rm -rf "$root" && mkdir -p "$root/user" "$root/logs" "$root/shots" "$root/offline" && : >"$root/.fiscalm-dev"
+  for exe in claude codex rclone; do
+    printf '#!/bin/sh\necho "bin/verify runs offline: %s refused" >&2\nexit 1\n' "$exe" >"$root/offline/$exe"
+    chmod 700 "$root/offline/$exe"
+  done
+  for p in $pub $app $eng; do
+    if (: <"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then say "port $p is taken: stop what uses it" >&2; exit 1; fi
+  done
+  uv sync --locked -q
+  cmp -s app/package-lock.json app/node_modules/.fiscalm-lock ||
+    { (cd app && npm ci --no-audit --no-fund -s) && cp app/package-lock.json app/node_modules/.fiscalm-lock; }
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$root/key.pem" -out "$root/cert.pem" -days 1 \
+    -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1 >/dev/null 2>&1
+  py safety
+  name=engine start "$repo/.venv/bin/python" bin/dev-engine.py
+  name=proxy start env PATH="$node_path" node bin/dev-proxy.mjs
+  wait_for /healthz 30 || { say "engine not up; see $root/logs/engine.log" >&2; exit 1; }
+  # Next.js 16.4 stops its first run in a new checkout with an upgrade notice; the next run starts.
+  for attempt in 1 2 3; do
+    dir=$repo/app name=next start env PATH="$node_path" npm run dev -- --hostname 127.0.0.1 --port "$app"
+    wait_for / 120 && break
+    [[ $attempt == 3 ]] && { say "app not up; see $root/logs/next.log" >&2; exit 1; }
+    kill -- -"$(<"$root/next.pid")" 2>/dev/null || true
+  done
+  say "up: $url (engine 127.0.0.1:$eng, Next 127.0.0.1:$app)"
+}
+browser() { # sign in through the real form, then screenshot the dashboard at phone and desktop width
+  command -v agent-browser >/dev/null || { say "agent-browser missing: browser flow NOT verified" >&2; return 1; }
+  local ab=(agent-browser --session "$session" --ignore-https-errors) out=$root/shots
+  "${ab[@]}" set viewport 390 844 >/dev/null
+  "${ab[@]}" open "$url/" >/dev/null
+  "${ab[@]}" wait --text 'Folosește parola și codul' >/dev/null
+  "${ab[@]}" find text 'Folosește parola și codul' click >/dev/null # passkey is the default method
+  "${ab[@]}" wait 'input[autocomplete="username"]' >/dev/null
+  "${ab[@]}" fill 'input[autocomplete="username"]' admin >/dev/null
+  "${ab[@]}" fill 'input[autocomplete="current-password"]' "$(py password)" >/dev/null
+  "${ab[@]}" click 'button[type="submit"]' >/dev/null
+  "${ab[@]}" wait 'input[autocomplete="one-time-code"]' >/dev/null
+  "${ab[@]}" fill 'input[autocomplete="one-time-code"]' "$(py totp)" >/dev/null
+  "${ab[@]}" click 'button[type="submit"]' >/dev/null
+  "${ab[@]}" wait --text 'Dosarul pe octombrie' >/dev/null
+  "${ab[@]}" screenshot "$out/dashboard-390.png" >/dev/null
+  "${ab[@]}" set viewport 1280 800 >/dev/null
+  "${ab[@]}" wait 1000 >/dev/null
+  "${ab[@]}" screenshot "$out/dashboard-1280.png" >/dev/null
+  errors=$("${ab[@]}" errors)
+  [[ -z "${errors//[[:space:]]/}" ]] || { say "page errors: $errors" >&2; return 1; }
+  say "PASS browser: signed in with password + TOTP, dashboard shows the imported statement's October task, no page errors"
+  say "screenshots: $out/dashboard-390.png $out/dashboard-1280.png"
+}
+case "${1:-run}" in
+run)
+  t0=$SECONDS
+  bin/test.sh quick
+  t1=$SECONDS
+  up # called alone, never in && or ||, so set -e stops on any failure inside it
+  t2=$SECONDS
+  py smoke
+  browser
+  say "timing: fast checks $((t1 - t0))s, boot $((t2 - t1))s, drive $((SECONDS - t2))s, total $((SECONDS - t0))s"
+  say "left running for your own flow: $url (bin/verify stop when done)"
+  ;;
+up | browser | stop) "$1" ;;
+safety | smoke | totp) py "$1" ;;
+urls) echo "app $url  engine http://127.0.0.1:$eng  next http://127.0.0.1:$app  browser session $session  data $root" ;;
+*) echo 'usage: bin/verify [run | up | safety | smoke | browser | urls | totp | stop]' >&2; exit 2 ;;
+esac

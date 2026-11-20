@@ -1,0 +1,46 @@
+x-runtime: &runtime
+  build: .
+  image: ${FISCALM_IMAGE:-fiscalm:local}
+  volumes:
+    - data:/data
+    - secrets:/secrets
+    - ai-cli-home:/home/fiscalm
+  environment:
+    FISCALM_BACKUPS: /data/backups
+    FISCALM_HOST: 0.0.0.0 # explicit container-only bind; host publishing remains loopback
+    FISCALM_TRUST_PROXY: ${FISCALM_TRUST_PROXY:-0}
+    FISCALM_PUBLIC_URL: ${FISCALM_PUBLIC_URL:-} # the HTTPS address browsers use; ANAF returns to <it>/anaf/callback
+    FISCALM_TICK_INTERVAL: ${FISCALM_TICK_INTERVAL:-21600}
+  init: true
+  stop_grace_period: 60s
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+services:
+  web:
+    <<: *runtime
+    ports:
+      - '127.0.0.1:${FISCALM_PORT:-8790}:8790'
+  backup:
+    <<: *runtime
+    volumes:
+      - data:/data
+      - secrets:/secrets
+    command: ['scheduler', '--backup']
+    environment:
+      FISCALM_BACKUPS: /data/backups
+      FISCALM_BACKUP_INTERVAL: ${FISCALM_BACKUP_INTERVAL:-86400}
+      FISCALM_BACKUP_KEEP: ${FISCALM_BACKUP_KEEP:-7}
+    healthcheck:
+      disable: true
+  scheduler:
+    <<: *runtime
+    command: ['scheduler']
+    healthcheck:
+      disable: true
+volumes:
+  data:
+  secrets:
+  ai-cli-home:

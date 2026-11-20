@@ -1,0 +1,52 @@
+services:
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: ${E2E_PASSWORD}
+      MARIADB_DATABASE: prestashop
+      MARIADB_USER: prestashop
+      MARIADB_PASSWORD: ${E2E_PASSWORD}
+    tmpfs: [/var/lib/mysql]
+  shop:
+    build:
+      context: .
+      args:
+        PS_VERSION: ${PS_VERSION:-8.2.1}
+    environment:
+      DB_SERVER: db
+      DB_NAME: prestashop
+      DB_USER: prestashop
+      DB_PASSWD: ${E2E_PASSWORD}
+      PS_INSTALL_AUTO: '1'
+      PS_DOMAIN: localhost
+      PS_FOLDER_ADMIN: admin-dev
+      PS_FOLDER_INSTALL: install-test
+      ADMIN_MAIL: admin@example.invalid
+      ADMIN_PASSWD: ${E2E_PASSWORD}
+      PS_LANGUAGE: en
+      PS_COUNTRY: ro
+      PS_ENABLE_SSL: '0'
+      FISCALM_E2E: '1'
+    volumes:
+      - ../fiscalm:/var/www/html/modules/fiscalm:ro
+      - .:/tests:ro
+    depends_on: [db, mock, fiscalm]
+  mock:
+    image: python:3.11-slim
+    command: [python, /tests/mock.py]
+    volumes: [".:/tests:ro"]
+    environment:
+      E2E_TOKEN: ${E2E_TOKEN}
+  fiscalm:
+    build:
+      context: ../../..
+      dockerfile: integrations/prestashop/tests/fiscalm.Dockerfile
+    entrypoint: [sh, -c]
+    command: ["fiscalm init --company-key NORD --cui 12345674 --legal-name 'Atelier Nord SRL' --iban RO35TEST0000000000000000 >/dev/null && exec fiscalm serve --host 0.0.0.0"]
+    environment:
+      FISCALM_HOME: /data
+      FISCALM_SECRETS: /secrets
+      FISCALM_PUBLIC_URL: https://fiscalm:8790
+      FISCALM_GMAIL_SECRET: /secrets/gmail
+    volumes: [".:/tests:ro"]
+    tmpfs: ["/data:uid=10001,gid=10001", "/secrets:uid=10001,gid=10001"]

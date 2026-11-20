@@ -1,0 +1,59 @@
+name: CLA
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+permissions: {}
+concurrency:
+  group: cla-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  cla:
+    if: github.repository == 'ELASTO-TECH/fiscalm' && (github.event_name == 'pull_request_target' || github.event.issue.pull_request)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+      actions: write
+    steps:
+      # Never check out or execute PR code with this privileged token.
+      - id: ro
+        continue-on-error: true
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: signatures/cla-v1.json
+          path-to-document: https://github.com/ELASTO-TECH/fiscalm/blob/main/CLA.md
+          branch: cla-signatures
+          # Name allowlists can be spoofed by git authors. At publication, seed the
+          # signature store with verified numeric IDs for maintainer/bot exemptions.
+          allowlist: '<none>'
+          custom-pr-sign-comment: Am citit CLA-ul fiscalm și îl semnez.
+          custom-notsigned-prcomment: |
+            Citește / Read [CLA](https://github.com/ELASTO-TECH/fiscalm/blob/main/CLA.md), apoi comentează / then comment:
+            > Am citit CLA-ul fiscalm și îl semnez.
+
+            or:
+            > I have read the fiscalm CLA and I hereby sign it.
+          lock-pullrequest-aftermerge: false
+      - name: Check English signatures too
+        if: steps.ro.outcome == 'failure'
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: signatures/cla-v1.json
+          path-to-document: https://github.com/ELASTO-TECH/fiscalm/blob/main/CLA.md
+          branch: cla-signatures
+          allowlist: '<none>'
+          custom-pr-sign-comment: I have read the fiscalm CLA and I hereby sign it.
+          custom-notsigned-prcomment: |
+            Citește / Read [CLA](https://github.com/ELASTO-TECH/fiscalm/blob/main/CLA.md), apoi comentează / then comment:
+            > Am citit CLA-ul fiscalm și îl semnez.
+
+            or:
+            > I have read the fiscalm CLA and I hereby sign it.
+          lock-pullrequest-aftermerge: false

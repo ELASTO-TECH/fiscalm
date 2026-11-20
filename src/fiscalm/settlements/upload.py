@@ -1,0 +1,428 @@
+"""Explicit partner report formats and bounded local imports beside bank statements."""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import io
+import json
+import re
+import sqlite3
+import unicodedata
+from datetime import date, timedelta
+
+from fiscalm import companies
+from fiscalm.bank import statements
+from fiscalm.identity import partner_id
+from fiscalm.ledger import Ledger
+from fiscalm.settlements import engine as settlements
+from fiscalm.settlements.reports import LIMIT, SOURCES, STRIPE, ReportError, parse, table
+from fiscalm.validate import iban_valid
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+TABLES = {"text/csv": "csv", "application/vnd.ms-excel": "csv", XLSX: "xlsx"}
+FIELDS = (
+    "reference",
+    "order",
+    "awb",
+    "gross",
+    "fee",
+    "net",
+    "currency",
+    "batch",
+    "category",
+    "company_cui",
+)
+# Header names that pre-fill a column choice, compared without case, diacritics or punctuation. A guess only fills
+# the form; the person still submits it, and a name two columns share fills nothing.
+GUESS = {
+    "reference": ("factura", "nr factura", "numar factura", "serie factura", "invoice", "invoice number"),
+    "order": ("comanda", "nr comanda", "numar comanda", "id comanda", "order", "order id", "order number"),
+    "awb": ("awb", "nr awb", "numar awb", "awb number"),
+    "gross": ("ramburs", "valoare ramburs", "suma ramburs", "suma incasata", "incasat", "gross"),
+    "fee": ("comision", "comision ramburs", "taxa ramburs", "fee"),
+    "net": ("net", "suma neta", "valoare neta", "net amount"),
+    "currency": ("moneda", "valuta", "currency"),
+    "batch": ("referinta decontare", "nr decont", "numar decont", "borderou", "nr borderou", "payout id"),
+}
+DATE_COLUMNS = ("data plata", "data platii", "data decont", "data decontarii", "data", "payout date", "date")
+DELIMITERS = (",", ";", "\t")
+PREVIEW_ROWS, PREVIEW_CELL = 5, 80
+
+ASK = "Format nou: alege cine a trimis raportul și verifică coloanele."
+PICK_PAYER = "Verifică partenerul și data, apoi încarcă raportul."
+NOT_THIS_PAYER = "Partenerul ales nu se potrivește cu acest raport. Încarcă din nou fișierul."
+CONFLICT = "Un alt raport pentru aceeași plată este deja încărcat. Verifică decontarea în Sarcini."
+TO_CHECK = "Raportul de decontare a fost încărcat, dar nu se potrivește încă. Vezi decontarea în Sarcini."
+COLLECTED = "Raportul de decontare a fost încărcat. Facturile din el sunt încasate."
+TO_CONFIRM = "Raportul de decontare a fost încărcat. Confirmă decontarea în Sarcini."
+WAITING = "Raportul de decontare a fost încărcat. Se asociază cu încasarea când plata apare în extras."
+DUPLICATE = "Raportul de decontare era deja încărcat."
+NOT_KNOWN = "Fișierul nu este un extras de cont sau un raport de decontare pe care fiscalm îl poate citi."
+TOO_BIG = "Fișierul este prea mare pentru un raport de decontare."
+BAD_DATE = "Alege data raportului: ziua plății, cel mult azi și nu mai veche de un an."
+BAD_PAYER = "Descrierea partenerului nu este completă: alege cine a trimis raportul, suma, comisionul și numărul facturii, al comenzii sau AWB-ul."
+WRONG_COLUMNS = "Coloanele alese nu sunt în acest fișier. Încarcă din nou fișierul și alege coloanele lui."
+NOT_READ = "Raportul nu a putut fi citit: {why}"
+# What a refused report says, by what the parser said; anything else reads as the generic message (no data echoed).
+WHY = (
+    ("company CUI", "coloana CUI conține o valoare care nu corespunde firmei alese; nu s-a importat nicio linie"),
+    ("refunds, disputes", "are rambursări sau ajustări, care se verifică manual"),
+    ("Exactly one payout", "trebuie să cuprindă o singură plată"),
+    ("Mixed currencies", "are mai multe monede"),
+    ("Invalid amount", "o sumă nu este scrisă ca 123.45"),
+    ("invalid gross/fee/net", "o linie are suma, comisionul sau suma netă greșite"),
+    ("missing reference", "o linie nu are factura, comanda sau AWB-ul"),
+    ("wrong column count", "o linie are alt număr de coloane decât antetul"),
+    ("Missing or duplicate headers", "antetul are coloane lipsă sau repetate"),
+    ("Formula", "are formule; exportă valorile"),
+    ("Exactly one worksheet", "trebuie să aibă o singură foaie"),
+    ("Invalid report dimensions", "este gol sau are prea multe linii sau coloane"),
+)
+
+
+class Refused(Exception):
+    def __init__(self, status: int, message: str, extra: dict | None = None):
+        super().__init__(message)
+        self.status, self.message, self.extra = status, message, extra or {}
+
+
+def _format(data: bytes, content_type: str) -> tuple[str, str, list[list[str]]]:
+    """(format, delimiter, rows) of a table, refused whole when unreadable. A CSV's delimiter is the one of `,` `;` tab
+    that splits its header into the most columns; a tie between two means it can't be told and is refused."""
+    if len(data) > LIMIT:
+        raise Refused(413, TOO_BIG)
+    kind = TABLES.get((content_type or "").split(";")[0].strip().lower())
+    if kind is None:
+        raise Refused(415, NOT_KNOWN)
+    if kind == "xlsx":
+        delimiter = ","
+    else:
+        try:
+            first = data.decode("utf-8-sig").partition("\n")[0].rstrip("\r")
+            counts = {d: len(next(csv.reader(io.StringIO(first), delimiter=d), [])) for d in DELIMITERS}
+        except (UnicodeError, csv.Error):
+            raise Refused(422, NOT_KNOWN) from None
+        best = max(counts.values())
+        if best < 2 or list(counts.values()).count(best) > 1:
+            raise Refused(422, NOT_KNOWN)
+        delimiter = next(d for d, n in counts.items() if n == best)
+    try:
+        rows = table(data, kind, delimiter)
+    except ReportError:
+        raise Refused(422, NOT_KNOWN) from None
+    return kind, delimiter, rows
+
+
+def _signature(kind: str, delimiter: str, header: list[str]) -> str:
+    return hashlib.sha256(json.dumps([kind, delimiter, header], ensure_ascii=False).encode()).hexdigest()
+
+
+def _partner(raw: object, header: list[str]) -> dict:
+    """Explicit partner identity and column meanings, never inferred from attachment text."""
+    if not isinstance(raw, dict) or set(raw) - {
+        "source",
+        "name",
+        "cui",
+        "iban",
+        "currency",
+        "mapping",
+        "courier",
+    }:
+        raise Refused(400, BAD_PAYER)
+    source, name = raw.get("source"), raw.get("name")
+    cui, iban = raw.get("cui", "") or "", (raw.get("iban", "") or "")
+    currency = raw.get("currency", "RON") or "RON"
+    courier = raw.get("courier", "")
+    if not isinstance(courier, str) or len(courier) > 100 or any(ord(c) < 32 for c in courier):
+        raise Refused(400, BAD_PAYER)
+    if (
+        source not in SOURCES
+        or not isinstance(name, str)
+        or not 1 <= len(name.strip()) <= 200
+        or not all(isinstance(v, str) for v in (cui, iban, currency))
+        or (cui and not re.fullmatch(r"\d{6,12}", cui.strip().upper().removeprefix("RO")))
+        or not re.fullmatch(r"[A-Z]{3}", currency)
+    ):
+        raise Refused(400, BAD_PAYER)
+    iban = iban.replace(" ", "").upper()
+    if iban and not iban_valid(iban):
+        raise Refused(400, BAD_PAYER)
+    mapping = raw.get("mapping")
+    if (
+        not isinstance(mapping, dict)
+        or set(mapping) - set(FIELDS)
+        or not all(isinstance(v, str) and v for v in mapping.values())
+        or not {"gross", "fee"} <= mapping.keys()
+        or not {"reference", "order", "awb"} & mapping.keys()
+    ):
+        raise Refused(400, BAD_PAYER)
+    if not set(mapping.values()) <= set(header):
+        raise Refused(400, WRONG_COLUMNS)
+    cui = cui.strip().upper().removeprefix("RO")
+    if not partner_id("", cui or None, name.strip()):
+        raise Refused(400, BAD_PAYER)
+    return {
+        "source": source,
+        "name": name.strip(),
+        "cui": cui,
+        "iban": iban,
+        "currency": currency,
+        "mapping": dict(mapping),
+        "courier": courier,
+        "partner": partner_id("", cui or None, name.strip()),
+    }
+
+
+def _report_date(value: str, today: date) -> str:
+    try:
+        d = date.fromisoformat(value) if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) else None
+    except ValueError:
+        d = None
+    if d is None or d > today or d < today - timedelta(days=366):
+        raise Refused(400, BAD_DATE)
+    return d.isoformat()
+
+
+def _plain(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().casefold()
+    return " ".join(re.split(r"[^a-z0-9]+", text)).strip()
+
+
+def _guess(header: list[str], orders: bool) -> dict[str, str]:
+    """Columns whose name says what they hold, one column per field; AWB and order only where shop orders exist.
+    A header with every Stripe payout column reads as Stripe's own mapping."""
+    if set(STRIPE.values()) <= set(header):
+        return dict(STRIPE)
+    guess = {}
+    for field, names in GUESS.items():
+        found = [c for c in header if _plain(c) in names]
+        if len(found) == 1 and (orders or field not in ("awb", "order")):
+            guess[field] = found[0]
+    return guess
+
+
+def _day(value: str) -> date | None:
+    m = re.fullmatch(
+        r"(?:(\d{4})-(\d{2})-(\d{2})|(\d{1,2})[./](\d{1,2})[./](\d{4}))(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?", value.strip()
+    )
+    try:
+        return m and date(*map(int, m.group(1, 2, 3) if m[1] else m.group(6, 5, 4)))
+    except ValueError:
+        return None
+
+
+def _guess_date(rows: list[list[str]]) -> str:
+    """The payment day, when one date column names the same day on every line; otherwise the person picks it."""
+    found = [n for n, c in enumerate(rows[0]) if _plain(c) in DATE_COLUMNS]
+    days = {_day(r[found[0]]) if len(r) > found[0] else None for r in rows[1:]} if len(found) == 1 else set()
+    return next(iter(days)).isoformat() if len(days) == 1 and None not in days else ""
+
+
+def _guess_currency(rows: list[list[str]], column: str | None) -> str:
+    """The report's currency, when its currency column names the same three-letter code on every line."""
+    if column is None:
+        return ""
+    n = rows[0].index(column)
+    codes = {r[n].strip().upper() if len(r) > n else "" for r in rows[1:]}
+    code = next(iter(codes)) if len(codes) == 1 else ""
+    return code if re.fullmatch(r"[A-Z]{3}", code) else ""
+
+
+def _context(L: Ledger, company: str) -> tuple[bool, list[dict], list[str]]:
+    """What a new format's form starts from: whether the firm has shop orders, the payers it saved for any header
+    (one per payer: source, name, CUI, currency, courier) and the currencies of its open issued invoices and payers."""
+    orders = bool(
+        L.db.execute(
+            "SELECT 1 FROM commerce_orders WHERE company=? AND status!='cancelled' LIMIT 1", (company,)
+        ).fetchone()
+    )
+    saved = {
+        r["partner"]: json.loads(r["data"])
+        for r in L.db.execute(
+            "SELECT partner,data FROM partner_settlement_formats WHERE company=? ORDER BY rowid", (company,)
+        )
+    }
+    payers = [{k: d.get(k, "") for k in ("source", "name", "cui", "currency", "courier")} for d in saved.values()]
+    issued = L.db.execute(
+        "SELECT DISTINCT upper(currency) FROM issued WHERE company=? AND status='open' AND currency IS NOT NULL",
+        (company,),
+    )
+    found = {c for (c,) in issued if re.fullmatch(r"[A-Z]{3}", c)} | {p["currency"] for p in payers if p["currency"]}
+    return orders, payers, ["RON", *sorted(found - {"RON"})]
+
+
+def _preview(rows: list[list[str]], known: list[dict], context: tuple[bool, list[dict], list[str]]) -> dict:
+    """The header and the first rows as text for the column picker: untrusted, used only to pre-fill the form.
+    Column names stay whole (they are what a description names); only the sample cells are shortened."""
+
+    def cut(v):
+        return v if len(v) <= PREVIEW_CELL else v[: PREVIEW_CELL - 1] + "…"
+
+    orders, payers, currencies = context
+    guess = _guess(rows[0], orders)
+    return {
+        "ask": "settlement_partner",
+        "columns": list(rows[0]),
+        "rows": [[cut(c) for c in r] for r in rows[1 : 1 + PREVIEW_ROWS]],
+        "sources": list(SOURCES),
+        "guess": guess,
+        "source": "stripe" if guess == STRIPE else "",
+        "currency": _guess_currency(rows, guess.get("currency")),
+        "currencies": currencies,
+        "payers": payers,
+        "date": _guess_date(rows),
+        "orders": orders,
+        "payer": known[0]["partner"] if len(known) == 1 else "",
+        "known": [
+            {
+                "id": k["partner"],
+                "name": k["name"],
+                "source": k["source"],
+                "company_cui_column": k["mapping"].get("company_cui", ""),
+            }
+            for k in known
+        ],
+    }
+
+
+def _why(e: ReportError) -> str:
+    text = str(e)
+    return NOT_READ.format(why=next((m for k, m in WHY if k in text), "verifică fișierul și coloanele alese"))
+
+
+def accept_report(
+    L: Ledger,
+    company: str,
+    data: bytes,
+    content_type: str,
+    *,
+    report_date: str = "",
+    description: object = None,
+    partner: str = "",
+    today: date | None = None,
+) -> dict:
+    """Store one uploaded settlement report for `company` and match it. Who sent it is always said by the request:
+    `partner` selects an exact saved format; `description` defines a new one. Shared headers never select a partner."""
+    companies.get(company, L=L)
+    today = today or date.today()
+    kind, delimiter, rows = _format(data, content_type)
+    header = rows[0]
+    sig = _signature(kind, delimiter, header)
+    described = _choose(L, company, sig, rows, partner, description)
+    when = _report_date(report_date, today)
+    spec, lines = _report_spec(data, kind, delimiter, described, when)
+    stored = _store(L, company, data, spec, described, sig)
+    if isinstance(stored, dict):
+        return stored
+    rid = stored
+    # Only this company's pending reports, against its own stored statements read through the checked evidence
+    # reader: nothing else is matched by an upload.
+    settlements.match_statement(L, statements.Statement(company, None, None, []))
+    row = L.db.execute("SELECT status,error FROM settlement_reports WHERE id=?", (rid,)).fetchone()
+    message = (
+        COLLECTED
+        if row["status"] == "collected"
+        else TO_CONFIRM
+        if row["error"] in ("confirmation_required", "statement_confirmation_required")
+        else WAITING
+        if row["error"] in (None, "credit_missing_or_ambiguous")
+        else TO_CHECK
+    )
+    return {
+        "status": "added",
+        "kind": "settlement",
+        "id": rid,
+        "lines": len(lines),
+        "message": message,
+    }
+
+
+def _store(L: Ledger, company: str, data: bytes, spec: dict, described: dict, sig: str) -> str | dict:
+    try:
+        with L.tx() as db:  # the payer is saved with its first report or not at all
+            db.execute(
+                "INSERT INTO partner_settlement_formats VALUES(?,?,?,?) "
+                "ON CONFLICT(company,partner,signature) DO UPDATE SET data=excluded.data",
+                (
+                    company,
+                    described["partner"],
+                    sig,
+                    json.dumps(described, ensure_ascii=False),
+                ),
+            )
+            return settlements.import_report(L, company, data, spec)
+    except sqlite3.IntegrityError:
+        if L.db.execute(
+            "SELECT 1 FROM settlement_reports WHERE company=? AND digest=? AND status!='withdrawn'",
+            (company, hashlib.sha256(data).hexdigest()),
+        ).fetchone():
+            return {"status": "duplicate", "kind": "settlement", "message": DUPLICATE}
+        raise Refused(409, CONFLICT) from None
+    except ReportError as e:
+        raise Refused(422, _why(e)) from None
+
+
+def _choose(
+    L: Ledger,
+    company: str,
+    sig: str,
+    rows: list[list[str]],
+    partner: str,
+    description: object,
+) -> dict:
+    known = [
+        {"partner": r["partner"], **json.loads(r["data"])}
+        for r in L.db.execute(
+            "SELECT partner,data FROM partner_settlement_formats WHERE company=? AND signature=? ORDER BY partner",
+            (company, sig),
+        )
+    ]
+    if partner:
+        described = next((k for k in known if k["partner"] == partner), None)
+        if described is None:
+            raise Refused(400, NOT_THIS_PAYER)
+    elif description is not None:
+        described = _partner(description, rows[0])
+        described["partner"] = partner_id(company, described["cui"] or None, described["name"])
+    else:
+        raise Refused(409, PICK_PAYER if known else ASK, _preview(rows, known, _context(L, company)))
+    return described
+
+
+def _report_spec(data: bytes, kind: str, delimiter: str, described: dict, when: str) -> tuple[dict, list]:
+    mapping = described["mapping"]
+    spec = {
+        "source": described["source"],
+        **({"courier": described["courier"]} if described.get("courier") else {}),
+        "date": when,
+        "currency": described["currency"],
+        "payer_name": described["name"],
+        "payer_cui": described["cui"],
+        "payer_iban": described["iban"],
+        "format": kind,
+        "delimiter": delimiter,
+        "mapping": mapping,
+    }
+    try:
+        lines = parse(data, kind, spec["source"], mapping, delimiter)
+    except ReportError as e:
+        raise Refused(422, _why(e)) from None
+    batches = {line.get("batch") for line in lines}
+    batch = next(iter(batches)) if len(batches) == 1 else None
+    if "batch" in mapping and not (isinstance(batch, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", batch)):
+        raise Refused(422, NOT_READ.format(why="numărul plății nu poate fi citit"))
+    # Without a payout id the report is named by its bytes: the same file twice is the same report.
+    spec["report_key"] = batch if "batch" in mapping else "u" + hashlib.sha256(data).hexdigest()[:24]
+    return spec, lines
+
+
+def delete_format(L: Ledger, company: str, partner: str, signature: str) -> bool:
+    """Forget one saved column description; the reports already uploaded with it keep their own copy."""
+    with L.tx() as db:
+        return bool(
+            db.execute(
+                "DELETE FROM partner_settlement_formats WHERE company=? AND partner=? AND signature=?",
+                (company, partner, signature),
+            ).rowcount
+        )

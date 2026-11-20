@@ -1,0 +1,45 @@
+services:
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: ${WC_TEST_DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${WC_TEST_DB_ROOT_PASSWORD}
+    tmpfs: /var/lib/mysql
+  shop:
+    build:
+      context: ..
+      dockerfile: tests/Dockerfile
+      args:
+        PHP_VERSION: ${WC_TEST_PHP_VERSION:-8.3}
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: ${WC_TEST_DB_PASSWORD}
+      WORDPRESS_CONFIG_EXTRA: define('DISABLE_WP_CRON', true);
+      WORDPRESS_DB_NAME: wordpress
+      WC_TEST_TOKEN: ${WC_TEST_TOKEN}
+      WC_TEST_WEBHOOK_SECRET: ${WC_TEST_WEBHOOK_SECRET}
+    volumes:
+      - ../:/var/www/html/wp-content/plugins/fiscalm
+    ports: ["127.0.0.1::80"]
+    depends_on: [db]
+  api:
+    image: python:3.11-slim
+    environment:
+      WC_TEST_TOKEN: ${WC_TEST_TOKEN}
+      WC_TEST_WEBHOOK_SECRET: ${WC_TEST_WEBHOOK_SECRET}
+    working_dir: /suite
+    command: [python, mock.py]
+    volumes:
+      - ./:/suite:ro
+  fiscalm:
+    profiles: [real]
+    build:
+      context: ${WC_FISCALM_SOURCE}
+      dockerfile: ${WC_FISCALM_DOCKERFILE}
+    volumes:
+      - ./:/suite:ro
+      - ../.runtime:/exchange
+    tmpfs: /scratch

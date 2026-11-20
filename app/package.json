@@ -1,0 +1,37 @@
+{
+  "name": "fiscalm",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "fixtures": "node scripts/fixtures.mjs",
+    "dev": "npm run fixtures && next dev",
+    "build": "npm run fixtures && next build && node scripts/check-no-fixtures.mjs && node scripts/check-public-page.mjs",
+    "lint": "eslint .",
+    "typecheck": "npm run fixtures && tsc --noEmit",
+    "test": "npm run fixtures && vitest run"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "next": "^16.4.5",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.4",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.8",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "axe-core": "4.14.0",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.4.3",
+    "jsdom": "^29.1.1",
+    "postcss": "^8.5.32",
+    "tailwindcss": "^4.3.4",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.5"
+  }
+}

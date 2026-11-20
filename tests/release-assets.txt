@@ -1,0 +1,8 @@
+# Reviewed shipped fonts/icons; exact Git blob hashes. Add fixture binaries individually after review.
+9f7c78308a8b3c44116413b90a162712241e6f19  app/public/fiscalm/fonts/mona-sans-vf.woff2
+846ce539d5be0377af9d0c8470b8c5ba6f526e3a  app/public/fiscalm/icon-180.png
+ccca0f2fb1418a8425a1895960bf4e17ef4b53c6  app/public/fiscalm/icon-192.png
+a6144f5240950ec18d9363fa8e3e0fb3263cd909  app/public/fiscalm/icon-512.png
+c77f010d08f98bee0a5ae99398551757dd95c1f1  src/fiscalm/invoicing/fonts/inter/Inter-Medium.ttf
+352405eb9053aebaecbe7baafaae347a37f953c9  src/fiscalm/invoicing/fonts/inter/Inter-Regular.ttf
+4049df4ce526f75c98813014f9c700826ee3a355  src/fiscalm/invoicing/fonts/inter/Inter-SemiBold.ttf

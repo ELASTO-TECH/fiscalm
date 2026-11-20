@@ -1,0 +1,57 @@
+# Synthetic IDs scoped to exact paths. Never add production identifiers.
+# Format: value | comma-separated paths # reason. This policy exempts its own declarations.
+11111110 | app/src/lib/fixtures.ts,app/test/firme.test.tsx # public invoicing tests, invented issuer CUI
+12345674 | integrations/prestashop/tests/provision.py,integrations/prestashop/tests/compose.yaml,docs/self-hosting.md,tests/test_company_config.py,tests/test_first_company.py # public partner tests, invented client CUI
+12345682 | tests/test_company_config.py,tests/test_first_company.py # public partner tests, invented client CUI
+12345690 | tests/test_first_company.py # public invoicing tests, invented partner CUI
+18547290 | app/test/invoicing.test.tsx # public ANAF tests, invented lookup CUI
+4200001 | app/test/issued.test.tsx # public receipt tests, invented identifier
+987654 | tests/test_api.py,tests/test_release_scan.py # public document tests, invented identifier
+123456789 | tests/test_partners.py,tests/test_release_scan.py # public fixtures, invented client reference
+99999968 | app/test/helpers.ts,app/test/partners.test.tsx # public tests, invented company CUI
+99999976 | tests/test_invoice_lookups.py,tests/test_invoice_spv.py # public tests, invented company CUI
+99999984 | tests/test_api_invoicing.py,tests/test_cius_ro_official.py,tests/test_invoice_lookups.py,tests/test_invoice_pdf.py,tests/test_invoice_scope.py,tests/test_invoice_spv.py,tests/test_invoicing.py,tests/test_invoicing_legal.py,tests/test_partner_anaf.py,tests/test_partners.py,tests/test_shopify.py # public tests, invented company CUI
+99999992 | app/test/invoicing.test.tsx,tests/synthetic_world.py,tests/test_cius_ro_official.py,tests/test_invoice_cli.py,tests/test_invoice_lookups.py,tests/test_invoice_spv.py,tests/test_invoicing.py,tests/test_invoicing_legal.py,tests/test_partners.py # public tests, invented company CUI
+RO35TEST0000000000000000 | integrations/prestashop/tests/provision.py,integrations/prestashop/tests/compose.yaml,docs/self-hosting.md,tests/test_first_company.py,tests/test_selfhost_init.py # public generated synthetic IBAN example
+RO49AAAA1B31007593840000 | app/test/firme.test.tsx,app/test/setup-first.test.tsx,tests/test_company_config.py # public standard synthetic IBAN example
+31536000 | docs/self-hosting.md,src/fiscalm/api/web.py # seconds per year in web cache headers, not a company identifier
+9999 | app/test/invoicing.test.tsx # app/test/invoicing.test.tsx, invented new-client CUI
+7777 | app/test/invoicing.test.tsx # app/test/invoicing.test.tsx, invented inactive-company CUI
+1006 | tests/synthetic_world.py # public synthetic CUI literal in tests/synthetic_world.py:155
+2001 | tests/synthetic_world.py # public synthetic CUI literal in tests/synthetic_world.py:174
+35 | tests/test_selfhost_init.py # public synthetic CUI literal in tests/test_selfhost_init.py:234
+6666 | app/test/invoicing.test.tsx # public synthetic CUI literal in app/test/invoicing.test.tsx:215
+100000 | integrations/prestashop/tests/regressions.php,tests/test_receipt_upload.py # tests/test_receipt_upload.py, synthetic PrestaShop order-ID offset and multipart repeat count for the upload size limit test
+19 | tests/test_release_scan.py # tests/test_release_scan.py, smallest valid synthetic CUI for detector positive controls
+7654320 | tests/test_release_scan.py # tests/test_release_scan.py, invented foreign-entity code in config derivation tests
+9003000 | tests/test_partner_anaf.py # invented upper bound for generated synthetic registry CUIs
+1006 | app/test/partner-anaf.test.tsx # public partner tests, invented supplier CUI from tests/synthetic_world.py
+2001 | app/test/partner-anaf.test.tsx # public partner tests, invented supplier CUI from tests/synthetic_world.py
+100000 | tests/state_large.py,tests/test_state_performance.py # synthetic e-Factura message-id base in the large-ledger generator
+500000 | tests/state_large.py # synthetic issued-invoice id base in the large-ledger generator
+800000 | tests/state_large.py # synthetic receipt message-id base in the large-ledger generator
+99999984 | integrations/woocommerce/tests/real_api.py # invented seller CUI for isolated WooCommerce engine tests
+100000 | tests/test_auth_limits.py # microseconds around rate-limit expiry, not a company identifier
+11111110 | app/test/bank-connect.test.tsx,app/test/helpers.ts # invented company CUI in synthetic firms and API format examples
+12345674 | docs/openapi.json,src/fiscalm/api/actions.py,tests/test_accounts.py,tests/test_backup.py,tests/test_schema_versions.py,tests/test_transactions.py # invented company CUI in synthetic firms and API format examples
+123456789 | tests/test_bank_connect.py,tests/test_mail_invoices.py # synthetic browser cookie suffix and invented foreign supplier identifier
+190100 | tests/test_auth_credentials.py # CBOR hexadecimal encoding of integer 256, not a company identifier
+9000 | tests/test_api_v1.py # invented partner CUI in API state response fixture
+RO00INGB0000000000000007 | app/test/tranzactii.test.tsx # invented account in synthetic ledger/bank fixtures; repeated dummy account suffix, no live account
+RO00XXXX0000000000000002 | tests/test_statement_accounts.py # invented account in synthetic ledger/bank fixtures; repeated dummy account suffix, no live account
+RO10BTRL0000000000000002 | tests/test_accounts.py # invented account in synthetic ledger/bank fixtures; repeated dummy account suffix, no live account
+RO24BTRLRONCRT0000000001 | tests/synthetic_world.py,tests/test_api.py,tests/test_api_resources.py,tests/test_bank_connect.py,tests/test_bank_feed.py,tests/test_banks.py,tests/test_bon.py,tests/test_company_accounts.py,tests/test_company_aliases.py,tests/test_company_config.py,tests/test_csv_statement.py,tests/test_dashboard.py,tests/test_efactura.py,tests/test_history_import.py,tests/test_invoice_account.py,tests/test_invoice_lookups.py,tests/test_invoice_spv.py,tests/test_invoicing.py,tests/test_issued.py,tests/test_links.py,tests/test_mt940.py,tests/test_statement_accounts.py,tests/test_statement_entry.py,tests/test_statement_upload.py,tests/test_transactions.py # invented account in synthetic ledger/bank fixtures; repeated dummy account suffix, no live account
+RO37BTRL0000000000000001 | tests/test_accounts.py,tests/test_banks.py # invented account in synthetic ledger/bank fixtures; repeated dummy account suffix, no live account
+RO49AAAA1B31007593840000 | tests/test_bank_feed.py,tests/test_csv_statement.py,tests/test_links.py,tests/test_mt940.py,tests/test_transactions.py # invented account in synthetic ledger/bank fixtures; repeated dummy account suffix, no live account
+RO71BTRLEURCRT0000000001 | tests/synthetic_world.py,tests/test_bank_connect.py,tests/test_company_config.py,tests/test_csv_statement.py,tests/test_dashboard.py,tests/test_invoice_account.py,tests/test_issued.py,tests/test_links.py,tests/test_mt940.py,tests/test_statement_upload.py,tests/test_transactions.py # invented account in synthetic ledger/bank fixtures; repeated dummy account suffix, no live account
+RO88RNCB0000000000000009 | tests/test_bank_connect.py # invented account in synthetic ledger/bank fixtures; repeated dummy account suffix, no live account
+RO94BTRLRONCRT0000000002 | tests/synthetic_world.py,tests/test_api_invoicing.py,tests/test_bank_connect.py,tests/test_camt.py,tests/test_csv_statement.py,tests/test_dashboard.py,tests/test_invoice_account.py,tests/test_links.py,tests/test_mt940.py,tests/test_order_state.py,tests/test_statement_upload.py,tests/test_transactions.py # invented account in synthetic ledger/bank fixtures; repeated dummy account suffix, no live account
+11111110 | app/test/dashboard.test.tsx # invented issuer CUI for chart selection
+12345674 | app/test/invoicing.test.tsx # invented seller CUI for invoice prefill
+1014 | tests/synthetic_world.py # invented customer CUI for chart fixtures
+RO49AAAA1B31007593840000 | tests/test_api_company_actions.py # standard example IBAN in CSV formula escaping test
+22222229 | tests/test_api_invoicing.py # repeated-digit invented client CUI for invoice reassignment
+20100101 | tests/test_auth_sessions.py # Gecko build date in a synthetic Firefox user agent; not a CUI
+900002 | tests/test_dashboard.py # invented customer CUI for VAT chart tests
+RO35TEST0000000000000000 | tests/test_partners.py # invented TEST bank IBAN for partner role preservation
+99999992 | tests/test_schema_versions.py # invented client CUI for upgrade fixtures

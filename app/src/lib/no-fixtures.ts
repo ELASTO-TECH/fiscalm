@@ -1,0 +1,45 @@
+// Stands in for ./fixtures in a production build (next.config.ts), so no synthetic data ships with the app.
+const none = () => Promise.reject(new Error("no fixtures in this build"));
+export const fixtureIdentity = none;
+export const fixtureUsers = none;
+export const fixtureState = none;
+export const fixtureSummary = none;
+export const fixtureSummaryData = none;
+export const fixtureDetail = none;
+export const fixtureDetailData = none;
+export const fixtureTransactionChoices = none;
+export const fixtureTransactionChoicesData = none;
+export const fixturePartnerPages = none;
+export const fixturePartnerPagesData = none;
+export const fixtureHomeTasks = none;
+export const fixtureTasks = none;
+export const fixtureBrowse = none;
+export const fixtureReportPages = none;
+export const fixtureReportPagesData = none;
+export const fixtureDashboardPage = none;
+export const fixtureDashboardData = none;
+export const fixtureDashboardPages = none;
+export const fixtureBrowseData = none;
+export const fixtureCandidates = none;
+export const fixtureSearch = none;
+export const fixtureSearchData = none;
+export const fixturePost = none;
+export const fixturePostFile = none;
+export const fixturePaymentFile = none;
+export const fixtureIntegrations = none;
+export const fixtureUploadLinks = none;
+export const fixtureTokens = none;
+export const fixtureCompanies = none;
+export const fixtureLinkInfo = none;
+export const fixtureSendFiles = none;
+export const fixtureDocumentIds = none;
+export const fixtureInvoicing = none;
+export const fixtureInvoicingPost = none;
+export const FIXTURE_PAGE = "";
+export const FIXTURE_BON = "";
+
+export const fixtureHistoryReview = none;
+
+export const fixturePreparedPayments = none;
+export const fixtureProducts = none;
+export const fixtureProduct = none;

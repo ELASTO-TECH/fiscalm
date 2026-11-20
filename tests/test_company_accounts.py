@@ -1,0 +1,156 @@
+"""Adding a company's accounts, any bank and currency, and what Setări shows of them. Synthetic data only."""
+
+import json
+
+import pytest
+from firms import entries
+from test_camt import xml
+from test_company_config import config as config  # noqa: F401
+
+from fiscalm import companies, company_config as cc
+from fiscalm.api import actions
+from fiscalm.payments import engine as pay
+
+
+def checked(country, body):
+    """An invented IBAN with a computed checksum."""
+    digits = "".join(str(int(c, 36)) for c in body + country + "00")
+    return f"{country}{98 - int(digits) % 97:02d}" + body
+
+
+def iban(bank_code, n):
+    return checked("RO", bank_code + str(n).zfill(16))
+
+
+ING_EUR = iban("INGB", 7)
+
+
+def nord_accounts(ledger):
+    """NORD's accounts as Setări lists them."""
+    return next(c for c in cc.listing(ledger)["companies"] if c["key"] == "NORD")["accounts"]
+
+
+def test_an_account_at_another_bank_is_added_next_to_the_others(config, ledger):
+    r = actions.act("company-account", "ALL", {"key": "NORD", "iban": " " + ING_EUR.lower(), "currency": "eur"})
+    assert r["ok"] and r["message"] == "Contul a fost adăugat."
+    assert r["done"] == {"key": "NORD", "currency": "EUR", "bank": "ing", "iban_last4": ING_EUR[-4:]}
+    nord = companies.get("NORD")
+    assert (nord.account(ING_EUR).bank, nord.account(ING_EUR).pays) == ("ing", False)
+    assert nord.ron_iban == "RO24BTRLRONCRT0000000001"  # the paying account is untouched
+    assert len(entries()["companies"][0]["accounts"]) == 3
+
+
+@pytest.mark.parametrize(
+    "args,why",
+    [
+        (
+            {"iban": f"RO{(int(ING_EUR[2:4]) + 1) % 100:02d}" + ING_EUR[4:], "currency": "EUR"},
+            "nu este valid",
+        ),  # checksum
+        ({"iban": ING_EUR, "currency": "euro"}, "moneda"),
+        ({"iban": ING_EUR, "currency": ""}, "moneda"),
+    ],
+)
+def test_a_bad_account_is_refused_and_nothing_is_written(config, ledger, args, why):
+    before = entries()
+    r = actions.act("company-account", "ALL", {"key": "NORD"} | args)
+    assert not r["ok"] and why in r["message"].lower()
+    assert entries() == before
+
+
+def test_another_companys_or_the_accountants_or_a_duplicate_is_refused(config, ledger):
+    studio = iban("ZZZZ", 5)
+    assert actions.act("company-account", "ALL", {"key": "STUDIO9", "iban": studio, "currency": "RON"})["ok"]
+    r = actions.act("company-account", "ALL", {"key": "NORD", "iban": studio, "currency": "RON"})
+    assert not r["ok"] and "altă firmă" in r["message"]
+    ledger.add_efactura(
+        {
+            "message_id": "accountant",
+            "company": "NORD",
+            "supplier_cui": "55555555",
+            "raw_path": "synthetic.xml",
+            "status": "open",
+            "supplier_iban": iban("CECE", 1),
+        }
+    )
+    r = actions.act("company-account", "ALL", {"key": "NORD", "iban": iban("CECE", 1), "currency": "RON"})
+    assert not r["ok"] and "partener" in r["message"]
+    assert actions.act("company-account", "ALL", {"key": "NORD", "iban": ING_EUR, "currency": "EUR"})["ok"]
+    r = actions.act("company-account", "ALL", {"key": "NORD", "iban": ING_EUR, "currency": "EUR"})
+    assert not r["ok"] and r["message"] == "Acest IBAN este deja salvat la firmă."
+
+
+def test_an_unknown_field_or_company_is_refused(config, ledger):
+    assert not actions.act("company-account", "ALL", {"key": "NORD", "iban": ING_EUR, "currency": "EUR", "pays": "1"})[
+        "ok"
+    ]
+    assert not actions.act("company-account", "ALL", {"key": "NOPE", "iban": ING_EUR, "currency": "EUR"})["ok"]
+    assert not actions.act("company-account", "ALL", {"key": "NORD", "iban": ING_EUR})["ok"]
+
+
+def test_setari_lists_each_account_with_its_last_statement(config, ledger):
+    actions.act("company-account", "ALL", {"key": "NORD", "iban": ING_EUR, "currency": "EUR"})
+    ledger.add_document("bt", "NORD", "2026-09", "statement", "/x", accounts=["RO24BTRLRONCRT0000000001"])
+    ledger.add_document("ing", "NORD", "2026-10", "statement", "/y", accounts=[ING_EUR])
+    accounts = nord_accounts(ledger)
+    assert [(a["currency"], a["bank_name"], a["pays"], a["last_statement"]) for a in accounts] == [
+        ("RON", "Banca Transilvania", True, "2026-09"),
+        ("EUR", "Banca Transilvania", False, None),
+        ("EUR", "ING Bank", False, "2026-10"),
+    ]
+    assert all(
+        set(a)
+        == {
+            "id",
+            "iban_last4",
+            "currency",
+            "bank",
+            "bank_name",
+            "pays",
+            "retired",
+            "last_statement",
+            "statement_senders",
+        }
+        for a in accounts
+    )  # never a full IBAN
+    ledger.add_document("lost", "NORD", "2026-11", "statement", "/z")  # stored before accounts, its file gone
+    assert [a["last_statement"] for a in nord_accounts(ledger)] == ["2026-09", None, "2026-10"]  # proves nothing
+
+
+def test_a_legacy_statement_is_read_once_to_learn_its_accounts(config, ledger, tmp_path):
+    actions.act("company-account", "ALL", {"key": "NORD", "iban": ING_EUR, "currency": "EUR"})
+    path = tmp_path / "old.xml"
+    path.write_bytes(xml())  # NORD's BT RON account only
+    ledger.add_document("old", "NORD", "2026-09", "statement", str(path))
+    assert [(a["currency"], a["bank"], a["last_statement"]) for a in nord_accounts(ledger)] == [
+        ("RON", "bt", "2026-09"),
+        ("EUR", "bt", None),
+        ("EUR", "ing", None),
+    ]  # never the ING account added since
+    assert json.loads(ledger.document("old")["accounts"]) == ["RO24BTRLRONCRT0000000001"]  # kept: read once
+    path.unlink()
+    assert nord_accounts(ledger)[0]["last_statement"] == "2026-09"
+
+
+@pytest.mark.parametrize(
+    "value,ok",
+    [
+        (checked("DE", "ZZZZ" + "0" * 14), True),
+        (checked("DE", "ZZZZ" + "0" * 7), False),  # checksum right, German length wrong
+        (
+            checked("US", "ZZZZ" + "0" * 14),
+            False,
+        ),  # a country whose IBAN length isn't known: refused, not saved unverified
+    ],
+)
+def test_foreign_accounts_are_checked_by_their_countrys_length(config, ledger, value, ok):
+    r = actions.act("company-account", "ALL", {"key": "NORD", "iban": value, "currency": "EUR"})
+    assert r["ok"] is ok, r["message"]
+
+
+@pytest.mark.parametrize("second", [("invalid", "EUR"), (ING_EUR, "EUR")])
+def test_multiple_account_additions_are_validated_before_any_is_saved(config, ledger, second):
+    before = companies.get("NORD", L=ledger)
+    with pay.pay_lock(), ledger.tx(), pytest.raises(cc.CompanyError):
+        cc.account_additions(ledger, "NORD", [(ING_EUR, "EUR"), second])
+    assert companies.get("NORD", L=ledger) == before
