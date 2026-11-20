@@ -2,6 +2,7 @@
 through the same import as mail. Synthetic data only."""
 
 import json
+import zipfile
 from datetime import date
 from urllib.parse import urlencode
 
@@ -15,7 +16,7 @@ from test_camt import complete
 from test_mt940 import EUR, block
 
 from fiscalm import pack, recon
-from fiscalm.api import web
+from fiscalm.api import receipts as intake, uploads as upload_links, web
 from fiscalm.bank import statements, upload as su
 from fiscalm.ledger import finance_home
 
@@ -225,14 +226,17 @@ def test_a_pdfs_accounts_must_be_the_companys_and_complete(ledger, monkeypatch, 
     assert not ledger.documents(kind="statement") and leftovers() == []
 
 
-def test_a_pdf_accepted_in_the_app_goes_in_its_months_pack(ledger, monkeypatch):
+@pytest.mark.parametrize("link", [None, "NORD", "ALL"])  # the same bytes sent first through an upload link
+def test_a_pdf_accepted_in_the_app_goes_in_its_months_pack(ledger, monkeypatch, link):
     fake_pdf_import(monkeypatch, [(NORD_RON, "RON"), (NORD_EUR, "EUR")])
+    if link:
+        intake.accept(ledger, upload_links.create(ledger, link, "Phone")["path"][3:], [("pdf", b"%PDF-1.7 synthetic")])
     assert su.accept(ledger, "NORD", "", b"%PDF-1.7 synthetic", "application/pdf")["status"] == "added"
     (doc,) = ledger.documents(kind="statement")
     assert doc["source"] == "statement-import"  # checked by the firm's password and accounts: not a held upload
-    assert pack.ready(ledger, "NORD", "2026-10") and [
-        d["sha"] for d in pack.pending_docs(ledger, "NORD", "2026-10")
-    ] == [doc["sha"]]
+    assert [d["sha"] for d in pack.pending_docs(ledger, "NORD", "2026-10")] == [doc["sha"]]
+    with zipfile.ZipFile(pack.build(ledger, "NORD", "2026-10")["zip_path"]) as made:  # the checked, decrypted copy
+        assert made.read("2026-10_extras_BT_EUR_RON.pdf") == b"%PDF-decrypted"
 
 
 def test_a_symlinked_company_directory_is_refused(ledger, tmp_path):

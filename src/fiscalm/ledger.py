@@ -2636,13 +2636,14 @@ class Ledger:
                     "upload:"
                 ):
                     return False
-                # Trusted ingestion owns metadata and company; preserve the stored bytes. A bon a person linked to its
-                # card payment (links.receipt) keeps that payment's data and source: its link stays the one answer.
+                # Trusted ingestion owns metadata and company; a receipt keeps its stored bytes, a statement points
+                # at the copy its importer checked and stored in the firm's own storage (a PDF one decrypted). A bon a
+                # person linked to its card payment (links.receipt) keeps that payment's data and source.
                 if not db.execute(
                     """UPDATE documents SET company=?,month=?,kind=?,path=?,vendor=?,doc_date=?,
                     amount=?,currency=?,card_last4=?,issues=?,source=?,created_at=?,accounts=? WHERE sha=? AND source LIKE 'upload:%'
                     AND NOT EXISTS (SELECT 1 FROM tx_link_items WHERE item='receipt '||documents.sha)""",
-                    values[:3] + (existing["path"],) + values[4:] + (accounts, sha),
+                    values[:3] + (path if kind == "statement" else existing["path"],) + values[4:] + (accounts, sha),
                 ).rowcount:
                     return False
                 db.execute(
