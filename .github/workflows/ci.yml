@@ -28,5 +28,6 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: app/package-lock.json
+      - run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends poppler-utils
       - run: uv sync --locked
       - run: bin/test.sh full
