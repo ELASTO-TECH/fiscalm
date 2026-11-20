@@ -407,7 +407,7 @@ function MailBody({ mailKey, onClose }: { mailKey: string; onClose: () => void }
       {m.file ? (
         <a href={fileUrl()} target="_blank" rel="noopener noreferrer">
           {/* eslint-disable-next-line @next/next/no-img-element -- a token-scoped URL from the engine, not an optimisable asset */}
-          <img src={fileUrl(true)} alt={`Documentul de la ${title}`} loading="lazy"
+          <img src={fileUrl(true)} alt={m.reason === "upload-firm" ? "Documentul încărcat" : `Documentul de la ${title}`} loading="lazy"
             className="my-4 block max-h-[60vh] w-full rounded-control bg-inset object-contain" />
         </a>
       ) : null}

@@ -1135,6 +1135,8 @@ class Action:
             return len(json.dumps(args).encode()) <= 4096 and self.valid(
                 {k: v for k, v in args.items() if k != "firm_scope"}
             )
+        if self.handler == _upload_link_create and "all_firms" in self.fields.split() and "all_firms" in args:
+            return type(args["all_firms"]) is bool and self.valid({k: v for k, v in args.items() if k != "all_firms"})
         allowed = set(self.fields.split()) | {"co"}
         if self.handler == integration:
             allowed |= {FIELD + f.key for kind in ig.KINDS.values() for f in kind.fields if not f.rule}

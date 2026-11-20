@@ -19,7 +19,7 @@ def pending_file(L: Ledger, sha: str) -> tuple[str, bytes] | None:
     row = L.db.execute(
         "SELECT path FROM documents WHERE sha=? AND company='ALL' AND source LIKE 'upload:%'", (sha,)
     ).fetchone()
-    root = finance_home().resolve() / "ALL" / "documents" / "inbox"
+    root = receipts.storage_root("ALL")
     raw = read_file(row["path"], [root], receipts.FILE_MAX) if row else None
     if raw and Path(raw[0]).suffix in (".pdf", ".jpg", ".png", ".heic") and hashlib.sha256(raw[1]).hexdigest() == sha:
         return raw
@@ -102,8 +102,11 @@ def process_pending(L: Ledger) -> None:
         firms = list(docs.inspect_text(text).mentions)
         doc = invoices.Doc("pdf", firms=firms, roles=invoices.roles(text, firms))
         company = invoices.buyer_firm(doc, firms)
-        if company and assign(L, row["sha"], company):
-            continue
+        try:
+            if company and assign(L, row["sha"], company):
+                continue
+        except (receipts.Refused, OSError):
+            continue  # Keep the staged original available; one disk refusal cannot stop the tick.
         with L.tx() as db:
             db.execute("UPDATE documents SET issues='[\"buyer-unclear\"]' WHERE sha=? AND company='ALL'", (row["sha"],))
 

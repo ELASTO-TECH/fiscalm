@@ -1407,7 +1407,7 @@ def _engine_company(action: str, body: object, spec: actions.Action | None) -> s
         or not (
             spec.valid(body)
             if action.startswith("product-")
-            or action in ("integration-add", "integration-update", "mail-microsoft-start")
+            or action in ("integration-add", "integration-update", "mail-microsoft-start", "upload-link-create")
             else all(isinstance(v, (str, int)) and not isinstance(v, bool) for v in body.values())
         )
         or (

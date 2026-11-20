@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from copy import deepcopy
@@ -11,11 +12,12 @@ import pytest
 from test_api import _req, quiet, server as server, world as world  # noqa: F401
 from test_efactura import anaf_zip, ubl
 
-from fiscalm import ai, companies, docs, integrations, links, pack, receipt_items, recon, transactions
-from fiscalm.api import actions, receipts as intake, state as api, uploads as upload_links
+from fiscalm import ai, backup, companies, docs, integrations, links, pack, receipt_items, recon, transactions
+from fiscalm.api import actions, receipts as intake, state as api, upload_assignment, uploads as upload_links
 from fiscalm.bank import statements
 from fiscalm.efactura import inbox as ef
 from fiscalm.ledger import Ledger, LinkRefused
+from fiscalm.mail import invoices
 from fiscalm.receipt_lines import signatures
 
 JPEG = b"\xff\xd8\xffexample"
@@ -1094,7 +1096,9 @@ def test_two_connections_naming_one_bon_for_two_debits_have_one_winner(ledger):
 @pytest.mark.parametrize(
     "text,expected",
     [
-        ("Buyer: Atelier Nord SRL\nCUI: 12345674", "NORD"),
+        ("Buyer: Atelier Nord SRL\nCUI: 11111111", "NORD"),
+        ("Buyer: CUI RO11111111", "NORD"),
+        ("Client: Atelier Nord", "NORD"),
         ("Buyer: Atelier Nord SRL\nBuyer: Studio 9 SRL", None),
         ("Bon fiscal\nTOTAL 10.00 RON", None),
         ("", None),
@@ -1102,7 +1106,6 @@ def test_two_connections_naming_one_bon_for_two_debits_have_one_winner(ledger):
     ],
 )
 def test_all_firms_assignment(ledger, home, monkeypatch, text, expected):
-    from fiscalm.api import upload_assignment
 
     token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
     sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
@@ -1128,7 +1131,6 @@ def test_all_firms_assignment(ledger, home, monkeypatch, text, expected):
 
 
 def test_staged_upload_path_confinement(ledger, home):
-    from fiscalm.api import upload_assignment
 
     token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
     sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
@@ -1149,7 +1151,6 @@ def test_staged_upload_path_confinement(ledger, home):
 
 
 def test_assignment_race(ledger):
-    from fiscalm.api import upload_assignment
 
     token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
     sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
@@ -1161,3 +1162,47 @@ def test_assignment_race(ledger):
     with ThreadPoolExecutor(2) as pool:
         results = list(pool.map(assign, ["NORD", "STUDIO9"]))
     assert sorted(results) == [False, True]
+
+
+def test_staged_upload_in_backup(ledger, home):
+
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
+    archive = backup.create(home.parent / (home.name + "-backup.zip"))
+    with zipfile.ZipFile(archive) as stored:
+        matches = [n for n in stored.namelist() if n.endswith(sha + ".jpg")]
+        assert len(matches) == 1 and matches[0].startswith("inbox/uploads/")
+        assert stored.read(matches[0]) == JPEG
+
+
+@pytest.mark.parametrize("ext", ["pdf", "jpg"])
+def test_shared_upload_reading(ledger, monkeypatch, ext):
+
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    data = b"%PDF-example" if ext == "pdf" else JPEG
+    sha = intake.accept(ledger, token, [(ext, data)])[0]["sha"]
+    text = "Buyer: Atelier Nord SRL"
+    monkeypatch.setattr(invoices, "pdf_text", lambda data: text)
+    monkeypatch.setattr(ai, "available", lambda L: True)
+
+    def ask(*args, **kwargs):
+        assert kwargs["image"] == ("image/jpeg", JPEG)
+        return {"text": text}
+
+    monkeypatch.setattr(ai, "ask_json", ask)
+    upload_assignment.process_pending(ledger)
+    assert ledger.document(sha)["company"] == "NORD"
+
+
+def test_shared_upload_disk_refusal_waits(ledger, monkeypatch):
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
+    monkeypatch.setattr(upload_assignment, "document_text", lambda *args: "Buyer: Atelier Nord SRL")
+
+    def refuse(*args):
+        raise intake.Refused(507)
+
+    monkeypatch.setattr(upload_assignment, "assign", refuse)
+    upload_assignment.process_pending(ledger)
+    assert ledger.document(sha)["company"] == "ALL"
+    assert upload_assignment.questions(ledger)[0]["key"] == sha

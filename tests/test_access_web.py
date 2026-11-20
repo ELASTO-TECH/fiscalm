@@ -330,3 +330,10 @@ def test_mail_setup_http_contract(ledger, server, monkeypatch, caplog):
     assert _api(server, "mail-test", body, Origin="https://evil.example")[0] == 403
     logs = "\n".join(p.read_text() for p in (finance_home() / "logs").glob("*.log")) + caplog.text
     assert body["password"] not in logs + json.dumps(result)
+
+
+@pytest.mark.parametrize("all_firms", [False, True])
+def test_browser_link_scope(ledger, server, all_firms):
+    code, result = _api(server, "upload-link-create", {"co": "NORD", "label": "Phone", "all_firms": all_firms})
+    assert code == 200 and result["ok"]
+    assert upload_links.verify(ledger, result["done"]["path"][3:])["company"] == ("ALL" if all_firms else "NORD")
