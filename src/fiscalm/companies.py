@@ -130,6 +130,7 @@ class Account:
     bank: str  # banks.CATALOGUE id; "" when the IBAN's bank isn't in the catalogue
     pays: bool = False  # the account fiscalm prepares the payment file for (at most one per currency)
     retired: str = ""  # ISO date the account was replaced; "" while in use
+    opened: str = ""  # YYYY-MM, the first month the account existed; "" when unknown (it is owed in every month)
 
     @property
     def statement_senders(self) -> tuple[str, ...]:
@@ -144,7 +145,13 @@ class Account:
             d["pays"] = True
         if self.retired:
             d["retired"] = self.retired
+        if self.opened:
+            d["opened"] = self.opened
         return d
+
+    def held_in(self, month: str) -> bool:
+        """The account existed in `month` (YYYY-MM): opened by then, or its opening month is unknown."""
+        return not self.opened or self.opened <= month
 
 
 @dataclass(frozen=True)
@@ -331,7 +338,8 @@ def aliases_from(c: dict, key: str) -> tuple[str, ...]:
 
 
 _IBAN_SHAPE = re.compile(r"[A-Z]{2}[0-9]{2}[A-Z0-9]{8,30}")
-_ACCOUNT_KEYS = {"iban", "currency", "bank", "pays", "retired"}
+_ACCOUNT_KEYS = {"iban", "currency", "bank", "pays", "retired", "opened"}
+MONTH = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])")
 
 
 def accounts_from(c: dict, key: str) -> tuple[Account, ...]:
@@ -369,7 +377,12 @@ def accounts_from(c: dict, key: str) -> tuple[Account, ...]:
         pays = r.get("pays", False)
         if not isinstance(pays, bool) or pays and retired_on:
             raise bad("a retired account cannot pay")
-        out.append(Account(iban, ccy, bank, pays=pays, retired=retired_on))
+        opened = r.get("opened") or ""
+        if not isinstance(opened, str) or opened and not MONTH.fullmatch(opened):
+            raise bad("invalid account opening month")
+        if opened and retired_on and opened > retired_on[:7]:
+            raise bad("an account cannot open after it was retired")
+        out.append(Account(iban, ccy, bank, pays=pays, retired=retired_on, opened=opened))
     if len({a.iban for a in out}) != len(out):
         raise bad("the same IBAN appears twice")
     paying = [a.currency for a in out if a.pays]
@@ -442,7 +455,7 @@ def all(L: Ledger | None = None) -> dict[str, Company]:
         accounts: dict[str, list[Account]] = {}
         for r in L.db.execute("SELECT * FROM firm_accounts ORDER BY company,position"):
             accounts.setdefault(r["company"], []).append(
-                Account(r["iban"], r["currency"], r["bank"], bool(r["pays"]), r["retired"])
+                Account(r["iban"], r["currency"], r["bank"], bool(r["pays"]), r["retired"], r["opened"])
             )
         children = []
         for table, field in (("firm_aliases", "alias"),):

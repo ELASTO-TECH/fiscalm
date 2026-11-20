@@ -232,7 +232,7 @@ NORD_RON, NORD_EUR, STUDIO9_RON = "RO24BTRLRONCRT0000000001", "RO71BTRLEURCRT000
     [
         ([(STUDIO9_RON, "RON")], su.OTHER_ACCOUNT, {}),  # NORD's CUI in the text, STUDIO9's account in the statement
         ([(NORD_RON, "RON"), (STUDIO9_RON, "RON")], su.OTHER_ACCOUNT, {}),
-        ([(NORD_RON, "RON")], su.INCOMPLETE, {}),  # BT's EUR account missing
+        ([(NORD_RON, "RON")], su.incomplete(["EUR 0001"]), {}),  # BT's EUR account missing, named
         ([], su.NOT_READ, {}),
         ([], su.NOT_READ, {"parse_error": ValueError("day 99 out of range")}),  # the parser chokes
         (

@@ -972,9 +972,10 @@ class Ledger:
             for table in ("firm_accounts", "firm_aliases"):
                 db.execute(f"DELETE FROM {table} WHERE company=?", (company.key,))
             db.executemany(
-                "INSERT INTO firm_accounts VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO firm_accounts(company,position,iban,currency,bank,pays,retired,opened) "
+                "VALUES(?,?,?,?,?,?,?,?)",
                 [
-                    (company.key, n, a.iban, a.currency, a.bank, a.pays, a.retired)
+                    (company.key, n, a.iban, a.currency, a.bank, a.pays, a.retired, a.opened)
                     for n, a in enumerate(company.accounts)
                 ],
             )
@@ -992,11 +993,11 @@ class Ledger:
         accounts = [
             tuple(r)
             for r in self.db.execute(
-                "SELECT iban,currency,bank,pays,retired FROM firm_accounts WHERE company=? ORDER BY position",
+                "SELECT iban,currency,bank,pays,retired,opened FROM firm_accounts WHERE company=? ORDER BY position",
                 (expected.key,),
             )
         ]
-        if accounts != [(a.iban, a.currency, a.bank, a.pays, a.retired) for a in expected.accounts]:
+        if accounts != [(a.iban, a.currency, a.bank, a.pays, a.retired, a.opened) for a in expected.accounts]:
             return False
         for table, field, values in (("firm_aliases", "alias", expected.aliases),):
             rows = self.db.execute(f"SELECT {field} FROM {table} WHERE company=? ORDER BY position", (expected.key,))

@@ -12,6 +12,7 @@ from datetime import date
 
 from fiscalm import companies, integrations
 from fiscalm.bank import catalogue as banks
+from fiscalm.config_errors import ConfigError
 from fiscalm.ledger import Ledger, finance_home
 from fiscalm.validate import IBAN_LENGTHS, iban_valid
 
@@ -451,3 +452,26 @@ def add_account(*, key: str, iban: str, currency: str, L: Ledger | None = None) 
 
     log(f"company-account {key} {account.currency} iban_last4={account.iban[-4:]}")
     return dict(key=key, currency=account.currency, bank=account.bank, iban_last4=account.iban[-4:])
+
+
+def set_opened(*, key: str, iban: str, month: str, L: Ledger | None = None) -> dict:
+    """Record the first month a company's account existed (YYYY-MM; "" forgets it). A statement of an earlier month
+    does not owe that account (bank.intake.missing_accounts); every later one does."""
+    with editing(L) as L:
+        own = companies.all(L).get(key)
+        account = own.account(iban) if own else None
+        if not account:
+            raise CompanyError("Contul nu este al acestei firme.")
+        if month and not companies.MONTH.fullmatch(month):
+            raise CompanyError("Luna deschiderii se scrie AAAA-LL, de exemplu 2023-07.")
+        try:
+            updated = dataclasses.replace(
+                own, accounts=tuple(dataclasses.replace(a, opened=month) if a == account else a for a in own.accounts)
+            ).validated()  # the ledger writer's own check: an account cannot open after it was retired
+        except ConfigError:
+            raise CompanyError("Luna deschiderii nu poate fi după retragerea contului.") from None
+        L.save_company(updated, expected=own)
+    from fiscalm.api.actions import log
+
+    log(f"company-account-opened {key} {account.currency} iban_last4={account.iban[-4:]} opened={month or '-'}")
+    return dict(key=key, currency=account.currency, iban_last4=account.iban[-4:], opened=month or None)

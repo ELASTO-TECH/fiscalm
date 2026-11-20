@@ -50,11 +50,24 @@ def test_all_configured_accounts_required(ledger, tmp_path):
         ([(X1, "EUR", ""), (Y, "EUR", "")], xml(iban=Y, currency="EUR"), []),
         ([(X1, "EUR", ""), (X2, "EUR", "")], xml(iban=X1, currency="EUR"), ["EUR 0002"]),  # one bank's code: both owed
         ([(X1, "USD", "bt")], complete(), ["USD 0001"]),  # a configured bank wins over the IBAN's code
+        ([(X1, "USD", "bt", {"opened": "2026-11"})], complete(), []),  # opened after October: not owed yet
+        ([(X1, "USD", "bt", {"opened": "2026-10"})], complete(), ["USD 0001"]),  # opened that month: owed
     ],
 )
 def test_a_statement_needs_every_account_at_its_bank_and_none_elsewhere(monkeypatch, tmp_path, accounts, data, missing):
     nord_with(monkeypatch, *accounts)
     assert statement_intake.missing_accounts(parse(tmp_path, data)) == missing
+
+
+@pytest.mark.parametrize("currencies,missing", [(("RON", "EUR"), []), (("RON",), ["EUR 0001"])])
+def test_an_older_bt_pdf_is_complete_only_with_every_account(currencies, missing):
+    """2021-2023 layout: `Extras numarul N` comes before the currency on each account's IBAN line."""
+    ibans = companies.get("NORD").ibans
+    text = "din 01/10/2026 - 31/10/2026\n" + "".join(
+        f"CONT {c}CRT Valuta Cont de disponibil\nExtras numarul 6     {c}     Cod IBAN: {ibans[c]}\n"
+        for c in currencies
+    )
+    assert statement_intake.missing_accounts(statements.parse_text(text, "NORD")) == missing
 
 
 @pytest.mark.parametrize(

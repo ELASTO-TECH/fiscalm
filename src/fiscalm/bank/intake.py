@@ -184,7 +184,8 @@ def _read_stored(doc, company: str) -> statements.Statement:
 
 def missing_accounts(st: statements.Statement) -> list[str]:
     """The company's current accounts at the statement's banks that the statement leaves out: a statement covers
-    every account the company holds at its bank, so none of them is silently skipped. Accounts at other banks come
+    every account the company holds at its bank, so none of them is silently skipped. Only an account a person dated
+    as opened after the statement's last month is not owed; one without that month is owed in every month. Accounts at other banks come
     from their own statements. An account's bank is the one configured for it, else the catalogue's for its IBAN code,
     else the IBAN code itself: two accounts with the same code outside the catalogue are one bank, so a statement
     with one of them must carry both; a different code is another bank, with its own statements."""
@@ -202,8 +203,17 @@ def missing_accounts(st: statements.Statement) -> list[str]:
 
     present = {(companies.normalize_iban(a.iban), a.currency) for a in st.accounts}
     held = {bank_of(i) for i, _ in present}
-    expected = {(a.iban, a.currency) for a in co.current_accounts if bank_of(a.iban) in held}
+    last = st.period_end or st.period_start
+    month = last.strftime("%Y-%m") if last else "9999-12"  # no period: every account is owed
+    expected = {(a.iban, a.currency) for a in co.current_accounts if bank_of(a.iban) in held and a.held_in(month)}
     return sorted(f"{ccy} {iban[-4:]}" for iban, ccy in expected - present)
+
+
+def refuse_incomplete(st: statements.Statement) -> None:
+    """Refuse a whole-month statement that leaves out an account its bank holds for the company in that month."""
+    missing = [] if st.partial else missing_accounts(st)  # a partial import (CSV) speaks for its one account only
+    if missing:
+        raise statements.MissingAccounts(missing)
 
 
 def ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: tuple[str, dict] | None = None) -> dict:
@@ -242,13 +252,7 @@ def _ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: t
     digest = identity(data, csv_account)
     if check:
         check(st)
-    missing = [] if st.partial else missing_accounts(st)  # a partial import (CSV) speaks for its one account only
-    if missing:
-        raise statements.StatementError(
-            "Statement missing configured accounts: "
-            + ", ".join(missing)
-            + "; download a full company statement from the bank"
-        )
+    refuse_incomplete(st)
     refuse_overlap(L, st, digest)
     day = st.period_start.isoformat()
     name = digest + ext
