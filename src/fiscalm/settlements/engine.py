@@ -701,7 +701,7 @@ def bank_evidence(L: Ledger, company: str, *, months: set[str] | None = None) ->
                 text = pdf_text(data[1])
             except RuntimeError as exc:
                 raise SettlementError("statement_unavailable") from exc
-            if f"CUI: {companies.get(company, L=L).cui}" not in text:
+            if not statements.names_cui(text, companies.get(company, L=L).cui):
                 raise SettlementError("statement_unavailable")
             st = statements.parse_text(text, company)
             if not expected_sha:
