@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from copy import deepcopy
 from datetime import date
 from decimal import Decimal
@@ -1088,3 +1089,75 @@ def test_two_connections_naming_one_bon_for_two_debits_have_one_winner(ledger):
     with ThreadPoolExecutor(2) as pool:
         won = [k for k in pool.map(attempt, keys) if k]
     assert len(won) == 1 and ledger.linked_receipts("NORD") == {stored["sha"]}
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Buyer: Atelier Nord SRL\nCUI: 12345674", "NORD"),
+        ("Buyer: Atelier Nord SRL\nBuyer: Studio 9 SRL", None),
+        ("Bon fiscal\nTOTAL 10.00 RON", None),
+        ("", None),
+        ("Seller: Atelier Nord SRL", None),
+    ],
+)
+def test_all_firms_assignment(ledger, home, monkeypatch, text, expected):
+    from fiscalm.api import upload_assignment
+
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
+    monkeypatch.setattr(upload_assignment, "document_text", lambda *args: text)
+    upload_assignment.process_pending(ledger)
+    doc = ledger.document(sha)
+    assert doc["company"] == (expected or "ALL")
+    if expected:
+        assert "/NORD/documents/inbox/" in doc["path"]
+        assert not upload_assignment.questions(ledger)
+        assert api.read_doc(ledger, "NORD", sha)[1] == JPEG
+    else:
+        question = upload_assignment.questions(ledger)[0]
+        assert question["key"] == sha
+        assert set(question["companies"]) == {"NORD", "STUDIO9"}
+        assert upload_assignment.pending_file(ledger, sha)[1] == JPEG
+        result = actions.act("upload-assign", "NORD", {"key": sha, "who": "STUDIO9"})
+        assert result["ok"]
+        assert ledger.document(sha)["company"] == "STUDIO9"
+        assert api.read_doc(ledger, "STUDIO9", sha)[1] == JPEG
+        assert not upload_assignment.assign(ledger, sha, "NORD")
+        assert not upload_assignment.pending_file(ledger, sha)
+
+
+def test_staged_upload_path_confinement(ledger, home):
+    from fiscalm.api import upload_assignment
+
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
+    original = ledger.document(sha)["path"]
+    outside = home / "outside.jpg"
+    outside.write_bytes(JPEG)
+    with ledger.tx() as db:
+        db.execute("UPDATE documents SET path=? WHERE sha=?", (str(outside), sha))
+    assert not upload_assignment.pending_file(ledger, sha)
+    assert not upload_assignment.assign(ledger, sha, "NORD")
+    with ledger.tx() as db:
+        db.execute("UPDATE documents SET path=? WHERE sha=?", (original, sha))
+    target = home / "NORD" / "documents"
+    target.parent.mkdir(exist_ok=True)
+    target.symlink_to(home / "ALL" / "documents", target_is_directory=True)
+    with pytest.raises(intake.Refused):
+        upload_assignment.assign(ledger, sha, "NORD")
+
+
+def test_assignment_race(ledger):
+    from fiscalm.api import upload_assignment
+
+    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
+
+    def assign(co):
+        with closing(Ledger()) as other:
+            return upload_assignment.assign(other, sha, co)
+
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(assign, ["NORD", "STUDIO9"]))
+    assert sorted(results) == [False, True]

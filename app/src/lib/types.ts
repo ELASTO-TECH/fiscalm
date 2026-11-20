@@ -1046,13 +1046,13 @@ export type MailQuestion = {
   /** no-firm: no firm on it; two-firms: several; other-firm: the sender's remembered firm isn't the one named;
    * total: one firm, but no single total; buyer-unclear: a firm is named, but not clearly as the buyer;
    * outside-scope: the inbox it came to doesn't serve the firm named (a statement or OP offers no firm). */
-  reason: "no-firm" | "two-firms" | "other-firm" | "total" | "buyer-unclear" | "outside-scope";
+  reason: "upload-firm" | "no-firm" | "two-firms" | "other-firm" | "total" | "buyer-unclear" | "outside-scope";
   /** The firms it may be for: the answers offered. */
   companies: Co[];
   /** The totals read on it; one is picked when there are several, [] when none was found. */
   totals: { amount: string; currency: string }[];
   /** pdf: mailfile previews it; null: nothing to show. */
-  file: "pdf" | null;
+  file: "pdf" | "jpg" | "png" | "heic" | null;
 };
 
 

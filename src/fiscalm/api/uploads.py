@@ -23,7 +23,7 @@ def create(L: Ledger, company: str, label: str, expires_in_days: int = 30, max_f
     if max_files is None:
         max_files = 100
     if (
-        company not in companies.all(L)
+        (company != "ALL" and company not in companies.all(L))
         or not isinstance(label, str)
         or not label.strip()
         or len(label) > 100
@@ -48,7 +48,9 @@ def create(L: Ledger, company: str, label: str, expires_in_days: int = 30, max_f
 def list_links(L: Ledger, company: str) -> list[dict]:
     return [
         dict(r)
-        for r in L.db.execute(f"SELECT {PUBLIC} FROM upload_links WHERE company=? ORDER BY created_at,id", (company,))
+        for r in L.db.execute(
+            f"SELECT {PUBLIC} FROM upload_links WHERE company IN (?,'ALL') ORDER BY created_at,id", (company,)
+        )
     ]
 
 
@@ -71,7 +73,7 @@ def verify(L: Ledger, token: str, company: str | None = None) -> dict | None:
     if (
         not equal
         or not row
-        or row["company"] not in companies.all(L)
+        or (row["company"] != "ALL" and row["company"] not in companies.all(L))
         or (company is not None and row["company"] != company)
         or row["revoked_at"]
         or row["expires_at"] <= timestamp()
@@ -83,8 +85,11 @@ def verify(L: Ledger, token: str, company: str | None = None) -> dict | None:
 
 def action(L: Ledger, company: str, name: str, args: dict) -> dict:
     if name == "upload-link-create":
-        allowed = {"co", "label", "expires_in_days", "max_files"}
+        allowed = {"co", "label", "expires_in_days", "max_files", "all_firms"}
+        if type(args.get("all_firms", False)) is not bool:
+            raise ValueError("all_firms must be boolean")
+        company = "ALL" if args.get("all_firms") else company
         if set(args) - allowed:
             raise ValueError("Unexpected upload link field.")
         return create(L, company, args.get("label", ""), args.get("expires_in_days", 30), args.get("max_files"))
-    return {"revoked": revoke(L, args.get("id", ""), company)}
+    return {"revoked": revoke(L, args.get("id", ""), company) or revoke(L, args.get("id", ""), "ALL")}

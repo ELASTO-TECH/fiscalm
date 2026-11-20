@@ -625,6 +625,11 @@ class Outcome:
     choices: list[str] = field(default_factory=list)
 
 
+def buyer_firm(doc: Doc, firms: list[str]) -> str:
+    """Ownership evidence shared by mail and uploads, independent of totals and sender rules."""
+    return firms[0] if len(firms) == 1 and doc.roles.get(firms[0]) == "buyer" else ""
+
+
 def decide(L: Ledger, doc: Doc, address: str, *, ask=None) -> Outcome:
     if doc.refused:
         return Outcome(doc.refused)
@@ -638,7 +643,7 @@ def decide(L: Ledger, doc: Doc, address: str, *, ask=None) -> Outcome:
     if remembered and remembered not in companies.all(L):
         remembered = None
     total = pdf_total(L, doc, ask=ask)
-    if len(firms) == 1 and doc.roles.get(firms[0]) != "buyer" and remembered != firms[0]:
+    if len(firms) == 1 and not buyer_firm(doc, firms) and remembered != firms[0]:
         # Named, but not clearly as the buyer, and no answer about its sender says it is: asked.
         return Outcome("asked", reason="buyer-unclear", total=total, choices=firms)
     if len(firms) == 1 and (not remembered or remembered == firms[0]):

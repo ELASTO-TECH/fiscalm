@@ -2598,6 +2598,17 @@ class Ledger:
         with self.tx() as db:
             return db.execute("UPDATE documents SET note=? WHERE sha=?", (note, sha)).rowcount > 0
 
+    def assign_upload(self, sha: str, company: str, path: str) -> bool:
+        """First assignment wins; the file has already been safely copied into the firm inbox."""
+        with self.tx() as db:
+            changed = db.execute(
+                "UPDATE documents SET company=?,path=?,issues='[\"to-check\"]' WHERE sha=? AND company='ALL' AND source LIKE 'upload:%'",
+                (company, path, sha),
+            ).rowcount
+            if changed:
+                db.execute("UPDATE receipt_uploads SET company=? WHERE sha=? AND company='ALL'", (company, sha))
+            return bool(changed)
+
     def document(self, sha: str):
         return self.db.execute("SELECT * FROM documents WHERE sha=?", (sha,)).fetchone()
 

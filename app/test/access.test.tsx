@@ -91,7 +91,7 @@ describe("Linkuri și chei API", () => {
     expect(api.calls.some((c) => c.url.endsWith("api/upload-links?co=NORD"))).toBe(true);
   });
 
-  it("makes a link, shows it once with a copy button, and forgets it after Gata", async () => {
+  it.each([false, true])("makes a link (all firms: %s), shows it once and forgets it after Gata", async (allFirms) => {
     at("?co=NORD&tab=setari&sec=acces");
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
@@ -101,11 +101,12 @@ describe("Linkuri și chei API", () => {
     const create = links.getByRole("button", { name: "Creează linkul" });
     expect(create).toBeDisabled(); // a name first
     await userEvent.type(links.getByLabelText("Nume"), " Telefonul lui Andrei ");
+    if (allFirms) await choose(links.getByLabelText("Firmă"), "all");
     await choose(links.getByLabelText("Valabil"), "90");
     await userEvent.click(create);
     await waitFor(() => expect(api.posts()).toHaveLength(1));
     expect(api.posts()[0]).toEqual({ url: "/web/api/upload-link-create", method: "POST",
-      body: { co: "NORD", label: "Telefonul lui Andrei", expires_in_days: 90 } });
+      body: { co: "NORD", label: "Telefonul lui Andrei", expires_in_days: 90, ...(allFirms ? { all_firms: true } : {}) } });
     const url = `${window.location.origin}/u/l9.s3cr3t`;
     expect(await links.findByText(url)).toBeInTheDocument();
     expect(links.getByText("Linkul se afișează doar acum.")).toBeInTheDocument();
@@ -239,8 +240,8 @@ it.each(["admin", "member", "readonly"] as UserRole[])("shows user-owned keys an
   at("?co=NORD&tab=setari&sec=acces"); const user = userEvent.setup();
   const api = renderApp({ principal: fixtureIdentity(role), tokens: () => json([token({}), token({ id: "other", name: "Alt proprietar", user_id: "u_other", owner: { id: "u_other", display_name: "Alt cont" } })]) });
   expect(await screen.findByText("Asistentul AI")).toBeVisible(); expect(!!screen.queryByText("Alt proprietar")).toBe(role === "admin");
-  expect(api.calls.some(c => c.url.includes("api/upload-links?"))).toBe(role !== "readonly");
-  expect(!!screen.queryByRole("region", { name: "Bondrop" })).toBe(role !== "readonly");
+  expect(api.calls.some(c => c.url.includes("api/upload-links?"))).toBe(role === "admin");
+  expect(!!screen.queryByRole("region", { name: "Bondrop" })).toBe(role === "admin");
   await user.click(screen.getByRole("button", { name: "Cheie nouă" })); expect(!!screen.queryByLabelText("Citire și acțiuni")).toBe(role !== "readonly");
 });
 

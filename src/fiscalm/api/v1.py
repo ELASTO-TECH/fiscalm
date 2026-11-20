@@ -96,7 +96,11 @@ def run_action(
     if (
         action not in actions.API_ACTIONS
         or not isinstance(body, dict)
-        or not all(isinstance(v, (str, int)) and not isinstance(v, bool) for v in body.values())
+        or not all(
+            (k == "all_firms" and action == "upload-link-create" and type(v) is bool)
+            or (isinstance(v, (str, int)) and not isinstance(v, bool))
+            for k, v in body.items()
+        )
         or body.get("co", co) != co
     ):
         fail(400, "invalid_action", "The action body is invalid. Check the action contract.")
@@ -160,8 +164,18 @@ def execute_as(
     *,
     idempotency_key: str | None = None,
 ) -> object:
-    guard = (lambda current: tokens.authorize(current, credential)) if route.scope == "write" else None
-    with L.guard_writes(guard):
+    def guard(current: Ledger) -> None:
+        shared = isinstance(body, dict) and body.get("all_firms") is True
+        if route.resource == "upload_link_revoke" or (
+            route.resource == "action" and params.get("action") == "upload-link-revoke"
+        ):
+            ident = params.get("id") or (body or {}).get("id")
+            shared = bool(
+                current.db.execute("SELECT 1 FROM upload_links WHERE id=? AND company='ALL'", (ident,)).fetchone()
+            )
+        tokens.authorize(current, credential, admin=shared)
+
+    with L.guard_writes(guard if route.scope == "write" else None):
         return _execute_as(L, credential, route, params, query, body, idempotency_key=idempotency_key)
 
 

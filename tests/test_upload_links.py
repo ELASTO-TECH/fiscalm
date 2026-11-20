@@ -30,7 +30,7 @@ def test_lifecycle(ledger, capsys, monkeypatch):
 @pytest.mark.parametrize(
     "kw",
     [
-        {"company": "ALL"},
+        {"company": "UNKNOWN"},
         {"label": ""},
         {"expires_in_days": 0},
         {"expires_in_days": 366},
@@ -103,3 +103,23 @@ def test_app_management_survives_log_failure(ledger, monkeypatch):
     result = actions.act("upload-link-revoke", "NORD", {"id": made["id"]})
     assert result["ok"] and result["done"]["revoked"] and result["message"] == "Linkul a fost revocat."
     assert not upload_links.verify(ledger, made["path"][3:])
+
+
+def test_all_firms_cli(ledger, capsys):
+    assert cli.main(["upload-link", "create", "--all-firms", "--label", "Phone"]) == 0
+    made = json.loads(capsys.readouterr().out)
+    assert upload_links.verify(ledger, made["path"][3:])["company"] == "ALL"
+    assert upload_links.list_links(ledger, "NORD")[0]["id"] == made["id"]
+
+
+def test_shared_link_api_requires_admin(token_owner, ledger, server, world):
+    writer = tokens.create(ledger, "Writer", "write", user_id=token_owner)["token"]
+    path = "/companies/NORD/upload-links"
+    assert request(server, writer, path, "POST", {"label": "Phone", "all_firms": True})[0] == 403
+    with ledger.tx() as db:
+        db.execute("UPDATE users SET role='admin' WHERE id=?", (token_owner,))
+    code, result = request(server, writer, path, "POST", {"label": "Phone", "all_firms": True})
+    assert code == 200 and result["ok"]
+    with ledger.tx() as db:
+        db.execute("UPDATE users SET role='member' WHERE id=?", (token_owner,))
+    assert request(server, writer, path + "/" + result["done"]["id"] + "/revoke", "POST", {})[0] == 403

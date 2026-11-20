@@ -490,7 +490,13 @@ class Handler(BaseHTTPRequestHandler):
                 {"Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'"},
             )
         if rest == "api/info":
-            return self._json(200, {"company": companies.all()[link["company"]].name, "label": link["label"]})
+            return self._json(
+                200,
+                {
+                    "company": "Toate firmele" if link["company"] == "ALL" else companies.all()[link["company"]].name,
+                    "label": link["label"],
+                },
+            )
         return self._404()
 
     def _upload_headers(self) -> tuple[int, str]:
@@ -896,7 +902,7 @@ class Handler(BaseHTTPRequestHandler):
         if co not in companies.all() or not arg("sha"):
             return self._404()
         with contextlib.closing(Ledger()) as L:
-            got = api.read_doc(L, co, arg("sha"))
+            got = api.read_doc(L, co, arg("sha")) or api.upload_assignment.pending_file(L, arg("sha"))
         if not got:
             return self._404()
         name, data = got

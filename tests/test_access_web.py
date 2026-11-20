@@ -186,7 +186,9 @@ def test_browser_tokens_are_owned_filtered_and_limited_by_role(ledger, server, r
     assert not _api(server, "token-create", {"name": "Forged", "scope": "read", "user_id": "u_admin"}, user=role)[1][
         "ok"
     ]
-    if role != "readonly":
+    if role != "admin":
+        assert _api(server, "upload-link-create", {"co": "NORD", "label": "Phone"}, user=role)[0] == 403
+    else:
         made = _api(server, "upload-link-create", {"co": "NORD", "label": "Phone"}, user=role)[1]["done"]
         assert _get_json(server, "/web/api/upload-links?co=NORD", user=role)[1][0]["id"] == made["id"]
         assert _api(server, "upload-link-revoke", {"co": "NORD", "id": made["id"]}, user=role)[1]["done"]["revoked"]
