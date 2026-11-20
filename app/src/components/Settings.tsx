@@ -149,6 +149,13 @@ export function SystemCard() {
             onChange={(e) => void run(s.co, () => post("update-checks", { co: s.co, on: e.target.checked ? "1" : "0" }), undefined, () => false)} />
             Verifică versiunile noi</Label>
         </div>}
+        {firms && s.system.telemetry && <div className="pr-5 pb-3 pl-16">
+          <Label><Input type="checkbox" role="switch" checked={s.system.telemetry.enabled} disabled={busy || s.system.telemetry.forced_off}
+            onChange={(e) => void run(s.co, () => post("telemetry-settings", { co: s.co, on: e.target.checked ? "1" : "0" }), undefined, () => false)} />
+            Statistici anonime</Label>
+          <p className="mt-1 text-xs text-muted">În Live, trimite zilnic un ID aleatoriu, numărul de firme, versiunea și versiunea schemei bazei de date. Nicio altă dată.</p>
+          {s.system.telemetry.forced_off && <p className="mt-1 text-xs text-muted">Oprite pe server prin FISCALM_TELEMETRY=0.</p>}
+        </div>}
         {firms && <Row icon="clock" title="Ultima verificare" sub={s.system.last_run ? dmt(s.system.last_run, s.today) : "Nicio verificare încă"} />}
         {firms && <div className="-mt-1 pr-5 pb-4 pl-16"><Act action="check" body={{}} label="Verifică acum" cls="btn g" /></div>}
       </Panel>

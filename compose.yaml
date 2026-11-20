@@ -6,6 +6,7 @@ x-runtime: &runtime
     - secrets:/secrets
     - ai-cli-home:/home/fiscalm
   environment:
+    FISCALM_TELEMETRY: ${FISCALM_TELEMETRY:-1}
     FISCALM_BACKUPS: /data/backups
     FISCALM_HOST: 0.0.0.0 # explicit container-only bind; host publishing remains loopback
     FISCALM_TRUST_PROXY: ${FISCALM_TRUST_PROXY:-0}

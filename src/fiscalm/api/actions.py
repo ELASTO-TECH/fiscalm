@@ -32,6 +32,7 @@ from fiscalm import (
     receipt_items,
     rules,
     secrets,
+    telemetry,
     updates,
 )
 from fiscalm.api import limits, public_url, sessions, setup_links, state as api, tokens, uploads as upload_links, users
@@ -883,6 +884,13 @@ def history_review(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     )
 
 
+def _telemetry_settings(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    if args.get("on") not in ("0", "1"):
+        return _res(False, BAD)
+    telemetry.set_enabled(L, args["on"] == "1")
+    return _res(True, "Setarea a fost salvată.")
+
+
 def _update_checks(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     on = args.get("on")
     if on not in ("0", "1"):
@@ -1183,6 +1191,7 @@ ACTIONS = {
     'receipt-invoice-confirm': Action(_receipt_items, 'id revision invoice', public=False, description='id: receipt SHA; revision; invoice: displayed unique proposal ID. Rechecks under lock, never confirms payment. Local operation.'),
     'setup-card-dismiss': Action(_setup_card_dismiss, '', role='manage_firms', public=False, strings=True, description='Close the selected firm\'s Configurează card on Acasă; the items it listed stay in Setări, and `setup-card-show` reopens it. Administrator only; repeating it changes nothing.'),
     'setup-card-show': Action(_setup_card_show, '', role='manage_firms', public=False, strings=True, description='Show the selected firm\'s closed Configurează card on Acasă again, while something is left to set up. Administrator only; repeating it changes nothing.'),
+    'telemetry-settings': Action(_telemetry_settings, 'on', effect='local', role='manage_firms', firm=False, public=False, strings=True, description='on ("1" or "0"). Administrator only. Daily anonymous Live install statistics, enabled by default; FISCALM_TELEMETRY=0 overrides this local preference.'),
     'update-checks': Action(_update_checks, 'on', role='manage_firms', firm=False, public=False, strings=True, description='on ("1" or "0"). App administrator only. Enable or disable the anonymous daily GitHub Releases check, also allowed in shadow mode.'),
     'accountant-save': Action(_accountant_save, 'cui senders recipient', role='manage_firms', public=False, strings=True, description='cui (existing partner), senders (newline-separated addresses, at most ten), recipient, co. App admin configuration.'),
     'settlement-withdraw': Action(_settlement_withdraw, 'id', strings=True, description='Withdraw pending settlement evidence; never release a reserved credit.'),

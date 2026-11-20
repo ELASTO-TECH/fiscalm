@@ -687,7 +687,7 @@ def schemas() -> dict:
         },
         "system": {
             **OBJECT,
-            "description": "Installation health, running version, and updates: enabled (daily anonymous GitHub Releases check), release (validated tag_name, html_url, published_at of a newer stable SemVer, or null), command (manual update command for this install kind).",
+            "description": "Installation health, running version, telemetry (enabled, forced_off by FISCALM_TELEMETRY=0), and updates: enabled (daily anonymous GitHub Releases check), release (validated tag_name, html_url, published_at of a newer stable SemVer, or null), command (manual update command for this install kind).",
         },
         "rules": array(ref("Rule")),
     }

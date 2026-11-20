@@ -3,6 +3,11 @@
 Product versions describe fiscalm releases. The API and the ledger schema have their own
 version numbers. Back up before upgrading; see [self-hosting](docs/self-hosting.md).
 
+## Unreleased
+
+- Anonymous daily install statistics in Live, on by default. Administrators can turn them
+  off in Setări › Sistem or with `FISCALM_TELEMETRY=0`.
+
 ## 0.1.0 (2026-11-20)
 
 First public release. User-facing release notes are published with the

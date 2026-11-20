@@ -34,6 +34,7 @@ from fiscalm import (
     recon,
     rules,
     secrets as secret_store,
+    telemetry,
     transactions,
     turnover,
     updates,
@@ -1388,6 +1389,7 @@ def _system(L: Ledger, now: datetime, co: str) -> dict:
     return {
         "version": __version__,
         "updates": updates.state(L),
+        "telemetry": telemetry.state(L),
         "configuration_error": None,
         "anaf": {
             "status": status,

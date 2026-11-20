@@ -27,6 +27,10 @@ works first on a phone.
 - When unsure, it settles nothing. A bank line that fits several invoices pays none of them, and an
   invoice a person marks paid waits for a statement or a mail that proves it.
 
+Usage statistics are on by default: in Live, a daily ping sends only a random install UUID,
+the active firm count, fiscalm version and ledger schema version. Turn off **Statistici anonime**
+in Setări › Sistem or set `FISCALM_TELEMETRY=0`. No company identifiers or financial data are sent.
+
 ## Status of 0.1.0
 
 This is the first public release. The test suite runs on synthetic data and fakes for every outside
@@ -87,6 +91,7 @@ Sandbox is not offline: reads from the services below also run in Sandbox.
 | `api.anaf.ro/test` | In Sandbox, invoice uploads and status checks | Don't connect ANAF |
 | `webservicesp.anaf.ro` | Looking up a company or client by CUI; each tick, partners' VAT and inactive status (CUIs only, no credentials) | No switch |
 | `curs.bnr.ro` | Exchange rate, when a foreign-currency invoice, shop order or due recurring invoice needs one that is not cached yet | No switch; with only RON documents no request is made |
+| `fiscalm.ro/api/v1/ping` | Daily anonymous install statistics, Live only | "Statistici anonime" in Setări › Sistem or `FISCALM_TELEMETRY=0` |
 | `api.github.com` | Daily check for a newer release (anonymous) | "Verifică versiunile noi" in Setări |
 | Your AI provider (Anthropic, an OpenAI-compatible server, or the Claude Code or Codex CLI) | Text of mails and documents that rules can't decide, receipt images | Choose no AI service |
 | Your IMAP server | Reading invoices, statements and payment orders from mail | Turn off reading on the mail account |
