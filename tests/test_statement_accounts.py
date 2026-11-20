@@ -2,9 +2,10 @@
 
 import dataclasses
 import json
+from datetime import date
 
 import pytest
-from firms import set_firm
+from firms import iban, set_firm
 from test_camt import complete, fake_pdf, parse, write, xml
 
 from fiscalm import companies, pack, recon
@@ -12,6 +13,7 @@ from fiscalm.bank import intake as statement_intake, statements
 
 ING = "RO00INGB0000000000000009"
 X1, X2, Y = "RO00XXXX0000000000000001", "RO00XXXX0000000000000002", "RO00YYYY0000000000000002"
+USD = iban("RO00BTRLUSDCRT0000000001")
 
 
 def nord_with(monkeypatch, *accounts, keep=True):
@@ -50,11 +52,33 @@ def test_all_configured_accounts_required(ledger, tmp_path):
         ([(X1, "EUR", ""), (Y, "EUR", "")], xml(iban=Y, currency="EUR"), []),
         ([(X1, "EUR", ""), (X2, "EUR", "")], xml(iban=X1, currency="EUR"), ["EUR 0002"]),  # one bank's code: both owed
         ([(X1, "USD", "bt")], complete(), ["USD 0001"]),  # a configured bank wins over the IBAN's code
+        ([(USD, "USD", "bt", {"opened": "2026-11"})], complete(), []),  # opened after October: not owed yet
+        ([(USD, "USD", "bt", {"opened": "2026-10"})], complete(), ["USD 0001"]),  # opened that month: owed
+        ([(USD, "USD", "bt", {"opened": "2026-11"})], "two periods", ["USD 0001"]),  # which month? owed
+        ([(USD, "USD", "bt", {"opened": "2026-11"})], "backwards", ["USD 0001"]),  # ends before it starts: owed
+        ([(USD, "USD", "bt", {"retired": "2026-10-15"})], complete(), ["USD 0001"]),  # retired later: owed
+        ([(USD, "USD", "bt", {"retired": "2026-09-30"})], complete(), []),  # retired before October: not owed
     ],
 )
 def test_a_statement_needs_every_account_at_its_bank_and_none_elsewhere(monkeypatch, tmp_path, accounts, data, missing):
     nord_with(monkeypatch, *accounts)
-    assert statement_intake.missing_accounts(parse(tmp_path, data)) == missing
+    st = parse(tmp_path, data if isinstance(data, bytes) else complete())
+    if data == "two periods":  # a PDF whose sections name different periods
+        st = dataclasses.replace(st, one_period=False)
+    if data == "backwards":  # December 1 to September 30
+        st = dataclasses.replace(st, period_start=date(2026, 12, 1), period_end=date(2026, 9, 30))
+    assert statement_intake.missing_accounts(st) == missing
+
+
+@pytest.mark.parametrize("currencies,missing", [(("RON", "EUR"), []), (("RON",), ["EUR 0001"])])
+def test_an_older_bt_pdf_is_complete_only_with_every_account(currencies, missing):
+    """2021-2023 layout: `Extras numarul N` comes before the currency on each account's IBAN line."""
+    ibans = companies.get("NORD").ibans
+    text = "din 01/10/2026 - 31/10/2026\n" + "".join(
+        f"CONT {c}CRT Valuta Cont de disponibil\nExtras numarul 6     {c}     Cod IBAN: {ibans[c]}\n"
+        for c in currencies
+    )
+    assert statement_intake.missing_accounts(statements.parse_text(text, "NORD")) == missing
 
 
 @pytest.mark.parametrize(

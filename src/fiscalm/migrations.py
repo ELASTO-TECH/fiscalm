@@ -603,6 +603,12 @@ def app_statements_imported(db: sqlite3.Connection) -> None:
     db.execute("UPDATE documents SET source='statement-import' WHERE source='upload:app' AND kind='statement'")
 
 
+def account_opened(db: sqlite3.Connection) -> None:
+    # The first month an account existed (YYYY-MM), set by a person; '' when unknown, so the account is owed in every
+    # month's statement as before (bank.intake.missing_accounts).
+    db.execute("ALTER TABLE firm_accounts ADD COLUMN opened TEXT NOT NULL DEFAULT ''")
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     baseline,
     transaction_links,
@@ -643,6 +649,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     product_catalog,
     one_off_switch,
     app_statements_imported,
+    account_opened,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

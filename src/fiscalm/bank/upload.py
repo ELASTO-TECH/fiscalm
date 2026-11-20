@@ -40,7 +40,10 @@ NEEDS_COLUMNS = "E primul CSV al acestui cont: trebuie alese coloanele pentru da
 TOO_BIG = "Fișierul este prea mare pentru un extras."
 WRONG_COMPANY = "Extrasul nu este al acestei firme sau parola extraselor nu îl deschide."
 WRONG_BANK = "Extrasul are conturi de la altă bancă decât cea aleasă."
-INCOMPLETE = "Extrasul nu cuprinde toate conturile firmei de la această bancă."
+INCOMPLETE = (
+    "Extrasul nu cuprinde {accounts}. Încarcă extrasul cu toate conturile firmei de la această bancă. "
+    "Dacă firma a deschis contul după luna extrasului, administratorul trece luna deschiderii din linia de comandă."
+)
 NOT_READ = "Extrasul nu a putut fi citit. Verifică fișierul, apoi încearcă din nou."
 NO_PASSWORD = "Parola extraselor acestei firme lipsește sau nu poate fi citită. Se adaugă în Setări › Firme › Bănci."
 NOT_SAVED = "Extrasul nu a putut fi încărcat: {why}"
@@ -90,7 +93,7 @@ def _checks(company: str, bank: str):
     """What an uploaded statement must be before anything is stored: every account the company's (a PDF that isn't
     encrypted opens with any password, and its text naming the company proves nothing about its accounts), every
     account at `bank` when one is given, and every current account the company holds at those banks present."""
-    from fiscalm.bank.intake import missing_accounts
+    from fiscalm.bank.intake import refuse_incomplete
 
     co = companies.get(company)
 
@@ -104,8 +107,7 @@ def _checks(company: str, bank: str):
             b = own.bank or (banks.for_iban(a.iban).id if banks.for_iban(a.iban) else "")
             if bank and b != bank:
                 raise statements.StatementError(WRONG_BANK)
-        if not st.partial and missing_accounts(st):  # a CSV speaks for its one account and its own days only
-            raise statements.StatementError(INCOMPLETE)
+        refuse_incomplete(st)  # a CSV speaks for its one account and its own days only
 
     return check
 
@@ -143,7 +145,7 @@ KNOWN = (
     ),
     ("Overlapping statement", "Extrasul se suprapune cu unul încărcat deja pentru același cont."),
     ("already imported", "Extrasul pentru acest cont și această lună este deja încărcat."),
-    ("missing configured accounts", INCOMPLETE),
+    ("missing configured accounts", "Extrasul nu cuprinde toate conturile firmei de la această bancă."),
     ("Cannot read a stored statement", STORED),
     ("Cannot tell which accounts", STORED),
     ("Cannot verify adjacent", STORED),
@@ -165,6 +167,7 @@ KNOWN = (
     ("Unsupported statement", NOT_A_STATEMENT),
     ("cannot determine statement month", "Extrasul PDF nu arată perioada. Descarcă din bancă extrasul complet."),
     ("PDF account IBAN missing", "Extrasul PDF nu arată IBAN-ul contului. Descarcă din bancă extrasul complet."),
+    ("PDF account currency", "Extrasul PDF nu arată clar moneda contului. Descarcă din bancă extrasul complet."),
     ("CSV encoding", "Fișierul CSV are o codare necunoscută. Salvează-l ca UTF-8, apoi încarcă-l din nou."),
     ("CSV has no rows", "Fișierul CSV nu are rânduri sau are prea multe. Încarcă extrasul unei singure luni."),
     (
@@ -180,7 +183,13 @@ KNOWN = (
         "Nu mai este spațiu pentru extras. Eliberează spațiu pe server, apoi încearcă din nou.",
     ),
 )
-OWN = (WRONG_BANK, WRONG_COMPANY, OTHER_ACCOUNT, INCOMPLETE, NOT_READ)
+OWN = (WRONG_BANK, WRONG_COMPANY, OTHER_ACCOUNT, NOT_READ)
+
+
+def incomplete(accounts: list[str]) -> str:
+    """INCOMPLETE naming each missing account ("EUR 0001") by currency and last four characters."""
+    named = ", ".join(a.replace(" ", " ••••") for a in accounts)
+    return INCOMPLETE.format(accounts=("contul " if len(accounts) == 1 else "conturile ") + named)
 
 
 def _say(errors) -> str:
@@ -195,6 +204,8 @@ def _refusal(e: statements.StatementError) -> str:
     if isinstance(e, statements.PartialMonth):
         last = calendar.monthrange(e.month.year, e.month.month)[1]
         return PARTIAL.format(last=last, month=LUNI[e.month.month - 1])
+    if isinstance(e, statements.MissingAccounts):
+        return incomplete(e.accounts)
     return _say([str(e)])
 
 
@@ -255,7 +266,8 @@ def accept(L: Ledger, company: str, bank: str, data: bytes, content_type: str, a
                 errors = result.get("errors") or []
                 raise Refused(409, _say(errors) if _say(errors) != NOT_READ else NO_PASSWORD)
             if result["status"] == "refused":
-                raise Refused(422, _say(result.get("errors")))
+                missing = result.get("missing")  # the engine's own list, never words read back from an error text
+                raise Refused(422, incomplete(missing) if missing else _say(result.get("errors")))
         if result.get("company") != company:  # defence in depth: the import named another company
             raise Refused(422, WRONG_COMPANY)
         result["message"] = DUPLICATE if result["status"] == "duplicate" else ADDED

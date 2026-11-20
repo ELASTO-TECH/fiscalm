@@ -159,7 +159,8 @@ def _ingest_statement(
             check(st)
     except statements.StatementError as exc:
         out.unlink()
-        return {"file": str(path), "status": "refused", "errors": [str(exc)]}
+        missing = {"missing": exc.accounts} if isinstance(exc, statements.MissingAccounts) else {}
+        return {"file": str(path), "status": "refused", "errors": [str(exc)]} | missing
     except BaseException:  # a parser failing on a hostile or damaged file leaves no decrypted copy behind
         out.unlink(missing_ok=True)
         raise

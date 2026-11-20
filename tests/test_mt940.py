@@ -155,7 +155,7 @@ def test_an_mt940_is_imported_by_the_operator_and_through_an_upload(ledger, tmp_
     assert recon.ingest_file(ledger, p)["status"] == "refused"  # mail and links: never (unsigned, like CAMT)
     with pytest.raises(su.Refused) as e:  # the upload must hold every account of its bank
         su.accept(ledger, "NORD", "", block(), "text/plain")
-    assert e.value.message == su.INCOMPLETE
+    assert e.value.message == su.incomplete(["EUR 0001"])
     r = su.accept(ledger, "NORD", "bt", complete_mt940(), "text/plain")
     assert (r["status"], r["message"]) == ("added", su.ADDED)
     (doc,) = ledger.documents(kind="statement")

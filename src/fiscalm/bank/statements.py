@@ -40,6 +40,20 @@ class PartialMonth(StatementError):
         self.month = month
 
 
+class MissingAccounts(StatementError):
+    """A statement that leaves out accounts the company held at its bank in that month; `accounts` names each
+    one by currency and last four characters, e.g. "EUR 0001"."""
+
+    def __init__(self, accounts: list[str]):
+        super().__init__(
+            "Statement missing configured accounts: "
+            + ", ".join(accounts)
+            + "; download a full company statement from the bank, or set the month an account opened"
+            + " (fiscalm company opened)"
+        )
+        self.accounts = accounts
+
+
 # ------------------------------------------------------------------- decrypt
 
 
@@ -265,6 +279,7 @@ class Statement:
     period_end: date | None
     accounts: list[Account]
     partial: bool = field(default=False, kw_only=True)  # covers only its own dates (a CSV), not a whole month
+    one_period: bool = field(default=True, kw_only=True)  # False: a PDF whose sections name different periods
     source: str = field(
         default="file", kw_only=True
     )  # "file": a statement document; "ob": from the bank (open banking)
@@ -401,7 +416,9 @@ def parse_text(text: str, company: str) -> Statement:
             cur_lines.append(s)
     close()
     _pdf_trust(accounts, opening, final, one_period, period_end)
-    return Statement(company=company, period_start=period_start, period_end=period_end, accounts=accounts)
+    return Statement(
+        company=company, period_start=period_start, period_end=period_end, accounts=accounts, one_period=one_period
+    )
 
 
 def _pdf_columns(line: str) -> tuple[int, int] | None:
@@ -424,11 +441,17 @@ def _pdf_period(text: str) -> tuple[date | None, date | None, bool]:
 
 
 def _pdf_account(line: str) -> Account:
-    mi = re.search(r"Cod IBAN:\s*(RO[0-9A-Z]{22})", line)
-    mc = re.match(r"\s*([A-Z]{3})\b", line)
-    if not mi:
+    """The account line: its currency is the token right before `Cod IBAN`, alone on the line (2024 on) or after
+    `Extras numarul N` (2021-2023). A BT IBAN spells its currency too (`BTRL<CCY>`): the two must agree."""
+    m = re.search(r"(?:^|\s)([A-Z]{3})\s+Cod IBAN:\s*(RO[0-9A-Z]{22})", line)
+    if not re.search(r"Cod IBAN:\s*RO[0-9A-Z]{22}", line):
         raise StatementError("PDF account IBAN missing; download a complete statement")
-    return Account(iban=mi.group(1), currency=mc.group(1) if mc else "")
+    if not m:
+        raise StatementError("PDF account currency missing; download a complete statement")
+    currency, iban = m.groups()
+    if iban[4:8] == "BTRL" and iban[8:11].isalpha() and iban[8:11] != currency:
+        raise StatementError("PDF account currency contradicts its IBAN; download a complete statement")
+    return Account(iban=iban, currency=currency)
 
 
 def _pdf_balance(

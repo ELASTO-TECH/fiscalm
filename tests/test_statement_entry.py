@@ -24,9 +24,24 @@ def test_the_content_decides_and_a_prefixed_pdf_header_is_refused(tmp_path, monk
         statements.parse(path, "NORD")
 
 
-def test_pdf_empty_account_iban_refused():
-    with pytest.raises(statements.StatementError, match="IBAN"):
-        statements.parse_text("CONT 123 Valuta\nRON Cod IBAN: \n", "NORD")
+@pytest.mark.parametrize(
+    "line,currency",
+    [
+        ("RON Cod IBAN: ", "IBAN missing"),
+        ("EUR  Cod IBAN: RO00BTRLEURCRT0000000001", "EUR"),  # 2024 on: the currency starts the line
+        ("Extras numarul 6        EUR       Cod IBAN: RO00BTRLEURCRT0000000001", "EUR"),  # 2021-2023
+        ("Extras numarul 6        RON       Cod IBAN: RO00BTRLEURCRT0000000001", "contradicts its IBAN"),
+        ("Extras numarul 6                  Cod IBAN: RO00BTRLEURCRT0000000001", "currency missing"),
+    ],
+)
+def test_a_bt_pdf_account_line_gives_its_iban_and_currency_or_is_refused(line, currency):
+    text = f"CONT 123 Valuta\n{line}\n"
+    if len(currency) == 3:
+        (acct,) = statements.parse_text(text, "NORD").accounts
+        assert (acct.iban, acct.currency) == ("RO00BTRLEURCRT0000000001", currency)
+        return
+    with pytest.raises(statements.StatementError, match=currency):
+        statements.parse_text(text, "NORD")
 
 
 @pytest.mark.parametrize("category", [statements.BANK_FEE, statements.INTEREST])
