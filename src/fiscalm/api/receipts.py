@@ -110,9 +110,15 @@ def directory(company: str, day: str) -> Iterator[int]:
 
 @contextmanager
 def multipart(
-    content_type: str, stream: BinaryIO, length: int, company: str, connection=None, deadline: float | None = None
+    content_type: str,
+    stream: BinaryIO,
+    length: int,
+    company: str,
+    connection=None,
+    deadline: float | None = None,
+    most: int = 10,
 ) -> Iterator[list[tuple[str, BinaryIO]]]:
-    """Bound buffers independently of line count; stop before processing an eleventh part."""
+    """Bound buffers independently of line count; stop before processing a part beyond `most`."""
     if length > REQUEST_MAX:
         raise Refused(413)
     match = re.fullmatch(
@@ -128,7 +134,7 @@ def multipart(
             if reader.until(b"\r\n", 74) != b"--" + boundary:
                 raise Refused(400)
             while True:
-                if len(files) == 10:
+                if len(files) == most:
                     raise Refused(413)
                 _multipart_headers(reader.until(b"\r\n\r\n", 4096))
                 name = ".upload-" + secrets.token_hex(16)

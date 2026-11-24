@@ -571,7 +571,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json(status, body)
 
     def _statement_upload(self) -> None:
-        """POST api/statement-upload?co=KEY[&bank=ID]: one statement's bytes, typed application/pdf or application/xml.
+        """POST api/statement-upload?co=KEY[&bank=ID]: one statement's bytes, typed application/pdf or application/xml,
+        or several BT PDFs of one month as multipart/form-data `files`, imported together (su.accept_pdfs).
         Admin only (it settles money once matched); local only, so allowed before the install goes live."""
 
         self.close_connection = True
@@ -590,7 +591,9 @@ class Handler(BaseHTTPRequestHandler):
         ):
             return refuse(400, actions.BAD)
         digits = lengths[0].lstrip("0") or "0"
-        if len(digits) > 9 or int(digits) > su.MAX_PDF:
+        ctype = self.headers.get("Content-Type") or ""
+        several = ctype.lower().startswith("multipart/form-data;")  # BT PDFs of one statement, sent together
+        if len(digits) > 9 or int(digits) > (receipt_upload.REQUEST_MAX if several else su.MAX_PDF):
             return refuse(413, su.TOO_BIG)
         n = int(digits)
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -606,8 +609,13 @@ class Handler(BaseHTTPRequestHandler):
             return refuse(400, actions.BAD)
         if query.get("report") == ["1"] and n > bank_upload.LIMIT:
             return refuse(413, bank_upload.TOO_BIG)
-        data = self.rfile.read(n)
-        if len(data) != n:
+        if several and set(query) - {"co", "bank"}:
+            return refuse(400, actions.BAD)
+        try:
+            data = self._statement_files(ctype, n, co) if several else self.rfile.read(n)
+        except receipt_upload.Refused as e:
+            return refuse(e.status, su.TOO_BIG if e.status == 413 else su.NOT_A_STATEMENT)
+        if not several and len(data) != n:
             return refuse(400, actions.BAD)
         with (
             contextlib.closing(Ledger()) as L,
@@ -633,8 +641,10 @@ class Handler(BaseHTTPRequestHandler):
                         description=description,
                         partner=query.get("partner", [""])[0],
                     )
+                elif several:
+                    res = su.accept_pdfs(L, co, bank, data)
                 else:
-                    res = su.accept(L, co, bank, data, self.headers.get("Content-Type") or "", account)
+                    res = su.accept(L, co, bank, data, ctype, account)
             except AuthorizationRefused:
                 return refuse(403, actions.ROLE_REFUSALS["manage_firms"])
             except bank_upload.Refused as e:
@@ -661,6 +671,12 @@ class Handler(BaseHTTPRequestHandler):
                 log(f"statement-upload: state after failed: {type(exc).__name__}")
                 body["state"] = None
             return self._json(200, body)
+
+    def _statement_files(self, ctype: str, n: int, co: str) -> list[bytes]:
+        """A multipart body's files, read whole: several PDFs of one statement, at most su.MAX_FILES."""
+        deadline = time.monotonic() + receipt_upload.body_deadline(n)
+        with receipt_upload.multipart(ctype, self.rfile, n, co, self.connection, deadline, su.MAX_FILES) as parts:
+            return [fh.read() for _, fh in parts]
 
     def _history_upload(self) -> None:
         """POST api/history-upload?co=KEY&start=YYYY-MM-DD: one e-Factura XML or a ZIP of them, from another program or
