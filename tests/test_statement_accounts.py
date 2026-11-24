@@ -389,3 +389,19 @@ def test_every_way_a_bt_pdf_arrives_needs_every_account_and_only_the_firms(ledge
     assert bring(ledger, caller, [ron, eur, foreign], monkeypatch, account) == upload.OTHER_ACCOUNT
     assert bring(ledger, caller, [ron, eur], monkeypatch, account) == "added"
     assert len(ledger.documents(kind="statement")) == 2
+
+
+def test_an_account_added_while_a_set_is_checked_refuses_it_under_the_write_lock(ledger, tmp_path, monkeypatch):
+    """The firm's checks run again in the transaction that stores the set: an account added in between is owed."""
+    files = bt_files(tmp_path)
+    place = recon._place
+
+    def added_meanwhile(*args):  # after the first checks, before the transaction: an administrator adds USD at BT
+        if not companies.get("NORD").account(USD):
+            nord_with(monkeypatch, (USD, "USD", "bt"))
+        return place(*args)
+
+    monkeypatch.setattr(recon, "_place", added_meanwhile)
+    (result,) = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
+    assert (result["status"], result["missing"]) == ("refused", ["USD 0001"])
+    assert not ledger.documents(kind="statement") and not list(recon.month_dir("NORD", "2026-10").rglob("*.pdf"))
