@@ -3,13 +3,16 @@
 import dataclasses
 import json
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from firms import iban, set_firm
+from pdf_fake import bt_statement
 from test_camt import complete, fake_pdf, parse, write, xml
 
 from fiscalm import companies, pack, recon
 from fiscalm.bank import intake as statement_intake, statements
+from fiscalm.ledger import finance_home
 
 ING = "RO00INGB0000000000000009"
 X1, X2, Y = "RO00XXXX0000000000000001", "RO00XXXX0000000000000002", "RO00YYYY0000000000000002"
@@ -206,3 +209,113 @@ def test_a_bt_pdf_is_tried_only_with_companies_that_bank_at_bt(monkeypatch, tmp_
     with pytest.raises(statements.SecretsUnavailable):
         statements.open_encrypted(tmp_path / "x.pdf", lookup, only=only)
     assert keys == tried
+
+
+# ---- one month's statement in several files: one per account, or daily ones, checked and stored as one
+
+
+def part(lo: int, hi: int, *currencies: str, opening: str = "100.00", month: int = 10) -> statements.Statement:
+    """A file of NORD's for days lo..hi: each account opens at `opening` and gains 10.00, its balances proven."""
+    ibans, start = companies.get("NORD").ibans, Decimal(opening)
+    accounts = [
+        statements.Account(ibans[c], c, [], Decimal(0), Decimal(10), True, start + 10, date(2026, month, hi))
+        for c in currencies
+    ]
+    return statements.Statement("NORD", date(2026, month, lo), date(2026, month, hi), accounts)
+
+
+@pytest.mark.parametrize(
+    "parts,refusal",
+    [
+        (lambda: [part(1, 31, "RON"), part(1, 31, "EUR")], None),  # one file per account
+        (lambda: [part(1, 15, "RON"), part(16, 31, "RON", opening="110.00"), part(1, 31, "EUR")], None),  # daily RON
+        (
+            lambda: [part(1, 10, "RON"), part(12, 31, "RON", opening="110.00")],
+            "full calendar month",
+        ),  # the 11th is missing
+        (
+            lambda: [part(1, 10, "RON"), part(11, 20, "RON", opening="110.00")],
+            "full calendar month",
+        ),  # stops on the 20th
+        (lambda: [part(1, 31, "RON"), part(1, 31, "RON", "EUR")], "appears twice"),
+        (
+            lambda: [part(1, 15, "RON"), part(16, 31, "RON", opening="999.00")],
+            "do not chain",
+        ),  # a statement between is lost
+        (lambda: [part(1, 31, "RON"), part(1, 30, "EUR", month=11)], "different months"),
+        (lambda: [part(1, 31, "RON"), dataclasses.replace(part(1, 31, "EUR"), one_period=False)], "one period"),
+    ],
+)
+def test_files_of_one_month_make_one_statement_only_when_every_accounts_days_are_there_once(parts, refusal):
+    parts = parts()  # built once the test's firms are set up
+    if refusal:
+        with pytest.raises(statements.StatementError, match=refusal):
+            statement_intake.combine(parts)
+        return
+    st = statement_intake.combine(parts)
+    assert (st.period_start, st.period_end, statement_intake.missing_accounts(st)) == (
+        date(2026, 10, 1),
+        date(2026, 10, 31),
+        [],
+    )
+    (ron,) = [a for a in st.accounts if a.currency == "RON"]
+    files = sum(1 for p in parts for a in p.accounts if a.currency == "RON")
+    assert ron.trustworthy and ron.closing == 100 + 10 * files and len(ron.txs) == 0
+
+
+def bt_files(folder, periods=((1, 31),), currencies=("RON", "EUR")):
+    """NORD's encrypted BT PDFs for October 2026, one per account and period, each crediting 10.00, balances chained."""
+    nord = companies.get("NORD")
+    files = []
+    for c in currencies:
+        balance = Decimal("100.00")
+        for lo, hi in periods:
+            day = f"{lo:02d}/10/2026"
+            moves = [(day, f"SET-{c}-{lo}", Decimal("10.00"))]
+            name = folder / f"extras-{c}-{lo:02d}.pdf"
+            bt_statement(name, nord.cui, (day, f"{hi:02d}/10/2026"), [(c, nord.ibans[c], balance, moves)])
+            files.append(name)
+            balance += 10
+    return files
+
+
+DAYS = tuple((d, d) for d in range(1, 32))
+
+
+@pytest.mark.parametrize("periods", [((1, 31),), DAYS], ids=["per-account", "daily"])
+def test_the_operator_imports_one_months_bt_pdfs_together(ledger, tmp_path, periods):
+    files = bt_files(tmp_path, periods)
+    (result,) = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
+    assert (result["status"], result["month"], result["transactions"]) == ("added", "2026-10", 2 * len(periods))
+    docs = ledger.documents(kind="statement")
+    assert len(docs) == len(files) and all(len(json.loads(d["accounts"])) == 1 for d in docs)
+    days = ledger.db.execute("SELECT COUNT(DISTINCT day), COUNT(DISTINCT iban) FROM statement_txs").fetchone()
+    assert tuple(days) == (len(periods), 2)  # every file's lines are on record, for both accounts
+    again = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
+    assert [r["status"] for r in again] == ["duplicate"]
+
+
+@pytest.mark.parametrize(
+    "case,refusal",
+    [
+        ("a day missing", "full calendar month"),
+        ("an account missing", "missing configured accounts: EUR 0001"),
+        ("stored before", "already imported"),
+    ],
+)
+def test_an_incomplete_or_overlapping_set_stores_nothing(ledger, tmp_path, case, refusal):
+    currencies = ("RON",) if case == "an account missing" else ("RON", "EUR")
+    files = bt_files(tmp_path, DAYS[:10] + ((11, 31),), currencies)
+    if case == "a day missing":
+        files.remove(tmp_path / "extras-EUR-05.pdf")
+    if case == "stored before":  # the same month, one file per account, imported first
+        (tmp_path / "monthly").mkdir()
+        monthly = recon.ingest_files(ledger, bt_files(tmp_path / "monthly"), password_lookup=lambda co: "synthetic")
+        assert [r["status"] for r in monthly] == ["added"]
+    before = ledger.documents(kind="statement")
+    (result,) = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
+    assert result["status"] == "refused" and refusal in result["errors"][0]
+    assert ledger.documents(kind="statement") == before
+    folder = recon.month_dir("NORD", "2026-10") / "extrase"
+    assert len(list(folder.iterdir()) if folder.exists() else []) == len(before)
+    assert not list((finance_home() / "state" / "tmp").rglob("*.pdf"))  # no decrypted copy is left behind

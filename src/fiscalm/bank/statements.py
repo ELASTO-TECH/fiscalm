@@ -99,6 +99,17 @@ def open_encrypted(path: Path, password_lookup=secrets.bt_statement_password, on
     raise StatementError(f"{Path(path).name}: no company password opens it (not a statement of a configured company)")
 
 
+def encrypted(path: Path) -> bool:
+    """A PDF that opens only with a password, as BT sends its statements."""
+    try:
+        pikepdf.open(path).close()
+    except pikepdf.PasswordError:
+        return True
+    except (pikepdf.PdfError, OSError, ValueError):
+        return False
+    return False
+
+
 def names_cui(text: str, cui: str) -> bool:
     """The header, before the first account section, names this CUI: `CUI: 123` or, on older BT statements,
     `CUI:123`, never a longer number. A CUI in a transaction's text (a payer's, a reference) is not the holder's."""

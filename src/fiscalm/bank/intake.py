@@ -10,9 +10,10 @@ import os
 import re
 import secrets
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager, suppress
-from datetime import timedelta
+from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from fiscalm import companies
@@ -61,9 +62,10 @@ def statement_ibans(st: statements.Statement) -> list[str]:
     return sorted({companies.normalize_iban(a.iban) for a in st.accounts if a.iban})
 
 
-def refuse_overlap(L: Ledger, st: statements.Statement, digest: str) -> None:
+def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: Collection[str] = ()) -> None:
     """One document per account and month: a statement of another bank (other accounts) for the same month is
-    fine, the same account twice is not. The months the period touches and their neighbours are read, and every CSV
+    fine, the same account twice is not. `siblings`: the other files of the set `st` arrives in (`combine`), checked
+    with it as one statement; a stored one of them is this set imported before, not another statement. The months the period touches and their neighbours are read, and every CSV
     of the company (one may span months; it is stored under its first). A statement stored
     before accounts were recorded is read to learn its accounts; if it can't be read, nothing is imported."""
     if not st.period_start or not st.period_end:
@@ -83,7 +85,7 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str) -> None:
     docs += [d for d in _csv_docs(L, st.company) if d["month"] not in months]
     for doc in docs:
         month = doc["month"]
-        if doc["sha"] == digest:
+        if doc["sha"] == digest or doc["sha"] in siblings:
             continue
         previous = None
         if doc["accounts"]:
@@ -209,6 +211,57 @@ def missing_accounts(st: statements.Statement) -> list[str]:
         first = last = None
     expected = {(a.iban, a.currency) for a in co.accounts if bank_of(a.iban) in held and a.held_between(first, last)}
     return sorted(f"{ccy} {iban[-4:]}" for iban, ccy in expected - present)
+
+
+def combine(parts: list[statements.Statement]) -> statements.Statement:
+    """Several files of one company and month, read as the one statement they make together: one file per account
+    (older exports), or daily statements. Every account's days are covered exactly once, without a gap, over the same
+    days for every account: the whole calendar month when the files name different periods. Its lines are each file's;
+    its balances count only when every file's do and each file opens where the one before closed (a gap the days hide
+    is refused). Completeness is the caller's (`refuse_incomplete`): the set must hold every account like one file."""
+    if len(parts) == 1:
+        return parts[0]
+    if any(p.partial or not p.one_period or not p.period_start or not p.period_end for p in parts):
+        raise statements.StatementError("Statement set: every file must name one period")
+    first, last = min(p.period_start for p in parts), max(p.period_end for p in parts)
+    if first.strftime("%Y-%m") != last.strftime("%Y-%m"):
+        raise statements.StatementError("Statement set: files of different months")
+    whole = first.day == 1 and (last + timedelta(days=1)).day == 1
+    if len({(p.period_start, p.period_end) for p in parts}) > 1 and not whole:
+        raise statements.PartialMonth("Statement set", first.replace(day=1))
+    runs: dict[tuple[str, str], list[tuple[statements.Statement, statements.Account]]] = {}
+    for p in sorted(parts, key=lambda p: p.period_start):
+        for a in p.accounts:
+            runs.setdefault((companies.normalize_iban(a.iban), a.currency), []).append((p, a))
+    for run in runs.values():
+        day = first
+        for p, _ in run:
+            if p.period_start < day:
+                raise statements.StatementError("Statement set: an account appears twice for the same days")
+            if p.period_start > day:
+                raise statements.PartialMonth("Statement set", first.replace(day=1))
+            day = p.period_end + timedelta(days=1)
+        if day != last + timedelta(days=1):
+            raise statements.PartialMonth("Statement set", first.replace(day=1))
+    accounts = [_joined([a for _, a in run], last) for run in runs.values()]
+    return statements.Statement(parts[0].company, first, last, accounts)
+
+
+def _joined(run: list[statements.Account], last: date) -> statements.Account:
+    """One account's consecutive files as one account: its lines, its totals, its closing balance when proven."""
+    a = statements.Account(run[0].iban, run[0].currency, [t for x in run for t in x.txs])
+    debits, credits = [x.total_debit for x in run], [x.total_credit for x in run]
+    a.total_debit = None if None in debits else sum(debits, Decimal(0))
+    a.total_credit = None if None in credits else sum(credits, Decimal(0))
+    a.trustworthy = all(x.trustworthy for x in run)
+    if a.trustworthy:
+        for before, after in zip(
+            run, run[1:], strict=False
+        ):  # trustworthy: opening + credits - debits == closing, to the cent
+            if after.closing - after.total_credit + after.total_debit != before.closing:
+                raise statements.StatementError("Statement set: balances do not chain; a statement is missing")
+        a.closing, a.closing_day = run[-1].closing, last
+    return a
 
 
 def refuse_incomplete(st: statements.Statement) -> None:
