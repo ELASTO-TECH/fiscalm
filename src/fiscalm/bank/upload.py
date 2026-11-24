@@ -16,6 +16,8 @@ import time
 from datetime import date
 from pathlib import Path
 
+import pikepdf
+
 from fiscalm import companies
 from fiscalm.bank import catalogue as banks, statements
 from fiscalm.bank.camt import MAX_XML
@@ -303,7 +305,7 @@ def _pdfs(L: Ledger, company: str, bank: str, staging: Path, paths: list[Path]) 
             tmp_dir=staging,
             one_set=True,
         )
-    except (ValueError, ArithmeticError, IndexError, KeyError):  # a damaged or hostile PDF's text
+    except (ValueError, ArithmeticError, IndexError, KeyError, pikepdf.PdfError):  # a damaged or hostile PDF
         raise Refused(422, NOT_READ) from None
     if result["status"] == "not_ours":  # no password opened it, or what opened isn't this firm's statement
         said = _say(result.get("errors"))

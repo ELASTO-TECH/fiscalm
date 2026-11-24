@@ -376,6 +376,7 @@ def test_one_months_pdfs_uploaded_together_are_one_statement(ledger, sec, tmp_pa
             "Extrasele nu cuprind toate zilele lunii pentru fiecare cont. Încarcă toate extrasele lunii.",
         ),
         ("not a pdf", 415, su.NOT_A_STATEMENT),
+        ("damaged pdf", 422, su.NOT_READ),
         ("on an account", 400, None),  # a CSV's query: never for several PDFs
     ],
 )
@@ -386,6 +387,8 @@ def test_http_upload_of_several_pdfs(server, ledger, sec, tmp_path, case, status
         files.pop()
     if case == "not a pdf":
         files[0] = complete()
+    if case == "damaged pdf":
+        files[0] = b"%PDF-1.7 " + b"x" * 5000
     body, ctype = multipart(files)
     code, _, raw = _post(server, body, ctype, "co=NORD&account=x" if case == "on an account" else "co=NORD")
     r = json.loads(raw)
