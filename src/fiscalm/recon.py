@@ -250,6 +250,9 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
 
 def _set_checks(st: statements.Statement, parts: list[_Opened], check) -> None:
     """What the firm's statement must be, checked again under the write lock that stores it."""
+    own = companies.get(st.company)
+    if any(not own.account(a.iban) for a in st.accounts):  # another account's lines never reach the matchers
+        raise statements.StatementError("PDF account does not belong to the selected company")
     if check:
         check(st)
     refuse_incomplete(st)  # every caller: a statement, in one file or several, holds every account at its bank

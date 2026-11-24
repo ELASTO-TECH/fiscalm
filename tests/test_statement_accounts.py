@@ -370,16 +370,22 @@ def bring(ledger, caller: str, files, monkeypatch, account: str = "") -> str:
             ledger, imapread.Message(account, "k@x", sender, sender.lower(), "s", "2026-11-02", tuple(named))
         )
     (result,) = results
-    return upload.incomplete(result["missing"]) if result["status"] == "refused" else result["status"]
+    if result["status"] != "refused":
+        return result["status"]
+    return upload.incomplete(result["missing"]) if "missing" in result else upload._say(result["errors"])
 
 
 @pytest.mark.parametrize("caller", ["cli", "mail", "app"])
-def test_every_way_a_bt_pdf_arrives_needs_every_account(ledger, sec, tmp_path, monkeypatch, caller):
+def test_every_way_a_bt_pdf_arrives_needs_every_account_and_only_the_firms(ledger, sec, tmp_path, monkeypatch, caller):
     integrations.set_statement_password(ledger, "NORD", "bt", "synthetic")
     inbox = {"host": "imap.example.test", "username": "u", "password": "x", "from_address": "books@example.com"}
     account = integrations.add(ledger, "mail", "Synthetic inbox", inbox)["id"]
     ron, eur = bt_files(tmp_path)
     assert bring(ledger, caller, [ron], monkeypatch, account) == upload.incomplete(["EUR 0001"])
     assert not ledger.documents(kind="statement") and not ledger.db.execute("SELECT 1 FROM statement_txs").fetchone()
+    nord = companies.get("NORD")
+    other = [("RON", "RO94BTRLRONCRT0000000002", Decimal("0.00"), [])]  # STUDIO9's account, in a file with NORD's CUI
+    foreign = bt_statement(tmp_path / "other.pdf", nord.cui, ("01/10/2026", "31/10/2026"), other)
+    assert bring(ledger, caller, [ron, eur, foreign], monkeypatch, account) == upload.OTHER_ACCOUNT
     assert bring(ledger, caller, [ron, eur], monkeypatch, account) == "added"
     assert len(ledger.documents(kind="statement")) == 2
