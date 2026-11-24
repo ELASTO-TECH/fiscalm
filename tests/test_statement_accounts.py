@@ -11,9 +11,10 @@ from firms import iban, set_firm
 from pdf_fake import bt_statement
 from test_camt import complete, fake_pdf, parse, write, xml
 
-from fiscalm import companies, pack, recon
-from fiscalm.bank import intake as statement_intake, statements
+from fiscalm import companies, integrations, pack, recon
+from fiscalm.bank import intake as statement_intake, statements, upload
 from fiscalm.ledger import finance_home
+from fiscalm.mail import imap as imapread, invoices as mail_invoices
 
 ING = "RO00INGB0000000000000009"
 X1, X2, Y = "RO00XXXX0000000000000001", "RO00XXXX0000000000000002", "RO00YYYY0000000000000002"
@@ -346,3 +347,61 @@ def test_a_bt_pdf_is_refused_before_it_could_be_misfiled_or_decrypted_outside(le
     (result,) = recon.ingest_files(ledger, [ron], password_lookup=lambda co: "synthetic")
     assert result["status"] == status and error in result["errors"][0] and not ledger.documents(kind="statement")
     assert [p.name for p in tmp_path.rglob("*.pdf")] == [ron.name]  # only the source: no decrypted copy anywhere
+
+
+INGEST = recon.ingest_statements
+
+
+def bring(ledger, caller: str, files, monkeypatch, account: str = "") -> str:
+    """BT PDFs in through one of the ways they arrive: "added", or the accounts the import says are missing."""
+    if caller == "app":
+        try:
+            return upload.accept_pdfs(ledger, "NORD", "", [f.read_bytes() for f in files])["status"]
+        except upload.Refused as e:
+            return e.message
+    results = []  # what the import said, read as it returns
+    monkeypatch.setattr(recon, "ingest_statements", lambda *a, **kw: results.extend(INGEST(*a, **kw)) or results)
+    if caller == "cli":
+        recon.ingest_files(ledger, files)
+    else:
+        sender = companies.get("NORD").statement_senders[0]
+        named = (imapread.Attachment("pdf", f.read_bytes(), f"extL_Oct_2026_allmerge_{f.stem}.pdf") for f in files)
+        mail_invoices.handle(
+            ledger, imapread.Message(account, "k@x", sender, sender.lower(), "s", "2026-11-02", tuple(named))
+        )
+    (result,) = results
+    if result["status"] != "refused":
+        return result["status"]
+    return upload.incomplete(result["missing"]) if "missing" in result else upload._say(result["errors"])
+
+
+@pytest.mark.parametrize("caller", ["cli", "mail", "app"])
+def test_every_way_a_bt_pdf_arrives_needs_every_account_and_only_the_firms(ledger, sec, tmp_path, monkeypatch, caller):
+    integrations.set_statement_password(ledger, "NORD", "bt", "synthetic")
+    inbox = {"host": "imap.example.test", "username": "u", "password": "x", "from_address": "books@example.com"}
+    account = integrations.add(ledger, "mail", "Synthetic inbox", inbox)["id"]
+    ron, eur = bt_files(tmp_path)
+    assert bring(ledger, caller, [ron], monkeypatch, account) == upload.incomplete(["EUR 0001"])
+    assert not ledger.documents(kind="statement") and not ledger.db.execute("SELECT 1 FROM statement_txs").fetchone()
+    nord = companies.get("NORD")
+    other = [("RON", "RO94BTRLRONCRT0000000002", Decimal("0.00"), [])]  # STUDIO9's account, in a file with NORD's CUI
+    foreign = bt_statement(tmp_path / "other.pdf", nord.cui, ("01/10/2026", "31/10/2026"), other)
+    assert bring(ledger, caller, [ron, eur, foreign], monkeypatch, account) == upload.OTHER_ACCOUNT
+    assert bring(ledger, caller, [ron, eur], monkeypatch, account) == "added"
+    assert len(ledger.documents(kind="statement")) == 2
+
+
+def test_an_account_added_while_a_set_is_checked_refuses_it_under_the_write_lock(ledger, tmp_path, monkeypatch):
+    """The firm's checks run again in the transaction that stores the set: an account added in between is owed."""
+    files = bt_files(tmp_path)
+    place = recon._place
+
+    def added_meanwhile(*args):  # after the first checks, before the transaction: an administrator adds USD at BT
+        if not companies.get("NORD").account(USD):
+            nord_with(monkeypatch, (USD, "USD", "bt"))
+        return place(*args)
+
+    monkeypatch.setattr(recon, "_place", added_meanwhile)
+    (result,) = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
+    assert (result["status"], result["missing"]) == ("refused", ["USD 0001"])
+    assert not ledger.documents(kind="statement") and not list(recon.month_dir("NORD", "2026-10").rglob("*.pdf"))

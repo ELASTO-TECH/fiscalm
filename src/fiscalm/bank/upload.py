@@ -96,10 +96,8 @@ def kind_of(data: bytes, content_type: str) -> str:
 
 def _checks(company: str, bank: str):
     """What an uploaded statement must be before anything is stored: every account the company's (a PDF that isn't
-    encrypted opens with any password, and its text naming the company proves nothing about its accounts), every
-    account at `bank` when one is given, and every current account the company holds at those banks present."""
-    from fiscalm.bank.intake import refuse_incomplete
-
+    encrypted opens with any password, and its text naming the company proves nothing about its accounts) and every
+    account at `bank` when one is given. Completeness is the import's own, as for every statement."""
     co = companies.get(company)
 
     def check(st) -> None:
@@ -112,7 +110,6 @@ def _checks(company: str, bank: str):
             b = own.bank or (banks.for_iban(a.iban).id if banks.for_iban(a.iban) else "")
             if bank and b != bank:
                 raise statements.StatementError(WRONG_BANK)
-        refuse_incomplete(st)  # a CSV speaks for its one account and its own days only
 
     return check
 

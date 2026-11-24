@@ -99,6 +99,12 @@ def pdf_statement(home, closing="98.00", payer="Synthetic Courier SRL"):
         f"Transfer;{payer};" + CLIENT_IBAN + ";REF: pdf-1",
         (" " * 12 + "RULAJ TOTAL CONT").ljust(64) + "0.00" + (" " * 11) + "98.00",
         (" " * 12 + "SOLD FINAL CONT").ljust(64) + closing,
+        "CONT 124 Valuta",  # NORD's other BT account, without lines: the statement holds every account
+        "EUR Cod IBAN: " + companies.get("NORD").ibans["EUR"],
+        header,
+        (" " * 12 + "SOLD ANTERIOR").ljust(64) + "0.00",
+        (" " * 12 + "RULAJ TOTAL CONT").ljust(64) + "0.00" + (" " * 11) + "0.00",
+        (" " * 12 + "SOLD FINAL CONT").ljust(64) + "0.00",
     ]
     path = home / "extL_Oct_2026_allmerge.pdf"
     with pikepdf.Pdf.new() as pdf:
