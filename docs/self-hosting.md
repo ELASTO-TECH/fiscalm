@@ -587,9 +587,9 @@ text is supplied as document data. A failed call or invalid JSON produces no dec
 
 Supported bank statements: BT monthly PDF (encrypted or unprotected) and ISO 20022 CAMT.053 XML
 (camt.053.001.02 through .08), selected by content. Older BT exports come as one PDF per account, or as daily PDFs
-of one account: pass all of a month's files to one `fiscalm ingest FILE...`.
-They are checked as one statement (every account the firm held at BT that month, each day once, no gap, balances
-chaining from file to file) and stored together, or none is stored. A BT PDF is recognised by "allmerge" in its name
+of one account: pass all of a month's files to one `fiscalm ingest FILE...`. They are checked as one statement (the
+whole calendar month, every account the firm held at BT that month, each day once, no gap, balances chaining from
+file to file) and stored together, or none is stored. A BT PDF is recognised by "allmerge" in its name
 or by its password. CAMT.053 is accepted by an administrator in Tranzacții, or from the operator CLI:
 `fiscalm ingest FILE` (store and reconcile) or `fiscalm statement FILE` (inspect). Mail and public
 receipt links do not accept CAMT. XML is unsigned text: a matching IBAN and consistent balances

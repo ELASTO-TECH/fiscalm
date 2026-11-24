@@ -238,6 +238,7 @@ def part(lo: int, hi: int, *currencies: str, opening: str = "100.00", month: int
             "full calendar month",
         ),  # stops on the 20th
         (lambda: [part(1, 31, "RON"), part(1, 31, "RON", "EUR")], "appears twice"),
+        (lambda: [part(12, 12, "RON"), part(12, 12, "EUR")], "full calendar month"),  # one day is not the month
         (
             lambda: [part(1, 15, "RON"), part(16, 31, "RON", opening="999.00")],
             "do not chain",
@@ -258,9 +259,7 @@ def test_files_of_one_month_make_one_statement_only_when_every_accounts_days_are
         date(2026, 10, 31),
         [],
     )
-    (ron,) = [a for a in st.accounts if a.currency == "RON"]
-    files = sum(1 for p in parts for a in p.accounts if a.currency == "RON")
-    assert ron.trustworthy and ron.closing == 100 + 10 * files and len(ron.txs) == 0
+    assert st.accounts == [a for p in parts for a in p.accounts]  # each file keeps its accounts and their trust
 
 
 def bt_files(folder, periods=((1, 31),), currencies=("RON", "EUR")):
@@ -301,6 +300,7 @@ def test_the_operator_imports_one_months_bt_pdfs_together(ledger, tmp_path, peri
         ("a day missing", "full calendar month"),
         ("an account missing", "missing configured accounts: EUR 0001"),
         ("stored before", "already imported"),
+        ("kept as a receipt", "kept as another document"),  # those bytes are a document already: no takeover
     ],
 )
 def test_an_incomplete_or_overlapping_set_stores_nothing(ledger, tmp_path, case, refusal):
@@ -312,10 +312,28 @@ def test_an_incomplete_or_overlapping_set_stores_nothing(ledger, tmp_path, case,
         (tmp_path / "monthly").mkdir()
         monthly = recon.ingest_files(ledger, bt_files(tmp_path / "monthly"), password_lookup=lambda co: "synthetic")
         assert [r["status"] for r in monthly] == ["added"]
+    if case == "kept as a receipt":
+        ledger.add_document(recon.sha256(files[-1]), "NORD", "2026-10", "receipt", "/x/r.pdf", source="links:1")
     before = ledger.documents(kind="statement")
     (result,) = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
     assert result["status"] == "refused" and refusal in result["errors"][0]
-    assert ledger.documents(kind="statement") == before
+    assert ledger.documents(kind="statement") == before and not ledger.used_txs()
     folder = recon.month_dir("NORD", "2026-10") / "extrase"
     assert len(list(folder.iterdir()) if folder.exists() else []) == len(before)
     assert not list((finance_home() / "state" / "tmp").rglob("*.pdf"))  # no decrypted copy is left behind
+
+
+@pytest.mark.parametrize(
+    "case,status,error", [("named for another month", "refused", "another month"), ("symlinked tmp", "error", "Unsafe")]
+)
+def test_a_bt_pdf_is_refused_before_it_could_be_misfiled_or_decrypted_outside(ledger, tmp_path, case, status, error):
+    (ron,) = bt_files(tmp_path, currencies=("RON",))
+    if case == "named for another month":  # an October statement whose name says November
+        ron = ron.rename(tmp_path / "extL_Nov_2026_allmerge.pdf")
+    else:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (finance_home() / "state" / "tmp").symlink_to(outside)
+    (result,) = recon.ingest_files(ledger, [ron], password_lookup=lambda co: "synthetic")
+    assert result["status"] == status and error in result["errors"][0] and not ledger.documents(kind="statement")
+    assert [p.name for p in tmp_path.rglob("*.pdf")] == [ron.name]  # only the source: no decrypted copy anywhere

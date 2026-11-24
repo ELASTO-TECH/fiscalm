@@ -17,6 +17,7 @@ from fiscalm.bank import statements
 from fiscalm.bank.intake import (
     StoredStatementUnavailable,
     combine,
+    hold_csv_days,
     import_lock,
     refuse_incomplete,
     refuse_overlap,
@@ -170,7 +171,12 @@ def ingest_statements(
     isn't a statement of ours. `only`: the company the files are for (an upload); no other company's password is
     tried. `check(st)`: a last refusal on a group's statement before anything is stored (raises
     statements.StatementError). `one_set`: the files must make one group, or nothing is stored."""
-    work = (tmp_dir or home / "state" / "tmp") / f"set-{secrets.token_hex(8)}"
+    tmp = tmp_dir or home / "state" / "tmp"  # an upload's own staging is already confined (bank.upload._confined)
+    tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not tmp_dir and not _inside(home, tmp):  # a symlink on the way would put decrypted copies outside the data root
+        error = "Unsafe statement storage directory; remove symlinks and retry"
+        return [{"file": str(path), "status": "error", "errors": [error]} for path in paths]
+    work = tmp / f"set-{secrets.token_hex(8)}"
     kw = {"password_lookup": password_lookup} if password_lookup else {}
     if only is not None:
         kw["only"] = only
@@ -199,6 +205,8 @@ def _open_statement(path: Path, out_dir: Path, kw: dict) -> _Opened | dict:
         return {"file": str(path), "status": "not_ours", "errors": [str(e)]}
     try:
         st = statements.parse(out, company)
+        if st.month and st.month != month:  # the month comes from what the bank printed, never from a file name
+            raise statements.StatementError("Statement file name names another month than its period")
     except statements.StatementError as e:
         return {"file": str(path), "status": "refused", "errors": [str(e)]}
     return _Opened(path, company, month, out, st, sha256(path))
@@ -222,39 +230,22 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
     except statements.StatementError as exc:
         missing = {"missing": exc.accounts} if isinstance(exc, statements.MissingAccounts) else {}
         return _refused(parts, str(exc), **missing)
-    company, month = parts[0].company, parts[0].month
-    folder = month_dir(company, month, home) / "extrase"
+    folder = month_dir(parts[0].company, parts[0].month, home) / "extrase"
     folder.mkdir(parents=True, exist_ok=True)
-    if not _inside(home / company, folder):  # a symlink on the way would publish outside the data root
+    if not _inside(home / parts[0].company, folder):  # a symlink on the way would publish outside the data root
         return _refused(parts, "Unsafe statement storage directory; remove symlinks and retry", "error")
-    dests = [_place(ledger, o, folder) for o in parts]
-    with ledger.tx():  # every file of the set, or none
-        if check:
-            check(st)
-        added = [
-            ledger.add_document(
-                o.digest,
-                company,
-                month,
-                "statement",
-                str(dest),
-                issues=[f"parser totals mismatch on {a.iban[-4:]}" for a in o.st.accounts if not a.balanced],
-                source=source or f"mail:{o.path.name}",
-                accounts=statement_ibans(o.st),
-            )
-            for o, dest in zip(parts, dests, strict=True)
-        ]
-        for o, dest, new in zip(parts, dests, added, strict=True):
-            if new:
-                ledger.set_meta("statement_stored_sha:" + o.digest, sha256(dest))
+    stored = _publish(ledger, parts, folder, st, check, source)
+    if isinstance(stored, dict):
+        return stored
+    hold_csv_days(ledger, st)  # days a CSV already brought keep the CSV's lines: the same payment never settles twice
     paid = auto_mark_paid(ledger, st)
     ef_paid = efactura.match_statement(ledger, st)
     return {
         "file": ", ".join(str(o.path) for o in parts),
-        "status": "added" if any(added) else "duplicate",
-        "company": company,
-        "month": month,
-        "unprotected": ", ".join(map(str, dests)),
+        "status": "added" if any(new for _, new in stored) else "duplicate",
+        "company": parts[0].company,
+        "month": parts[0].month,
+        "unprotected": ", ".join(str(dest) for dest, _ in stored),
         "transactions": len(st.txs),
         "balanced": all(a.balanced for a in st.accounts),
         "payments_marked_paid": paid,
@@ -262,7 +253,55 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
     }
 
 
-def _place(ledger: Ledger, o: _Opened, folder: Path) -> Path:
+class _NotStored(Exception):
+    """A file of the set is already kept as another document (a receipt linked to a payment): the set is not stored."""
+
+
+def _publish(ledger: Ledger, parts: list[_Opened], folder: Path, st, check, source) -> list[tuple[Path, bool]] | dict:
+    """Every file of the set stored as its own statement document in one ledger transaction, or none: on any failure
+    the copies this call moved into the month's folder are removed again. (A crash between the moves and the commit
+    leaves only unregistered copies, which a retry reuses by name and checksum.)"""
+    placed: list[Path] = []
+    try:
+        dests = [_place(ledger, o, folder, placed) for o in parts]
+        with ledger.tx():
+            if check:
+                check(st)
+            added = [
+                ledger.add_document(
+                    o.digest,
+                    o.company,
+                    o.month,
+                    "statement",
+                    str(dest),
+                    issues=[f"parser totals mismatch on {a.iban[-4:]}" for a in o.st.accounts if not a.balanced],
+                    source=source or f"mail:{o.path.name}",
+                    accounts=statement_ibans(o.st),
+                )
+                for o, dest in zip(parts, dests, strict=True)
+            ]
+            for o in parts:
+                doc = ledger.document(o.digest)
+                if not doc or doc["kind"] != "statement" or doc["company"] != o.company:
+                    raise _NotStored
+            for o, dest, new in zip(parts, dests, added, strict=True):
+                if new:
+                    ledger.set_meta("statement_stored_sha:" + o.digest, sha256(dest))
+    except _NotStored:
+        _unplace(placed)
+        return _refused(parts, "Statement set: a file is already kept as another document")
+    except BaseException:
+        _unplace(placed)
+        raise
+    return list(zip(dests, added, strict=True))
+
+
+def _unplace(placed: list[Path]) -> None:
+    for dest in placed:
+        dest.unlink(missing_ok=True)
+
+
+def _place(ledger: Ledger, o: _Opened, folder: Path, placed: list[Path]) -> Path:
     """Where a set's file is kept: the stored copy of a statement imported before, else its decrypted copy, moved
     into the month's folder under a name no other file of that folder has."""
     existing = ledger.document(o.digest)
@@ -272,7 +311,10 @@ def _place(ledger: Ledger, o: _Opened, folder: Path) -> Path:
     dest = folder / o.out.name
     if dest.exists() and sha256(dest) != sha256(o.out):
         dest = dest.with_stem(dest.stem + "-" + o.digest[:12])
+    fresh = not dest.exists()  # a copy already there (the same bytes) is never removed on failure
     o.out.replace(dest)
+    if fresh:
+        placed.append(dest)
     return dest
 
 
