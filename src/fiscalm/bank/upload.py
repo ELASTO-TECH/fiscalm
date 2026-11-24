@@ -149,10 +149,6 @@ KNOWN = (
         "Fișierul CSV nu are coloanele alese pentru acest cont. Descarcă-l din bancă în același format.",
     ),
     ("files of different months", "Fișierele sunt din luni diferite. Încarcă împreună extrasele unei singure luni."),
-    (
-        "Statement set must cover",
-        "Extrasele nu cuprind toate zilele lunii pentru fiecare cont. Încarcă toate extrasele lunii.",
-    ),
     ("appears twice", "Un cont apare de două ori pentru aceleași zile. Încarcă fiecare extras o singură dată."),
     ("every file must name one period", RESTATE),
     ("do not chain", "Soldurile extraselor nu se leagă: lipsește un extras. Încarcă toate extrasele lunii."),

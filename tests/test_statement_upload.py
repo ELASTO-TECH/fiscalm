@@ -370,11 +370,7 @@ def test_one_months_pdfs_uploaded_together_are_one_statement(ledger, sec, tmp_pa
     "case,status,message",
     [
         ("whole", 200, su.ADDED),
-        (
-            "days missing",
-            422,
-            "Extrasele nu cuprind toate zilele lunii pentru fiecare cont. Încarcă toate extrasele lunii.",
-        ),
+        ("days missing", 422, su.PARTIAL.format(last=31, month="octombrie")),
         ("not a pdf", 415, su.NOT_A_STATEMENT),
         ("damaged pdf", 422, su.NOT_READ),
         ("on an account", 400, None),  # a CSV's query: never for several PDFs
