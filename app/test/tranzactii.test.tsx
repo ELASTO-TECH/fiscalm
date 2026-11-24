@@ -296,6 +296,24 @@ describe("Tranzacții", () => {
     expect(await within(p.getByRole("dialog", { name: "Încarcă" })).findByRole("status")).toHaveTextContent("Extrasul a fost încărcat.");
   });
 
+  it("several PDFs picked at once go in one request, as one month's statement; other files with them are not sent", async () => {
+    at("?co=NORD&tab=tranzactii");
+    const cfg = config();
+    cfg.companies[0] = { ...cfg.companies[0], accounts: [
+      { id: "acc8", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: [], last_statement: null }] };
+    const { api } = await page({ companies: () => json(cfg), onPost: () => json({ ok: true, message: "Extrasul a fost încărcat.", next: null, done: { status: "added" }, state: null }) });
+    const input = (await openUpload("Încarcă extras"))!;
+    const pdf = (name: string) => new File(["%PDF-1.7"], name, { type: "application/pdf" });
+    await userEvent.upload(input, [pdf("ron.pdf"), new File(["<Document/>"], "eur.xml", { type: "text/xml" })]);
+    expect(await within(screen.getByRole("dialog", { name: "Încarcă" })).findByRole("alert")).toHaveTextContent("Mai multe fișiere se încarcă împreună doar ca extrase PDF");
+    expect(api.posts()).toHaveLength(0);
+    await userEvent.upload(input, [pdf("ron.pdf"), pdf("eur.pdf")]);
+    await waitFor(() => expect(api.posts()).toHaveLength(1));
+    const post = api.posts()[0];
+    expect(post.url).toBe("/web/api/statement-upload?co=NORD");
+    expect((post.raw as FormData).getAll("files").map((f) => (f as File).name)).toEqual(["ron.pdf", "eur.pdf"]);
+  });
+
   it("a refused statement says why beside the button until the next upload", async () => {
     at("?co=NORD&tab=tranzactii");
     const why = "Extrasul trebuie să cuprindă toată luna (1–30 noiembrie). Încarcă extrasul lunii încheiate.";

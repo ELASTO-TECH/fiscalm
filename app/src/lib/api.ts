@@ -399,6 +399,23 @@ export async function postStatement(co: Co, bank: string, file: File, type: Stat
   return data;
 }
 
+/** POST api/statement-upload with several BT PDFs of one month (one per account, or daily) as multipart `files`: the
+ * engine checks them as one statement and imports all of them or none. */
+export async function postStatements(co: Co, files: File[]): Promise<StatementResult> {
+  if (FIXTURES) return { ok: true, message: "Extrasul a fost încărcat.", next: null, done: null, state: null };
+  const body = new FormData();
+  for (const f of files) body.append("files", f, f.name);
+  const r = await call(`${base()}api/statement-upload?${new URLSearchParams({ co })}`, { method: "POST", body });
+  let data: StatementResult | null = null;
+  try {
+    data = await r.json();
+  } catch {
+    data = null;
+  }
+  if (!data) throw new ApiError(r.status, `statement-upload ${r.status}`);
+  return data;
+}
+
 /** POST api/document-upload: receipt photos and invoice PDFs for a company, as one multipart request (docs/openapi.json).
  * The engine's status, and on 200 each file's document id and whether those bytes were already known (then the document
  * may belong to another company, so it is never opened from here). Anything else from a 200 is 0. With `tx`, the one

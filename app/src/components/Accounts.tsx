@@ -5,7 +5,7 @@ import { Actions, Button, Form, Input, Label, Panel, Select, noteLeftStyle, sect
 // takes a statement (the engine tells the account from the file; a CSV asks) or a settlement report.
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
-import { post, postStatement, statementType, type CsvPreview, type StatementResult } from "@/lib/api";
+import { post, postStatement, postStatements, statementType, type CsvPreview, type StatementResult } from "@/lib/api";
 import { cap, curOf, dm, lei, luna, type Tone } from "@/lib/format";
 import type { BankStatus, CompanyAccount, CompanyEntry, Dashboard } from "@/lib/types";
 import { ReportUpload } from "./ReportUpload";
@@ -109,13 +109,15 @@ export function UploadMenu({ c, accounts, reload, label = "Încarcă" }: { c: Co
 }
 
 const NOT_STATEMENT = "Se acceptă extrase PDF, CAMT (XML), MT940 sau CSV.";
+const SEVERAL_PDFS = "Mai multe fișiere se încarcă împreună doar ca extrase PDF ale aceleiași luni.";
 const DATE_FORMATS: [string, string][] = [["%d.%m.%Y", "31.10.2026"], ["%Y-%m-%d", "2026-10-31"], ["%d/%m/%Y", "31/10/2026"],
   ["%d-%m-%Y", "31-10-2026"], ["%m/%d/%Y", "10/31/2026"]];
 
 /** "Încarcă extras": the file picked goes to the engine as it is, for this company and no bank named; the engine reads its
  * type and accounts from the content, refuses another company's, and imports it like a statement from mail. Only a CSV
  * names no account, so it goes on one (asked when the company has several); its first upload brings back its columns, and
- * the person says which is which, once per account. */
+ * the person says which is which, once per account. Several PDFs picked at once are one month's BT
+ * statement in parts (one per account, or daily): the engine imports them together or not at all. */
 /** The statement upload on the firm's current accounts, for a person who manages firms; nothing for anyone else. */
 export function FirmStatementUpload({ co }: { co: string }) {
   const { data, reload } = useCompanies();
@@ -139,9 +141,20 @@ export function StatementUpload({ co, accounts, reload }: { co: string; accounts
     setCsv(null);
     if (r?.message) setSaid({ ok: r.ok, message: r.message });
   };
-  const picked = async (f: File | undefined) => {
+  const picked = async (files: File[]) => {
     if (input.current) input.current.value = "";
+    const f = files[0];
     if (!f) return;
+    if (files.length > 1) { // one month's BT PDFs, one per account or one per day: imported together or not at all
+      setSaid(null);
+      setCsv(null);
+      const pdfs = files.every((x) => statementType(x) === "application/pdf");
+      const r = await run<StatementResult>(co, async () => (pdfs ? postStatements(co, files)
+        : { ok: false, message: SEVERAL_PDFS, next: null, done: null, state: null }), undefined, () => false);
+      reload();
+      if (r?.message) setSaid({ ok: r.ok, message: r.message });
+      return;
+    }
     const isCsv = statementType(f) === "text/csv";
     if (isCsv && accounts.length > 1) return setCsv({ file: f, account: "", preview: null });
     await upload(f, isCsv ? accounts[0]?.id ?? "" : "");
@@ -151,7 +164,7 @@ export function StatementUpload({ co, accounts, reload }: { co: string; accounts
     <>
       <Button type="button" className="btn" disabled={busy} onClick={() => input.current?.click()}><I n="bank" />Încarcă extras</Button>
       <Input ref={input} type="file" hidden accept=".pdf,.xml,.sta,.mt940,.940,.txt,.csv,application/pdf,application/xml,text/xml,text/csv"
-        onChange={(e) => picked(e.target.files?.[0])} tabIndex={-1} aria-hidden="true" />
+        multiple onChange={(e) => picked(Array.from(e.target.files ?? []))} tabIndex={-1} aria-hidden="true" />
       {/* the engine's answer stays beside the button until the next upload; the toast alone was gone before it was read */}
       {said ? <div className="flex items-start gap-3 rounded-control bg-inset p-4 text-sm leading-relaxed" role={said.ok ? "status" : "alert"}>
         <span className={`grid size-9 shrink-0 place-items-center rounded-control [&_svg]:size-4 ${ROW_TINT[said.ok ? "ok" : "late"]}`}>
