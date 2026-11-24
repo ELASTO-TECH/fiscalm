@@ -127,10 +127,10 @@ def cmd_sync(a, L: Ledger) -> int:
 
 
 def cmd_ingest(a, L: Ledger) -> int:
-    res = [recon.ingest_file(L, Path(f), operator=True) for f in a.files]
+    res = recon.ingest_files(L, [Path(f) for f in a.files])
     pay.refresh_to_pay(L)  # a statement may have just settled a whole file
     _out(res)
-    return 0 if all(r["status"] not in ("refused", "error") for r in res) else 2
+    return 0 if all(r["status"] not in ("refused", "error", "not_ours") for r in res) else 2
 
 
 def cmd_doc_note(a, L: Ledger) -> int:
@@ -1031,7 +1031,11 @@ def build_parser() -> argparse.ArgumentParser:
         "sync",
         help="read the mail accounts (invoices, statements, the accountant's OPs), build payment files, write reports",
     ).set_defaults(fn=cmd_sync)
-    s = sub.add_parser("ingest", help="ingest statements (BT PDF, CAMT.053 XML or MT940) and payment orders (OP PDFs)")
+    s = sub.add_parser(
+        "ingest",
+        help="ingest statements (BT PDF, CAMT.053 XML or MT940) and payment orders (OP PDFs); BT PDFs of one firm"
+        " and month (one per account, or daily) are checked and stored together",
+    )
     s.add_argument("files", nargs="+")
     s.set_defaults(fn=cmd_ingest)
 

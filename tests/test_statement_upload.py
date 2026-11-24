@@ -178,6 +178,7 @@ def fake_pdf_import(monkeypatch, accounts, parse_error=None, decrypt_error=None)
     def decrypt(path, out_dir, password_lookup=None, only=None):
         if decrypt_error:
             raise decrypt_error
+        out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / "Extras_BT_NORD_2026-10.pdf"
         out.write_bytes(b"%PDF-decrypted")
         return only, "2026-10", out

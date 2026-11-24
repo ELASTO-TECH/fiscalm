@@ -13,6 +13,7 @@ import os
 import secrets
 import shutil
 import time
+from datetime import date
 from pathlib import Path
 
 from fiscalm import companies
@@ -267,6 +268,8 @@ def accept(L: Ledger, company: str, bank: str, data: bytes, content_type: str, a
                 raise Refused(409, _say(errors) if _say(errors) != NOT_READ else NO_PASSWORD)
             if result["status"] == "refused":
                 missing = result.get("missing")  # the engine's own list, never words read back from an error text
+                if result.get("partial"):  # the engine's own month
+                    raise Refused(422, _refusal(statements.PartialMonth("PDF", date.fromisoformat(result["partial"]))))
                 raise Refused(422, incomplete(missing) if missing else _say(result.get("errors")))
         if result.get("company") != company:  # defence in depth: the import named another company
             raise Refused(422, WRONG_COMPANY)

@@ -1107,7 +1107,7 @@ def test_statements_and_ops_outside_inbox_scope_become_questions(ledger, monkeyp
 
         def parse(*args):
             assert not ledger.db.in_transaction  # decryption/parsing never holds the app write lock
-            return SimpleNamespace(company="NORD")
+            return statements.Statement("NORD", date(2026, 11, 1), date(2026, 11, 30), [])
 
         monkeypatch.setattr(statements, "parse", parse)
     else:
