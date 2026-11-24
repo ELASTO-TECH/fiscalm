@@ -4,6 +4,7 @@ import dataclasses
 import json
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from firms import iban, set_firm
@@ -239,6 +240,8 @@ def part(lo: int, hi: int, *currencies: str, opening: str = "100.00", month: int
         ),  # stops on the 20th
         (lambda: [part(1, 31, "RON"), part(1, 31, "RON", "EUR")], "appears twice"),
         (lambda: [part(12, 12, "RON"), part(12, 12, "EUR")], "full calendar month"),  # one day is not the month
+        (lambda: [part(12, 12, "RON", "EUR")], "full calendar month"),  # one daily file alone neither
+        (lambda: [part(1, 14, "RON"), part(15, 14, "RON"), part(15, 31, "RON")], "Cannot verify"),  # runs backwards
         (
             lambda: [part(1, 15, "RON"), part(16, 31, "RON", opening="999.00")],
             "do not chain",
@@ -301,6 +304,7 @@ def test_the_operator_imports_one_months_bt_pdfs_together(ledger, tmp_path, peri
         ("an account missing", "missing configured accounts: EUR 0001"),
         ("stored before", "already imported"),
         ("kept as a receipt", "kept as another document"),  # those bytes are a document already: no takeover
+        ("stored copy gone", "restore the stored document"),  # imported before, but its file is missing
     ],
 )
 def test_an_incomplete_or_overlapping_set_stores_nothing(ledger, tmp_path, case, refusal):
@@ -308,6 +312,10 @@ def test_an_incomplete_or_overlapping_set_stores_nothing(ledger, tmp_path, case,
     files = bt_files(tmp_path, DAYS[:10] + ((11, 31),), currencies)
     if case == "a day missing":
         files.remove(tmp_path / "extras-EUR-05.pdf")
+    if case == "stored copy gone":  # the month's per-account files, imported, then one stored copy lost
+        files = bt_files(tmp_path)
+        assert recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")[0]["status"] == "added"
+        Path(ledger.documents(kind="statement")[0]["path"]).unlink()
     if case == "stored before":  # the same month, one file per account, imported first
         (tmp_path / "monthly").mkdir()
         monthly = recon.ingest_files(ledger, bt_files(tmp_path / "monthly"), password_lookup=lambda co: "synthetic")
@@ -316,10 +324,11 @@ def test_an_incomplete_or_overlapping_set_stores_nothing(ledger, tmp_path, case,
         ledger.add_document(recon.sha256(files[-1]), "NORD", "2026-10", "receipt", "/x/r.pdf", source="links:1")
     before = ledger.documents(kind="statement")
     (result,) = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
-    assert result["status"] == "refused" and refusal in result["errors"][0]
+    assert result["status"] == ("error" if case == "stored copy gone" else "refused") and refusal in result["errors"][0]
     assert ledger.documents(kind="statement") == before and not ledger.used_txs()
     folder = recon.month_dir("NORD", "2026-10") / "extrase"
-    assert len(list(folder.iterdir()) if folder.exists() else []) == len(before)
+    kept = len(before) - (case == "stored copy gone")
+    assert len(list(folder.iterdir()) if folder.exists() else []) == kept
     assert not list((finance_home() / "state" / "tmp").rglob("*.pdf"))  # no decrypted copy is left behind
 
 

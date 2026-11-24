@@ -213,21 +213,23 @@ def missing_accounts(st: statements.Statement) -> list[str]:
 
 
 def combine(parts: list[statements.Statement]) -> statements.Statement:
-    """Several files of one company and month, read as the one statement they make together: one file per account
-    (older exports), or daily statements. Together they cover the whole calendar month, and every account's days
-    exactly once, without a gap. Each file keeps its own accounts and its own trust (a file's lines settle only when
+    """BT PDFs of one company and month, read as the one statement they make together: one file with every account,
+    one file per account (older exports), or daily statements. Together they cover the whole calendar month, and every
+    account's days exactly once, without a gap. Each file keeps its own accounts and its own trust (a file's lines settle only when
     its balances add up), as when a stored file is read again on its own; two consecutive files of an account whose
     balances are proven must chain (each opens where the one before closed), or a statement between them is missing.
     Completeness is the caller's (`refuse_incomplete`): the set must hold every account like one file."""
+    if any(not p.period_start or not p.period_end or p.period_end < p.period_start for p in parts):
+        raise statements.StatementError("Cannot verify statement period")
+    first, last = min(p.period_start for p in parts), max(p.period_end for p in parts)
+    if first.day != 1 or (last + timedelta(days=1)).day != 1:  # one file too: it stands for the month
+        raise statements.PartialMonth("Statement", first.replace(day=1))
     if len(parts) == 1:
         return parts[0]
-    if any(p.partial or not p.one_period or not p.period_start or not p.period_end for p in parts):
+    if any(p.partial or not p.one_period for p in parts):
         raise statements.StatementError("Statement set: every file must name one period")
-    first, last = min(p.period_start for p in parts), max(p.period_end for p in parts)
     if first.strftime("%Y-%m") != last.strftime("%Y-%m"):
         raise statements.StatementError("Statement set: files of different months")
-    if first.day != 1 or (last + timedelta(days=1)).day != 1:
-        raise statements.PartialMonth("Statement set", first.replace(day=1))
     runs: dict[tuple[str, str], list[tuple[statements.Statement, statements.Account]]] = {}
     for p in sorted(parts, key=lambda p: p.period_start):
         for a in p.accounts:
