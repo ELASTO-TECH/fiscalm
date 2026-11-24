@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 
-from fiscalm.api import transaction_rows
+from fiscalm.api import transaction_rows, upload_assignment
 from fiscalm.api.responses import bounded, fail, page
 from fiscalm.ledger import Ledger
 from fiscalm.mail import invoices as mail_invoices
@@ -25,6 +25,8 @@ def owners(L: Ledger, kind: str, identity: str, keys: list[str]) -> list[str]:
     """Resolve existing global IDs first; only read owners, preserving company order for aliases/mail choices."""
     if kind == "order":
         return [key for key in keys if key == identity.partition(":")[0]]
+    if kind == "mail" and upload_assignment.staged(L, identity):
+        return keys
     if kind == "mail":
         row = L.db.execute(
             "SELECT data FROM mail_questions WHERE sha=? AND answered_at IS NULL", (identity,)

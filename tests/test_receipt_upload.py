@@ -13,7 +13,15 @@ from test_api import _req, quiet, server as server, world as world  # noqa: F401
 from test_efactura import anaf_zip, ubl
 
 from fiscalm import ai, backup, companies, docs, integrations, links, pack, receipt_items, recon, transactions
-from fiscalm.api import actions, receipts as intake, state as api, upload_assignment, uploads as upload_links
+from fiscalm.api import (
+    actions,
+    lists,
+    receipts as intake,
+    state as api,
+    upload_assignment,
+    uploads as upload_links,
+    v1 as api_v1,
+)
 from fiscalm.bank import statements
 from fiscalm.efactura import inbox as ef
 from fiscalm.ledger import Ledger, LinkRefused
@@ -1122,8 +1130,13 @@ def test_all_firms_assignment(ledger, home, monkeypatch, text, expected):
         assert question["key"] == sha
         assert set(question["companies"]) == {"NORD", "STUDIO9"}
         assert upload_assignment.pending_file(ledger, sha)[1] == JPEG
+        opened = lists.detail(ledger, "ALL", {"kind": "mail", "id": sha})["state"]
+        assert opened["co"] == "NORD" and opened["to_check"][0]["key"] == sha
         result = actions.act("upload-assign", "NORD", {"key": sha, "who": "STUDIO9"})
         assert result["ok"]
+        with pytest.raises(api_v1.Error) as gone:
+            lists.detail(ledger, "ALL", {"kind": "mail", "id": sha})
+        assert gone.value.status == 404
         assert ledger.document(sha)["company"] == "STUDIO9"
         assert api.read_doc(ledger, "STUDIO9", sha)[1] == JPEG
         assert not upload_assignment.assign(ledger, sha, "NORD")
