@@ -252,8 +252,7 @@ def _set_checks(st: statements.Statement, parts: list[_Opened], check) -> None:
     """What the firm's statement must be, checked again under the write lock that stores it."""
     if check:
         check(st)
-    if len(parts) > 1:  # a set stands for the month's statement: it holds every account, like one file
-        refuse_incomplete(st)
+    refuse_incomplete(st)  # every caller: a statement, in one file or several, holds every account at its bank
 
 
 def _refusal(parts: list[_Opened], exc: statements.StatementError) -> dict:

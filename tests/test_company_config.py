@@ -815,13 +815,17 @@ def test_retired_account_load_validation(config, iban, retired, error):
 
 
 def test_statement_stored_issue_masks_account(ledger, home, monkeypatch):
+    ibans = companies.get("NORD").ibans
     out = home / "decrypted.pdf"
     out.write_bytes(b"synthetic")
     st = statements.Statement(
         "NORD",
         TODAY,
         date(2026, 1, 31),
-        [statements.Account(fake_iban(), "RON", total_debit=Decimal("1.00"), total_credit=Decimal("0.00"))],
+        [  # NORD's whole BT month: its RON account's totals don't add up, its EUR one is empty
+            statements.Account(ibans["RON"], "RON", total_debit=Decimal("1.00"), total_credit=Decimal("0.00")),
+            statements.Account(ibans["EUR"], "EUR", total_debit=Decimal("0.00"), total_credit=Decimal("0.00")),
+        ],
     )
     monkeypatch.setattr(statements, "decrypt_to", lambda *a, **kw: ("NORD", "2026-01", out))
     monkeypatch.setattr(statements, "parse", lambda *a: st)
