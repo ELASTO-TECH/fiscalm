@@ -79,9 +79,9 @@ def pending_docs(ledger: Ledger, company: str, month: str, *, left_out: bool = F
     contabilului" stay out (`left_out=True` lists those instead)."""
     held, docs = not_mailed(ledger, company), ledger.documents(company=company, up_to_month=month, unsent_only=True)
     named = ledger.linked_receipts(company, docs)
-    # an earlier month's statements don't ride along while accounts of their banks are known to be still to come
+    # an earlier month's statements ride along only once every account of their banks is known to be there
     months = {d["month"] for d in docs if d["kind"] == "statement"}
-    waiting = {m for m in months if month_missing(ledger, company, m)}
+    waiting = {m for m in months if month_missing(ledger, company, m) != []}
     return [
         d
         for d in docs

@@ -157,16 +157,18 @@ def _csv_docs(L: Ledger, company: str) -> list:
 def learn_accounts(L: Ledger, doc) -> list[str]:
     """The accounts a stored statement covers. One stored before accounts were recorded is read from its file and
     the answer is kept on the document, so it is read once; a file that can't be read, or that reads as another
-    firm's or another month's statement, proves no account."""
+    firm's or another month's statement, or names an account that isn't the firm's (a PDF reads under the firm it is
+    opened for, so its accounts are what prove it is that firm's), proves no account."""
     if doc["accounts"]:
         return json.loads(doc["accounts"])
     try:
         st = statements.parse(Path(doc["path"]), doc["company"])
     except (OSError, RuntimeError, ValueError):
         return []
-    if st.company != doc["company"] or st.month != doc["month"]:
-        return []
     found = statement_ibans(st)
+    co = companies.get(doc["company"], L=L)
+    if st.company != doc["company"] or st.month != doc["month"] or not all(co.account(i) for i in found):
+        return []
     if found:
         with L.tx() as db:
             db.execute(
@@ -473,18 +475,18 @@ def _refuse_break(before: statements.Account, after: statements.Account, numbere
 def month_missing(L: Ledger, company: str, month: str) -> list[str] | None:
     """The accounts the month's stored statements leave out at their banks (missing_accounts of them together); a
     statement of one account is imported on its own, and this says which ones are still to come. None when a stored
-    statement names no account (stored before accounts were recorded), or the firm is unknown: nobody can say the
-    month is complete. Reads only the ledger, never a stored file."""
+    statement names no account (stored before accounts were recorded) or one that isn't the firm's, or the firm is
+    unknown: nobody can say the month is complete. Reads only the ledger, never a stored file."""
     if company not in companies.all(L):
         return None
     co = companies.get(company, L=L)
     docs = [d for d in L.documents(company=company, month=month, kind="statement") if not d["path"].endswith(".csv")]
     learned = [json.loads(d["accounts"] or "[]") for d in docs]
-    if not all(learned):
-        return None
     owned = [co.account(i) for ibans in learned for i in ibans]
+    if not all(learned) or not all(owned):
+        return None
     first = date.fromisoformat(month + "-01")
-    accounts = [statements.Account(a.iban, a.currency) for a in owned if a]
+    accounts = [statements.Account(a.iban, a.currency) for a in owned]
     st = statements.Statement(company, first, _month_end(first), accounts)
     return missing_accounts(st) if accounts else []
 

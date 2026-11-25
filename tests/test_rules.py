@@ -425,7 +425,15 @@ def test_a_partner_ticked_not_mailed_stays_out_of_the_pack(ledger, server, monke
         currency="USD",
         source="mail:synthetic",
     )
-    ledger.add_document("sha-st", "NORD", "2026-10", "statement", "/nonexistent/st.pdf", vendor="Synthetic AI Inc")
+    ledger.add_document(
+        "sha-st",
+        "NORD",
+        "2026-10",
+        "statement",
+        "/nonexistent/st.pdf",
+        vendor="Synthetic AI Inc",
+        accounts=["RO24BTRLRONCRT0000000001", "RO71BTRLEURCRT0000000001"],
+    )
     partner = "NORD.n-synthetic-ai-inc"
     ledger.set_pack("NORD", "2026-09", "prepared")  # a prepared snapshot waits: its selection cannot change
     assert (

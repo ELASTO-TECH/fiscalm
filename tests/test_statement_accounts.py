@@ -58,7 +58,7 @@ def test_an_account_in_another_currency_than_the_firms_is_refused(ledger, tmp_pa
     assert recon._checked({("NORD", "2026-10"): [wrong]}, None) == []
 
 
-def test_a_statement_learned_from_its_file_names_accounts_only_for_its_own_month(ledger, tmp_path):
+def test_a_statement_learned_from_its_file_names_accounts_only_for_its_own_month(ledger, tmp_path, monkeypatch):
     """A row stored before accounts were recorded whose file reads as another month proves no account for its own."""
     october = str(write(tmp_path, complete()))
     ledger.add_document("sep", "NORD", "2026-09", "statement", october)
@@ -68,6 +68,13 @@ def test_a_statement_learned_from_its_file_names_accounts_only_for_its_own_month
     )
     ledger.add_document("oct", "NORD", "2026-10", "statement", october)
     assert len(statement_intake.learn_accounts(ledger, ledger.document("oct"))) == 2
+    # STUDIO9's October read for NORD (a PDF reads under the firm it is opened for): accounts that aren't NORD's
+    stranger = statements.Statement("NORD", date(2026, 10, 1), date(2026, 10, 31), [statements.Account(X1, "EUR")])
+    ledger.add_document("x", "NORD", "2026-10", "statement", "/x/x.pdf")
+    monkeypatch.setattr(statements, "parse", lambda path, co: stranger)
+    assert statement_intake.learn_accounts(ledger, ledger.document("x")) == []
+    ledger.add_document("y", "NORD", "2026-10", "statement", "/x/y.xml", accounts=[X1])  # stored naming a stranger
+    assert statement_intake.month_missing(ledger, "NORD", "2026-10") is None
 
 
 def test_the_pack_takes_a_months_statements_only_with_every_account_of_their_banks(ledger, tmp_path):
@@ -84,6 +91,7 @@ def test_the_pack_takes_a_months_statements_only_with_every_account_of_their_ban
     assert statement_intake.month_missing(ledger, "NORD", "2026-12") is None and not pack.ready(
         ledger, "NORD", "2026-12"
     )
+    assert "dec" not in {d["sha"] for d in pack.pending_docs(ledger, "NORD", "2027-01")}  # nor rides along later
 
 
 @pytest.mark.parametrize(
