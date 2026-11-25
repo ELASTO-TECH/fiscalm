@@ -115,7 +115,8 @@ LEGAL_FORMS = {
 
 def _name_parts(name: str, country: str) -> tuple[list[str], str]:
     """The words of a firm name and its trailing legal form ('' when it has none)."""
-    words = [w for w in firm_name(name).split("-") if w]
+    # firm_name drops a leading Romanian 'S.C.'; a lead word keeps it for firms elsewhere ('SC Harbour Ltd').
+    words = [w for w in firm_name(name if country == "RO" else "zz " + name).split("-") if w][country != "RO" :]
     forms = LEGAL_FORMS.get(country, frozenset())
     return (words[:-1], words[-1]) if len(words) > 1 and words[-1] in forms else (words, "")
 
