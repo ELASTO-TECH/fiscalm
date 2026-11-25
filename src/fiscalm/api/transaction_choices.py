@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 
+from fiscalm import links
 from fiscalm.api import search, state as api
 from fiscalm.api.responses import bounded, fail, page
 
@@ -121,37 +122,19 @@ def _open(full: dict, tx: dict) -> list[dict]:
     ]
 
 
-def _plain(text: str) -> str:
-    return " ".join(re.findall(r"[0-9a-z]+", search.fold(text)))
-
-
 def proposed(full: dict, tx: dict) -> list[dict]:
     """The open invoice the bank's details name by its number, when the transaction is exactly what is left of it in
     its currency: at most one, never applied. A number that names several open invoices, or another amount, proposes
     nothing. The details are only compared with the firm's own invoice numbers."""
     if tx.get("explanation") or not tx.get("details"):
         return []
-    text = f" {_plain(tx['details'])} "
-
-    def named(number: str) -> bool:
-        plain = _plain(number)
-        return (
-            len(plain) >= 3
-            and any(c.isdigit() for c in plain)
-            and (f" {plain} " in text or f" {plain.replace(' ', '')} " in text)
-        )
-
-    found = [r for r in _open(full, tx) if named(r["number"] or "")]
+    text = f" {links.plain(tx['details'])} "
+    found = [r for r in _open(full, tx) if links.names_number(text, r["number"] or "")]
     if len(found) != 1:
         return []
     r, orig = found[0], tx.get("orig") or {}
     amount = {tx["currency"]: tx["amount"], orig.get("currency"): orig.get("amount")}.get(r.get("currency") or "RON")
     return [pick(r, r["left"], False) | {"position": 0}] if amount and Decimal(amount) == Decimal(r["left"]) else []
-
-
-def named(full: dict) -> frozenset[str]:
-    """The transactions whose sheet proposes the invoice their details name (proposed): no rule explains them."""
-    return frozenset(t["id"] for t in full["transactions"]["rows"] if proposed(full, t))
 
 
 def invoices(full: dict, tx: dict, partner: str) -> list[dict]:

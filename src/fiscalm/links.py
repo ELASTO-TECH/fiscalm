@@ -503,20 +503,19 @@ def proposals(company: str, txs: list[statements.Tx], kept: list) -> list[dict |
     return out
 
 
-def apply_rules(L: Ledger, company: str, rows: list[dict], named: frozenset[str] = frozenset()) -> list[str]:
+def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
     """Explain on their own, after the matchers ran, the Tranzacții rows (transactions.view) left De explicat with
     nothing else proposed for them: by a saved Fără document or Avans rule, on any line of its card, account or
     merchant still to explain, older ones too; else a line the bank's own codes or words call its fee or interest, as
     Fără document; else a debit whose other end on another of the firm's accounts is free too (_own_transfer), as a
     Transfer între conturi with both ends. A row with any other proposal (an exact or named receipt, a settlement,
     invoices it fits) or waiting for its invoice is left to people. Written by Ledger.link_tx under the write lock,
-    which checks again what a person may have decided since the rows were read (_untouched). `named`: the rows whose
-    bank details name an open invoice at exactly its amount (transaction_choices.proposed), a person's too. Returns
-    the keys explained."""
-    free = {r["id"] for r in rows if not (r["explanation"] or r["proposal"] or r["awaiting"]) and r["can_link"]} - named
+    which checks again what a person may have decided since the rows were read and leaves a line naming an open
+    invoice to a person (_untouched). Returns the keys explained."""
+    free = {r["id"] for r in rows if not (r["explanation"] or r["proposal"] or r["awaiting"]) and r["can_link"]}
     done = []
     for r in rows:
-        if r["explanation"] or not r["can_link"] or r["awaiting"] or r["id"] in named:
+        if r["explanation"] or not r["can_link"] or r["awaiting"]:
             continue
         kept = r["proposal"]["as"] if r["proposal"] and r["proposal"]["kind"] == "remembered" else None
         memory = r["proposal"]["memory"] if kept else None
@@ -554,6 +553,8 @@ def _free_other_end(L: Ledger, company: str, key: str, free: set[str]) -> str | 
         if other not in free or _decided(L, other):
             return None
         o, _ = _transaction(L, company, other)
+        if names_open_invoice(L, company, o):
+            return None
     except LinkRefused:
         return None
     bank = {statements.BANK_FEE, statements.INTEREST} & {t.category, o.category}
@@ -579,6 +580,30 @@ def _own_transfer(L: Ledger, company: str, key: str, free: set[str]) -> Callable
     return build
 
 
+def plain(text: str) -> str:
+    """Letters and digits only, lower case, without diacritics: how bank text and invoice numbers are compared."""
+    return " ".join(re.findall(r"[0-9a-z]+", companies.fold(text).lower()))
+
+
+def names_number(text: str, number: str) -> bool:
+    """`text` (plain, padded with spaces) names invoice `number`: three characters or more with a digit, whole, as
+    written or without its spaces."""
+    p = plain(number)
+    return len(p) >= 3 and any(c.isdigit() for c in p) and (f" {p} " in text or f" {p.replace(' ', '')} " in text)
+
+
+def names_open_invoice(L: Ledger, company: str, t: statements.Tx) -> bool:
+    """The line's bank details name one of the firm's invoices it may still pay (a debit) or collect (a credit), at any
+    amount: what it covers is a person's to say, never a rule's. Read under the write lock."""
+    text = f" {plain(t.description or t.title or '')} "
+    sql = (
+        "SELECT number FROM issued WHERE company=? AND status IN ('open','marked')"
+        if t.direction == "credit"
+        else "SELECT number FROM efactura WHERE company=? AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)"
+    )
+    return any(names_number(text, r["number"] or "") for r in L.db.execute(sql, (company,)))
+
+
 def _decided(L: Ledger, key: str) -> bool:
     """A person decided for the line: took it back from an explanation, waits for its invoice, or must choose for it."""
     return bool(
@@ -593,7 +618,8 @@ def _decided(L: Ledger, key: str) -> bool:
 def _untouched(L: Ledger, company: str, key: str, memory: str | None, build: Callable[[], dict]) -> Callable[[], dict]:
     """A rule's explanation, under the write lock, only while nobody decided otherwise since the rows were read: the
     line not decided by a person (_decided), not a card debit a receipt could explain (recon.match_receipts, by
-    amount or by name), not a credit a pending settlement report claims, and the saved rule still the one that wins
+    amount or by name), not a line naming an open invoice (names_open_invoice), not a credit a pending settlement
+    report claims, and the saved rule still the one that wins
     for the line (proposals: a replaced rule has a new id, a card's rule comes before an account's or a merchant's)."""
 
     def build_once() -> dict:
@@ -603,6 +629,7 @@ def _untouched(L: Ledger, company: str, key: str, memory: str | None, build: Cal
         receipt = t.direction == "debit" and t.card_last4 and recon.match_receipts([t], recon._receipts(L, company))
         if (
             _decided(L, key)
+            or names_open_invoice(L, company, t)
             or gone
             or receipt
             or (t.direction == "credit" and settlements.claimed_credit(L, company, t))

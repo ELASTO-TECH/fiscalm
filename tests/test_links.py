@@ -627,9 +627,8 @@ def test_a_debit_waits_for_its_invoice_still_to_explain_and_the_invoice_still_se
     assert not ledger.awaited("NORD") and not actions.act("tx-await", "NORD", wait | {"on": "0"})["ok"]
 
 
-def _apply(L, rows: dict | None = None) -> list[str]:  # as `fiscalm tx-rules` runs it
-    named = transaction_choices.named(api.state(L, "NORD"))
-    return sorted(links.apply_rules(L, "NORD", list((rows or _rows(L)).values()), named))
+def _apply(L, rows: dict | None = None) -> list[str]:
+    return sorted(links.apply_rules(L, "NORD", list((rows or _rows(L)).values())))
 
 
 def _saved_on(L, day: date) -> None:
@@ -775,23 +774,32 @@ EUR_ACCOUNT = "RO71BTRLEURCRT0000000001"
         "an unreadable line",
         "a rule",
         "an invoice the credit names",
+        "two invoices the credit names",
+        "an invoice issued after the read",
     ],
 )
 def test_a_transfer_rule_leaves_a_pair_it_cant_be_sure_of(ledger, live, monkeypatch, case):
     """Settled by nothing: a second debit that fits the credit too, a pending report's payer claiming the credit or a
     rule saved for it after the rows were read, a debit on another firm's account, a same-amount line fiscalm can't
-    read, a credit whose details name an open invoice at its amount (its sheet proposes the invoice)."""
+    read, a credit whose details name an open invoice at any amount, even one issued after the rows were read."""
     debit = {"iban": "RO94BTRLRONCRT0000000002"} if case == "another firm's account" else {}
     out, into = _record(
         ledger,
         "NORD",
         _tx(67, "debit", "800.00", counterparty_iban=EUR_ACCOUNT, **debit),
         _tx(
-            68, "credit", "800.00", iban=EUR_ACCOUNT, counterparty="Administrator Exemplu", description="Plata NRD 7031"
+            68,
+            "credit",
+            "800.00",
+            iban=EUR_ACCOUNT,
+            counterparty="Administrator Exemplu",
+            description="Plata NRD 7031 7032",
         ),
     )
-    if case == "an invoice the credit names":
-        _sale(ledger, "7031", "800.00")
+    if case in ("an invoice the credit names", "two invoices the credit names"):
+        _sale(ledger, "7031", "800.00" if case == "an invoice the credit names" else "300.00")
+    if case == "two invoices the credit names":
+        _sale(ledger, "7032", "500.00")
     if case == "two debits, one credit":
         _record(
             ledger, "NORD", _tx(66, "debit", "800.00", counterparty_iban=EUR_ACCOUNT, day=TODAY - timedelta(days=4))
@@ -809,6 +817,8 @@ def test_a_transfer_rule_leaves_a_pair_it_cant_be_sure_of(ledger, live, monkeypa
             "name"
         ]
         ledger.remember("NORD", "name", name, {"kind": "advance", "partner": None, "reason": None, "note": "A"}, None)
+    if case == "an invoice issued after the read":
+        _sale(ledger, "7031", "800.00")
     monkeypatch.setattr(settlements, "claimed_credit", lambda L, co, t: case == "a report claims the credit")
     assert (
         _apply(ledger, rows) == []

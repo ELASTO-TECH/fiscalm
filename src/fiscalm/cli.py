@@ -34,7 +34,7 @@ from fiscalm import (
     telemetry,
     updates,
 )
-from fiscalm.api import actions, state as api, tokens, transaction_choices, upload_assignment, uploads as upload_links
+from fiscalm.api import actions, state as api, tokens, upload_assignment, uploads as upload_links
 from fiscalm.api.mcp import stdio
 from fiscalm.bank import connections as bank_connect, enablebanking as eb, feed as bank_feed, statements
 from fiscalm.bank.intake import recover
@@ -1226,13 +1226,9 @@ def build_parser() -> argparse.ArgumentParser:
     tr = sub.add_parser("tx-rules", help="explain free statement lines by saved rules and the bank's own fee lines")
 
     def tx_rules(a, L: Ledger) -> int:
-        # the rows as Tranzacții shows them, with the invoice its sheet proposes: a rule explains only a row left with
-        # nothing else proposed
-        done = {}
-        for co in companies.all(L):
-            full = api.state(L, co)
-            done[co] = len(links.apply_rules(L, co, full["transactions"]["rows"], transaction_choices.named(full)))
-        print(json.dumps(done))
+        # the rows as Tranzacții shows them: a rule explains only a row left with nothing else proposed
+        rows = {co: api.state(L, co)["transactions"]["rows"] for co in companies.all(L)}
+        print(json.dumps({co: len(links.apply_rules(L, co, rows[co])) for co in rows}))
         return 0
 
     tr.set_defaults(fn=tx_rules)
