@@ -290,6 +290,20 @@ def test_a_file_downloaded_twice_stays_editable_and_imports_its_latest_download(
     assert Path(ledger.payment_file(ident)["path"]).read_bytes() == again["data"]
 
 
+def test_a_download_recorded_before_51_that_reused_its_row_stays_the_latest(ledger, world):
+    """Before #51 a download of the same bytes refreshed its first row's time: A (lower id, newer time) is latest."""
+    ident = pay.add_invoices(ledger, "NORD", ["101"], name="Legacy", approve_invoice=efactura.approve)
+    a = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0)
+    b = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0 + timedelta(days=1))
+    ledger.db.execute("UPDATE payment_downloads SET created_at='2099-01-01T10:00:00' WHERE id=?", (a["download_id"],))
+    ledger.db.commit()
+    assert state.payment_file_detail(ledger, ident)["downloads"][0]["id"] == a["download_id"]
+    with pytest.raises(PaymentFileError):
+        pay.import_file(ledger, ident, "NORD", b["download_id"], D0)
+    assert pay.import_file(ledger, ident, "NORD", a["download_id"], D0)
+    assert Path(ledger.payment_file(ident)["path"]).read_bytes() == a["data"]
+
+
 def test_all_skipped_is_never_confirmed_and_can_be_emptied(ledger, live):
     ident = ledger.create_payment_file("NORD", "Skipped")
     item = _op(ledger, 24)
