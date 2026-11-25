@@ -605,8 +605,11 @@ def names_open_invoice(L: Ledger, company: str, t: statements.Tx) -> bool:
     text, norm = f" {plain(words)} ", efactura._norm(words)
 
     def names(number: str) -> bool:
-        # a supplier's number is outside data: one too short names dates, one too long is not a number
-        sure = 3 <= len(number) <= 40 and (re.search(r"[A-Za-z]", number) or efactura.number_of(number))
+        # the firm's own numbers as the collections matcher reads them; a supplier's is outside data: one too short
+        # names dates, one too long is not a number
+        sure = t.direction == "credit" or (
+            3 <= len(number) <= 40 and (re.search(r"[A-Za-z]", number) or efactura.number_of(number))
+        )
         ident, digits = (issued._ident_re(number) if sure else None), efactura.number_of(number)
         return (
             names_number(text, number)

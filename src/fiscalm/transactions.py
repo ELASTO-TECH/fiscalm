@@ -271,7 +271,7 @@ def _remembered_proposals(
         r["remember"] = links.shown_keys(efactura.line_keys(txs[r["id"]], own)) if r["can_link"] else {}
     loose_txs = [txs[r["id"]] for r in loose]
     for r, partner, kept_as in zip(
-        loose, links.suggest(L, co, loose_txs, partners or {}), links.proposals(co, loose_txs, kept), strict=True
+        loose, links.suggest(L, co, loose_txs, partners or {}), links.proposals(co, loose_txs, kept, L), strict=True
     ):
         r["partner"] = (
             kept_as["as"]["partner"] if kept_as and kept_as["as"]["kind"] == "documents" else None
