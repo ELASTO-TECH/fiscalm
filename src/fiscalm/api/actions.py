@@ -39,7 +39,7 @@ from fiscalm.api.responses import Error as APIError
 from fiscalm.bank import connections as bank_connect, csv as cs, enablebanking
 from fiscalm.bank.statements import StatementError
 from fiscalm.commerce import emag_sync, orders as commerce
-from fiscalm.efactura import client as anaf, inbox as efactura
+from fiscalm.efactura import client as anaf, credits as received_credits, inbox as efactura
 from fiscalm.invoicing import issued
 from fiscalm.invoicing.errors import InvoiceError
 from fiscalm.ledger import USER, AuthorizationRefused, Ledger, finance_home
@@ -517,6 +517,14 @@ def resolve_debit(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
         out = _res(False, "Plata nu mai așteaptă un răspuns.")
     ctx.log(f"web: resolve-debit {ctx.get('tx')[:20]}: {'ok' if out['ok'] else 'nothing'}")
     return out
+
+
+def credit_pick(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    """A received credit note naming no invoice fits several: the user says which one it cancels, or none."""
+    ok = received_credits.pick(L, co, ctx.get("id"), ctx.get("target"))
+    if ok:  # only an id the engine accepted reaches the log
+        ctx.log(f"web: credit-pick {ctx.get('id')}")
+    return _res(ok, "Răspunsul a fost salvat." if ok else "Stornarea nu mai așteaptă un răspuns.")
 
 
 def card_owner(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
@@ -1220,6 +1228,7 @@ ACTIONS = {
     'issued-mark': Action(issued_mark, 'id method detail', strings=True, public_description='id, method (bank: payment order, cash, card, other), detail: for other, how it was collected (1 to 200 characters); else empty. Never proof: the invoice awaits a statement credit.'),
     'issued-unmark': Action(issued_unmark, 'id', public_description='id'),
     'resolve-debit': Action(resolve_debit, 'tx target', public_description='tx, target (one of its candidates[].id)'),
+    'credit-pick': Action(credit_pick, 'id target', public_description='id: a received credit note with credit_question; target: one of its credit_question[].id, or "-" when it cancels none of them. The first answer stands; local operation.'),
     'card-owner': Action(card_owner, 'tx owner', public=False, actor=True, description='tx (an observed card transaction), owner (a companies[].key or personal); first answer wins, never confirms payment'),
     'tx-link': Action(tx_link, 'tx kind invoices payment reason note who holder was remember', public=False, actor=True, description='kind (documents, the default; label: Fără document, reason one of bank_fee, interest, personal, other and an optional note for the accountant, required for other, at most 200 characters; transfer: Transfer între conturi; advance: Avans, who the administrator or associate, 1 to 100 characters), tx (a transactions.rows[].id; for an explanation already made, its link.tx), invoices (comma-separated ids: issued[].id for a credit, invoices[].id for a debit) or payment (one payments.*[].item_id, debits only), reason ("" or one of rest, courier_fee, bank_fee, fx, other), note (other only, 1 to 200 characters), was (the row\'s explanation.link.id, "" for none), remember ("", or one of the row\'s remember keys: iban, card for a label only, name; never for a transfer)'),
     'tx-await': Action(tx_await, 'tx on note', public=False, actor=True, description='tx (a debit in transactions.rows[].id, not explained or settled), on ("1" waits, "0" stops waiting), note (on=1 only, optional, what is expected, at most 200 characters). Aștept factura: the debit stays to explain, listed last, and reserves nothing. Local operation.'),

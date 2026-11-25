@@ -4412,6 +4412,7 @@
                 "issued-mark",
                 "issued-unmark",
                 "resolve-debit",
+                "credit-pick",
                 "upload-link-create",
                 "upload-link-revoke",
                 "integration-add",
@@ -4565,6 +4566,7 @@
           "issued-mark": "id, method (bank: payment order, cash, card, other), detail: for other, how it was collected (1 to 200 characters); else empty. Never proof: the invoice awaits a statement credit. Effect: local; allowed in shadow.",
           "issued-unmark": "id Effect: local; allowed in shadow.",
           "resolve-debit": "tx, target (one of its candidates[].id) Effect: local; allowed in shadow.",
+          "credit-pick": "id: a received credit note with credit_question; target: one of its credit_question[].id, or \"-\" when it cancels none of them. The first answer stands; local operation. Effect: local; allowed in shadow.",
           "upload-link-create": "label; optional all_firms (boolean), expires_in_days (1..365), max_files (positive integer). Write scope required; explicit upload-link routes are also available. Effect: local; allowed in shadow.",
           "upload-link-revoke": "id: upload link ID. Write scope required; explicit upload-link routes are also available. Effect: local; allowed in shadow.",
           "integration-add": "App authentication required; bearer requests return 403 app_required. Effect: local; allowed in shadow.",
@@ -10131,6 +10133,7 @@
     "issued-mark": "local",
     "issued-unmark": "local",
     "resolve-debit": "local",
+    "credit-pick": "local",
     "card-owner": "local",
     "tx-link": "local",
     "tx-await": "local",
@@ -10219,6 +10222,7 @@
     "issued-mark": "member",
     "issued-unmark": "member",
     "resolve-debit": "member",
+    "credit-pick": "member",
     "card-owner": "member",
     "tx-link": "member",
     "tx-await": "member",
@@ -10660,6 +10664,38 @@
             },
             "description": "Unambiguously linked received credit notes, scoped to this company, supplier and currency."
           },
+          "credit_question": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "number": {
+                  "type": "string"
+                },
+                "amount": {
+                  "description": "Exact decimal amount with two places; never binary floating point. Currency is a separate field.",
+                  "type": "string",
+                  "pattern": "^-?[0-9]+\\.[0-9]{2}$"
+                },
+                "date": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "number",
+                "amount",
+                "date"
+              ]
+            },
+            "description": "For a credit note naming no invoice: the invoices it could cancel (same supplier and currency, exact opposite total, issued up to 14 days before), when several fit or SPV order or an archived invoice leaves one in doubt. None is cancelled until credit-pick."
+          },
           "credit_note": {
             "type": "boolean",
             "description": "An unmatched received credit note; never payable."
@@ -10757,6 +10793,7 @@
           "paid_method",
           "total",
           "credits",
+          "credit_question",
           "credit_note",
           "covered",
           "left",
@@ -12699,6 +12736,37 @@
                     ]
                   }
                 },
+                "credit_question": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "number": {
+                        "type": "string"
+                      },
+                      "amount": {
+                        "description": "Exact decimal amount with two places; never binary floating point. Currency is a separate field.",
+                        "type": "string",
+                        "pattern": "^-?[0-9]+\\.[0-9]{2}$"
+                      },
+                      "date": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "number",
+                      "amount",
+                      "date"
+                    ]
+                  }
+                },
                 "credit_note": {
                   "type": "boolean"
                 },
@@ -12797,6 +12865,7 @@
                 "paid_method",
                 "total",
                 "credits",
+                "credit_question",
                 "credit_note",
                 "covered",
                 "left",
@@ -16931,6 +17000,37 @@
                                 ]
                               }
                             },
+                            "credit_question": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "id": {
+                                    "type": "string"
+                                  },
+                                  "number": {
+                                    "type": "string"
+                                  },
+                                  "amount": {
+                                    "description": "Exact decimal amount with two places; never binary floating point. Currency is a separate field.",
+                                    "type": "string",
+                                    "pattern": "^-?[0-9]+\\.[0-9]{2}$"
+                                  },
+                                  "date": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "number",
+                                  "amount",
+                                  "date"
+                                ]
+                              }
+                            },
                             "credit_note": {
                               "type": "boolean"
                             },
@@ -17029,6 +17129,7 @@
                             "paid_method",
                             "total",
                             "credits",
+                            "credit_question",
                             "credit_note",
                             "covered",
                             "left",
@@ -17361,6 +17462,37 @@
                                         ]
                                       }
                                     },
+                                    "credit_question": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "id": {
+                                            "type": "string"
+                                          },
+                                          "number": {
+                                            "type": "string"
+                                          },
+                                          "amount": {
+                                            "description": "Exact decimal amount with two places; never binary floating point. Currency is a separate field.",
+                                            "type": "string",
+                                            "pattern": "^-?[0-9]+\\.[0-9]{2}$"
+                                          },
+                                          "date": {
+                                            "type": [
+                                              "string",
+                                              "null"
+                                            ]
+                                          }
+                                        },
+                                        "required": [
+                                          "id",
+                                          "number",
+                                          "amount",
+                                          "date"
+                                        ]
+                                      }
+                                    },
                                     "credit_note": {
                                       "type": "boolean"
                                     },
@@ -17459,6 +17591,7 @@
                                     "paid_method",
                                     "total",
                                     "credits",
+                                    "credit_question",
                                     "credit_note",
                                     "covered",
                                     "left",

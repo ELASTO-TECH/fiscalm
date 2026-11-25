@@ -1125,6 +1125,20 @@ class Ledger:
         with self.tx() as db:
             db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, value))
 
+    def credit_picks(self) -> dict[str, str]:
+        """Credit note id -> the invoice a person said it cancels (or "-": none)."""
+        rows = self.db.execute("SELECT key,value FROM meta WHERE key >= 'credit_pick:' AND key < 'credit_pick;'")
+        return {key.removeprefix("credit_pick:"): value for key, value in rows}
+
+    def pick_credit_original(self, note_id: str, target: str, asked: Callable[[], bool]) -> bool:
+        """Which invoice a credit note without a reference cancels, as a person answered; the first answer stands.
+        `asked` re-checks the question under the write lock, so two answers can't take one invoice."""
+        with self.tx() as db:
+            if not asked():
+                return False
+            sql = "INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)"
+            return db.execute(sql, (f"credit_pick:{note_id}", target)).rowcount == 1
+
     def create_payment_file(self, company: str, name: str) -> int:
         name = name.strip()
         if not 1 <= len(name) <= 200:
