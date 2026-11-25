@@ -328,7 +328,9 @@ describe("Firme", () => {
       { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null },
       // at a bank outside the catalogue: no bank card lists it once closed
       { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "", bank_name: "", pays: false, retired: "2026-10-31", opened: "2024-03", statement_senders: [], last_statement: null }] };
-    const { api, p } = await page({ companies: () => json(cfg), onPost: () => answer({ key: "NORD", iban_last4: "0002", opened: "2024-03-14", retired: "2026-10-31" }, "Datele contului au fost salvate.") });
+    const pending = deferred<Response>();
+    const { api, p } = await page({ companies: () => json(cfg), onPost: (c: Call) => (c.url.endsWith("company-account-dates")
+      ? pending.promise : json({ ok: true, message: "", state: null, done: { offers: [] } })) });
     await userEvent.click(p.getByRole("button", { name: "Modifică NORD" }));
     const closed = within(p.getByRole("list", { name: "Conturi închise" }));
     expect(closed.getByText("deschis din 03.2024, închis pe 31.10.2026")).toBeInTheDocument();
@@ -342,6 +344,10 @@ describe("Firme", () => {
     // the closing day it didn't touch stays out: another person's change to it is never undone
     await waitFor(() => expect(saved()).toEqual([{ url: "/web/api/company-account-dates", method: "POST",
       body: { key: "NORD", account: "acc2", opened: "2024-03-14" } }]));
+    // until the answer and the dates read again, nothing can be typed that the refreshed form would drop
+    expect(form.getByLabelText("Închis pe")).toHaveAttribute("readonly");
+    expect(form.getByLabelText(/Deschis din/)).toHaveAttribute("readonly");
+    await act(async () => pending.resolve(await answer({ key: "NORD", iban_last4: "0002", opened: "2024-03-14", retired: "2026-10-31" }, "Datele contului au fost salvate.")));
   });
 
   it("lists a firm in one row with one button, and sets a bank's statement password write-only in its Bănci", async () => {

@@ -489,6 +489,9 @@ function AccountDates({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; re
   const send = useSend(reload);
   const [opened, setOpened] = useState(a.opened ?? "");
   const [retired, setRetired] = useState(a.retired ?? "");
+  // locked from the save until the dates read again remount the form (or the engine refuses): nothing typed meanwhile
+  // is lost
+  const [saving, setSaving] = useState(false);
   const id = `dates-${c.key}-${a.id}`;
   const changed: Record<string, string> = {
     ...(opened.trim() !== (a.opened ?? "") ? { opened: opened.trim() } : {}),
@@ -496,20 +499,22 @@ function AccountDates({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; re
   };
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    if (busy || !Object.keys(changed).length) return;
-    await send("company-account-dates", { key: c.key, account: a.id, ...changed });
+    if (busy || saving || !Object.keys(changed).length) return;
+    setSaving(true);
+    const r = await send("company-account-dates", { key: c.key, account: a.id, ...changed });
+    if (!r?.ok) setSaving(false);
   };
   return (
     <details className="basis-full">
       <Summary>Date cont</Summary>
       <Form className="mt-2" onSubmit={save} aria-label={`Datele contului ${a.currency} ••••${a.iban_last4}`}>
         <Label htmlFor={`${id}-opened`}>Deschis din (luna AAAA-LL sau ziua AAAA-LL-ZZ)</Label>
-        <Input id={`${id}-opened`} value={opened} onChange={(e) => setOpened(e.target.value)} autoComplete="off"
+        <Input id={`${id}-opened`} value={opened} onChange={(e) => setOpened(e.target.value)} autoComplete="off" readOnly={saving}
           maxLength={10} placeholder="2024-03" />
         <Label htmlFor={`${id}-retired`}>Închis pe</Label>
-        <Input id={`${id}-retired`} type="date" value={retired} onChange={(e) => setRetired(e.target.value)} />
+        <Input id={`${id}-retired`} type="date" value={retired} onChange={(e) => setRetired(e.target.value)} readOnly={saving} />
         <Actions>
-          <Button type="submit" className="btn g" disabled={busy || !Object.keys(changed).length}>Salvează datele</Button>
+          <Button type="submit" className="btn g" disabled={busy || saving || !Object.keys(changed).length}>Salvează datele</Button>
         </Actions>
       </Form>
     </details>
