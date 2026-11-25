@@ -687,7 +687,7 @@ def fits_open_amount(L: Ledger, company: str, t: statements.Tx) -> bool:
         if t.direction == "credit"
         else [
             "SELECT 'efactura ' || message_id, currency FROM efactura WHERE company=? AND total IS NOT NULL "
-            "AND parse_error IS NULL AND (status='open' OR status='paid' AND paid_tx IS NULL)",  # linked: its payment row
+            "AND parse_error IS NULL AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)",
             "SELECT 'payment ' || item_id, 'RON' FROM payments WHERE company=? AND status IN ('pending','exported')",
         ]
     )

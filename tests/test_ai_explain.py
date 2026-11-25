@@ -192,13 +192,17 @@ def test_an_ai_label_leaves_a_transfer_leg_even_when_the_other_leg_arrives_meanw
     assert links.apply_rules(ledger, "NORD", list(_rows(ledger).values())) == [out]
 
 
-def test_an_ai_label_leaves_a_line_that_may_be_one_of_two_transfers(ledger, live):
+@pytest.mark.parametrize("second", ["readable", "unreadable"])
+def test_an_ai_label_leaves_a_line_that_may_be_one_of_two_transfers(ledger, live, second):
     eur = "RO71BTRLEURCRT0000000001"
-    out, *_ = _record(
-        ledger,
-        "NORD",
-        _tx(18, "debit", "320.00"),
-        _tx(19, "credit", "320.00", iban=eur),
-        _tx(20, "credit", "320.00", iban=eur, day=TODAY - timedelta(days=2)),
-    )
+    out, *_ = _record(ledger, "NORD", _tx(18, "debit", "320.00"), _tx(19, "credit", "320.00", iban=eur))
+    if second == "readable":
+        _record(ledger, "NORD", _tx(20, "credit", "320.00", iban=eur, day=TODAY - timedelta(days=2)))
+    else:
+        ledger.db.execute(
+            "INSERT INTO statement_txs(tx_key,company,direction,tx,day,amount,iban) VALUES('x2','NORD','credit',NULL,?,"
+            "'320.00',?)",
+            ((TODAY - timedelta(days=2)).isoformat(), eur),
+        )
+        ledger.db.commit()
     assert _run(ledger, [_answer(out, "label", label="personal")])[0]["applied"] == 0
