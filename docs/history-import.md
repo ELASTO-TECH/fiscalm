@@ -34,8 +34,11 @@ Both use the same reader, which detects each file by content:
   stays stored as its document.
 - **PDFs**, alone or in a mixed ZIP, read like [mailed invoices](mail-invoices.md) but accepting Romanian
   suppliers. They are always history. Uncertain ones wait in a review table (not Sarcini), where a person fills in
-  the fields or marks the document as not an invoice. The AI service narrows a total only in Live; in Sandbox no
-  document text leaves the installation. A number that reads as a label or a date (`Data emitere: 06.02.2026`) is
+  the fields or marks the document as not an invoice. When the rules can't read every field, the configured AI
+  integration reads the PDF once (its text, or a scan's first page), in Sandbox and Live; its fields are checked
+  like a mailed invoice's (`fiscalm.ai_extract`), and the firm's role comes from its CUI or name. A confident
+  reading of an invoice that agrees with every field the rules found, with a partner tax id printed on it, is filed;
+  anything else waits in review with the AI's fields filled in. A number that reads as a label or a date (`Data emitere: 06.02.2026`) is
   never accepted, on import or in review. When an FGO archive prints a bare `FACTURA` heading, the number is the
   one series line under it (`ABC 0065`); none, several or a longer number send the PDF to review.
 - **Correcting an accepted PDF.** `fiscalm history list COMPANY --json` shows each row's `xml_sha`. For a row read

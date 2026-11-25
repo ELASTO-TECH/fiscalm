@@ -10,11 +10,12 @@ import stat
 from datetime import date, datetime
 from decimal import Decimal
 
-from fiscalm import companies
+from fiscalm import ai_extract, companies
 from fiscalm.efactura.inbox import Invoice, tax_token
-from fiscalm.ledger import Ledger, finance_home, is_live, now
+from fiscalm.ledger import Ledger, finance_home, now
 from fiscalm.mail import invoices as reader
 from fiscalm.payments.engine import pay_lock
+from fiscalm.pdftext import first_page_png
 
 
 class ReviewError(ValueError):
@@ -29,9 +30,9 @@ def fields(L: Ledger, raw: bytes, company: str) -> dict:
     if re.search(r"\bseria\b", doc.text, re.I):
         doc.number = ""  # separately printed series needs explicit review
     role = doc.roles.get(company, "") if doc.firms == [company] else ""
-    total = reader.pdf_total(L, doc, allow_ai=is_live()) if not doc.refused else None
+    total = doc.totals[0] if len(doc.totals) == 1 and not doc.refused else None
     name, cui = reader.pdf_party(doc.text, "buyer" if role == "seller" else "seller") if role else ("", "")
-    return {
+    rules = {
         "direction": {"seller": "issued", "buyer": "received"}.get(role, ""),
         "number": doc.number,
         "issue_date": doc.date,
@@ -41,6 +42,47 @@ def fields(L: Ledger, raw: bytes, company: str) -> dict:
         "party_tax_id": tax_token(cui),
         "reason": doc.refused,
     }
+    if (valid(rules) and rules["party_tax_id"]) or doc.refused in ("proforma", "credit-note"):
+        return rules
+    return _with_ai(L, raw, company, doc, rules)
+
+
+def _ai_fields(x: ai_extract.Extraction, company: str, text: str) -> dict:
+    """The history fields an AI reading gives, the firm's role decided by the engine's match of its CUI or name."""
+    way = "received" if x.buyer == company else "issued" if x.seller == company else ""
+    name, tax = {"received": (x.seller_name, x.seller_tax_id), "issued": (x.buyer_name, x.buyer_tax_id)}.get(
+        way, ("", "")
+    )
+    tax = tax_token(tax)
+    if text and tax not in re.sub(r"[^A-Z0-9]", "", text.upper()):
+        tax = ""  # a partner id the document doesn't print
+    return {
+        "direction": way,
+        "number": x.number if plausible_number(x.number) else "",
+        "issue_date": x.issue_date,
+        "total": x.total if x.currency else "",
+        "currency": x.currency if x.total else "",
+        "party_name": name if way else "",
+        "party_tax_id": tax,
+    }
+
+
+def _with_ai(L: Ledger, raw: bytes, company: str, doc: reader.Doc, rules: dict) -> dict:
+    """The rules' fields completed by one checked AI reading (fiscalm.ai_extract), in Sandbox and Live: reading a
+    local document has no outward effect. A confident reading of an invoice that agrees with every field the rules
+    found files without review; anything else waits in review with the AI's fields filled in."""
+    image = None
+    if not doc.text.strip():
+        png = first_page_png(raw) if raw.startswith(b"%PDF-") and ai_extract.ready(L) else None
+        image = ("image/png", png) if png else None
+    x = ai_extract.extract(L, [company], text=doc.text, image=image) if doc.text.strip() or image else None
+    if x is None:
+        return rules
+    ai = _ai_fields(x, company, doc.text)
+    same = {"number": lambda a, b: number_key(a) == number_key(b), "party_name": lambda a, b: True}  # a name's spelling
+    agree = all(not rules[k] or not v or same.get(k, str.__eq__)(rules[k], v) for k, v in ai.items())
+    certain = x.confident and not x.rejected and x.doc_type == "invoice" and agree
+    return {k: rules[k] or v for k, v in ai.items()} | {"reason": "" if certain else "unsure"}
 
 
 def _archive_party(lines: list[str]) -> tuple[str, str] | None:
