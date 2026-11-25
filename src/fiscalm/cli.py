@@ -868,7 +868,7 @@ def cmd_company_bank(a, L: Ledger) -> int:
 
 def cmd_company_dates(a, L: Ledger) -> int:
     try:
-        _out(set_dates(L=L, key=a.company, iban=a.iban, opened=a.opened, retired=a.retired))
+        _out(set_dates(L=L, key=a.company, iban=a.iban, opened=a.opened, retired=a.retired, today=date.today()))
     except (CompanyError, ConfigError) as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2

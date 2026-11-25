@@ -1,7 +1,7 @@
 """Adding a company's accounts, any bank and currency, and what Setări shows of them. Synthetic data only."""
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from firms import entries
@@ -182,12 +182,14 @@ def test_an_accounts_opening_month_is_set_from_the_cli(config, ledger, month, re
         ("EUR", "", "31.10.2026", "AAAA-LL-ZZ"),
         ("RON", "", "2026-10-31", "Plățile pleacă din acest cont"),  # payment files debit it: replaced first
         ("STRANGER", "", "", "nu este al acestei firme"),
+        ("EUR", "", "tomorrow", "o zi care a trecut"),  # a later day would stop reading the account now
     ],
 )
 def test_an_accounts_dates_are_set_in_the_app(config, ledger, who, opened, retired, said):
     nord = companies.get("NORD")
     own = nord.ibans.get(who, "RO00XXXX0000000000000001")
     before = nord.account(own)
+    retired = (date.today() + timedelta(days=1)).isoformat() if retired == "tomorrow" else retired
     body = {"key": "NORD", "account": cs.account_id("NORD", own), "opened": opened, "retired": retired}
     r = actions.act("company-account-dates", "ALL", body)
     after = companies.get("NORD").account(own)
@@ -199,8 +201,23 @@ def test_an_accounts_dates_are_set_in_the_app(config, ledger, who, opened, retir
         assert (mine["opened"], mine["retired"]) == (opened or None, retired or None)
 
 
+def test_a_date_left_out_keeps_what_is_recorded(config, ledger):
+    """A form opened before another person closed the account sends only the opening it changed: still closed."""
+    eur = companies.get("NORD").ibans["EUR"]
+    account = cs.account_id("NORD", eur)
+    assert actions.act("company-account-dates", "ALL", {"key": "NORD", "account": account, "retired": "2026-10-31"})[
+        "ok"
+    ]
+    assert actions.act("company-account-dates", "ALL", {"key": "NORD", "account": account, "opened": "2024-03"})["ok"]
+    assert (companies.get("NORD").account(eur).opened, companies.get("NORD").account(eur).retired) == (
+        "2024-03",
+        "2026-10-31",
+    )
+    assert not actions.act("company-account-dates", "ALL", {"key": "NORD", "account": account})["ok"]  # nothing to set
+
+
 def test_choosing_the_paying_account_again_keeps_its_opening_month(config, ledger):
     ron = companies.get("NORD").ron_iban
-    cc.set_dates(key="NORD", iban=ron, opened="2021-08", retired=None, L=ledger)
+    cc.set_dates(key="NORD", iban=ron, opened="2021-08", retired=None, today=date(2026, 11, 2), L=ledger)
     cc.bank(key="NORD", iban=ron, replace=True, today=date(2026, 11, 2), L=ledger)
     assert companies.get("NORD").account(ron).opened == "2021-08"

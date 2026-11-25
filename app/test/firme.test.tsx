@@ -320,26 +320,28 @@ describe("Firme", () => {
     await waitFor(() => expect(form.getByLabelText("IBAN-ul contului nou")).toHaveValue(""));
   });
 
-  it("sets when an account opened and closed in Bănci și conturi, and shows a closed one greyed with its dates", async () => {
+  it("sets when an account opened and closed, sending only what changed; a closed account keeps its own list", async () => {
     at("?co=NORD&tab=setari&sec=firme");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], has_ron_account: true, iban_last4: "0001", banks: [
       { bank: "bt", name: "Banca Transilvania", connect: "ready", connection: null }], accounts: [
       { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null },
-      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: "2026-10-31", opened: "2024-03", statement_senders: [], last_statement: null }] };
-    const { api, p } = await page({ companies: () => json(cfg), onPost: () => answer({ key: "NORD", iban_last4: "0002", opened: "2024-03-14", retired: null }, "Datele contului au fost salvate.") });
+      // at a bank outside the catalogue: no bank card lists it once closed
+      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "", bank_name: "", pays: false, retired: "2026-10-31", opened: "2024-03", statement_senders: [], last_statement: null }] };
+    const { api, p } = await page({ companies: () => json(cfg), onPost: () => answer({ key: "NORD", iban_last4: "0002", opened: "2024-03-14", retired: "2026-10-31" }, "Datele contului au fost salvate.") });
     await userEvent.click(p.getByRole("button", { name: "Modifică NORD" }));
-    const conn = within(p.getByRole("region", { name: "Bănci și conturi" }));
-    expect(conn.getByText("deschis din 03.2024, închis pe 31.10.2026")).toBeInTheDocument(); // a closed account stays listed
-    await userEvent.click(conn.getAllByText("Date cont")[1]);
+    const closed = within(p.getByRole("list", { name: "Conturi închise" }));
+    expect(closed.getByText("deschis din 03.2024, închis pe 31.10.2026")).toBeInTheDocument();
+    await userEvent.click(closed.getByText("Date cont"));
     const form = within(p.getByRole("form", { name: "Datele contului EUR ••••0002" }));
+    expect(form.getByRole("button", { name: "Salvează datele" })).toBeDisabled(); // nothing changed yet
     await userEvent.clear(form.getByLabelText(/Deschis din/));
     await userEvent.type(form.getByLabelText(/Deschis din/), "2024-03-14");
-    await userEvent.clear(form.getByLabelText("Închis pe")); // open again
     await userEvent.click(form.getByRole("button", { name: "Salvează datele" }));
     const saved = () => api.posts().filter((c) => c.url.endsWith("company-account-dates"));
+    // the closing day it didn't touch stays out: another person's change to it is never undone
     await waitFor(() => expect(saved()).toEqual([{ url: "/web/api/company-account-dates", method: "POST",
-      body: { key: "NORD", account: "acc2", opened: "2024-03-14", retired: "" } }]));
+      body: { key: "NORD", account: "acc2", opened: "2024-03-14" } }]));
   });
 
   it("lists a firm in one row with one button, and sets a bank's statement password write-only in its Bănci", async () => {

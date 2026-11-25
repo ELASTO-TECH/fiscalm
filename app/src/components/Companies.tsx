@@ -416,7 +416,8 @@ export function BanksAndAccounts({ c, reload, titled = false }: { c: CompanyEntr
   const inboxes = useIntegrations().data?.items ?? null;
   const banks = c.banks ?? [];
   const accounts = (c.accounts ?? []).filter((a) => !a.retired);
-  const active = new Set((c.accounts ?? []).map((a) => a.bank));
+  const active = new Set(accounts.map((a) => a.bank));
+  const closed = (c.accounts ?? []).filter((a) => a.retired);
   const shown = banks.filter((b) => active.has(b.bank) || b.bank === chosen);
   const connectable = banks.filter((b) => !active.has(b.bank) && b.connect !== "not_supported");
   return (
@@ -429,15 +430,7 @@ export function BanksAndAccounts({ c, reload, titled = false }: { c: CompanyEntr
           <h4 className="m-0 text-[15px] font-semibold leading-6">{b.name || "Altă bancă"}</h4>
           <p id={`acc-${c.key}-${b.bank}`} className={groupStyle}>Conturi</p>
           <ul className="m-0 mb-4 list-none p-0" aria-labelledby={`acc-${c.key}-${b.bank}`}>
-            {(c.accounts ?? []).filter((a) => a.bank === b.bank).map((a) => (
-              <li key={a.id} className="flex flex-wrap items-center gap-2 border-0 border-t border-solid border-line py-2 text-sm first:border-t-0">
-                <span className={`mr-auto ${a.retired ? "text-muted" : ""}`}>
-                  {a.currency} ••••{a.iban_last4}{datesLine(a) ? <small className="block text-xs text-muted">{datesLine(a)}</small> : null}
-                </span>
-                {a.pays ? <span className={`rounded-badge px-1.5 py-0.5 text-xs font-medium ${statePillStyle.ok}`}>Plățile pleacă de aici</span> : null}
-                <AccountDates c={c} a={a} reload={reload} />
-              </li>
-            ))}
+            {accounts.filter((a) => a.bank === b.bank).map((a) => <AccountRow key={a.id} c={c} a={a} reload={reload} />)}
             {!active.has(b.bank) ? <li className="py-2 text-sm text-muted">Niciun cont încă.</li> : null}
           </ul>
           <p className={groupStyle}>Cum ajung tranzacțiile</p>
@@ -446,6 +439,13 @@ export function BanksAndAccounts({ c, reload, titled = false }: { c: CompanyEntr
         </div>
       ))}
       {!shown.length ? <p className={noteLeftStyle}>Firma nu are încă un cont bancar.</p> : null}
+      {closed.length ? <>
+        {/* every closed account, whatever its bank: one whose bank has no current account keeps its dates to correct */}
+        <p id={`closed-${c.key}`} className={groupStyle}>Conturi închise</p>
+        <ul className="m-0 list-none p-0" aria-labelledby={`closed-${c.key}`}>
+          {closed.map((a) => <AccountRow key={a.id} c={c} a={a} reload={reload} />)}
+        </ul>
+      </> : null}
       <AddAccount c={c} accounts={accounts} reload={reload} />
       {connectable.length ? <>
         <Label htmlFor={`bank-${c.key}`}>Conectează o bancă</Label>
@@ -465,19 +465,39 @@ function datesLine(a: CompanyAccount): string {
   return [opened, a.retired ? `închis pe ${ddmmyyyy(a.retired)}` : ""].filter(Boolean).join(", ");
 }
 
-/** Date cont: the month or day an account opened and the day it closed ("" forgets one). The engine checks both: an
- * account can't open after it closed, and the one payment files debit closes only once another takes its place. A
- * statement of a month the account wasn't open doesn't owe it. */
+/** One account in Bănci și conturi: its currency and last digits, its dates, whether payments leave from it, Date cont. */
+function AccountRow({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; reload: () => void }) {
+  return (
+    <li className="flex flex-wrap items-center gap-2 border-0 border-t border-solid border-line py-2 text-sm first:border-t-0">
+      <span className={`mr-auto ${a.retired ? "text-muted" : ""}`}>
+        {a.currency} ••••{a.iban_last4}{datesLine(a) ? <small className="block text-xs text-muted">{datesLine(a)}</small> : null}
+      </span>
+      {a.pays ? <span className={`rounded-badge px-1.5 py-0.5 text-xs font-medium ${statePillStyle.ok}`}>Plățile pleacă de aici</span> : null}
+      {/* keyed on the dates read: the editor starts again from them when they change */}
+      <AccountDates key={`${a.opened ?? ""}|${a.retired ?? ""}`} c={c} a={a} reload={reload} />
+    </li>
+  );
+}
+
+/** Date cont: the month or day an account opened and the day it closed ("" forgets one). Only a date the person
+ * changed is sent: the other keeps what the engine has, so a form shown before another person's change never undoes
+ * it; the form starts again from the dates read whenever they change. The engine checks both: an account can't open after it
+ * closed, closes only on a day already past or today, and the one payment files debit closes only once another takes
+ * its place. A statement of a month the account wasn't open doesn't owe it. */
 function AccountDates({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; reload: () => void }) {
   const { busy } = useApp();
   const send = useSend(reload);
   const [opened, setOpened] = useState(a.opened ?? "");
   const [retired, setRetired] = useState(a.retired ?? "");
   const id = `dates-${c.key}-${a.id}`;
+  const changed: Record<string, string> = {
+    ...(opened.trim() !== (a.opened ?? "") ? { opened: opened.trim() } : {}),
+    ...(retired !== (a.retired ?? "") ? { retired } : {}),
+  };
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    if (busy) return;
-    await send("company-account-dates", { key: c.key, account: a.id, opened: opened.trim(), retired });
+    if (busy || !Object.keys(changed).length) return;
+    await send("company-account-dates", { key: c.key, account: a.id, ...changed });
   };
   return (
     <details className="basis-full">
@@ -485,11 +505,11 @@ function AccountDates({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; re
       <Form className="mt-2" onSubmit={save} aria-label={`Datele contului ${a.currency} ••••${a.iban_last4}`}>
         <Label htmlFor={`${id}-opened`}>Deschis din (luna AAAA-LL sau ziua AAAA-LL-ZZ)</Label>
         <Input id={`${id}-opened`} value={opened} onChange={(e) => setOpened(e.target.value)} autoComplete="off"
-          inputMode="numeric" maxLength={10} placeholder="2024-03" />
+          maxLength={10} placeholder="2024-03" />
         <Label htmlFor={`${id}-retired`}>Închis pe</Label>
         <Input id={`${id}-retired`} type="date" value={retired} onChange={(e) => setRetired(e.target.value)} />
         <Actions>
-          <Button type="submit" className="btn g" disabled={busy}>Salvează datele</Button>
+          <Button type="submit" className="btn g" disabled={busy || !Object.keys(changed).length}>Salvează datele</Button>
         </Actions>
       </Form>
     </details>

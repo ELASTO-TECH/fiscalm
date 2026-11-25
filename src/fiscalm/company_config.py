@@ -458,12 +458,15 @@ def add_account(*, key: str, iban: str, currency: str, L: Ledger | None = None) 
     return dict(key=key, currency=account.currency, bank=account.bank, iban_last4=account.iban[-4:])
 
 
-def set_dates(*, key: str, iban: str, opened: str | None, retired: str | None, L: Ledger | None = None) -> dict:
+def set_dates(
+    *, key: str, iban: str, opened: str | None, retired: str | None, today: date, L: Ledger | None = None
+) -> dict:
     """Record when a company's account existed: the first month (YYYY-MM) or exact day (YYYY-MM-DD) it was open, and
     the day it was closed (YYYY-MM-DD); "" forgets either, None keeps it. A statement of a month the account wasn't open does not owe
     it (bank.intake.missing_accounts); only the exact opening day lets its first month start after the 1st, and a
-    closed account is no longer read from the bank. The account payment files debit is never closed here: another
-    account takes its place first (company-bank)."""
+    closed account is no longer read from the bank, so it closes only on a day already past or today (a later day
+    would stop reading it now). The account payment files debit is never closed here: another account takes its place
+    first (company-bank)."""
     with editing(L) as L:
         own = companies.all(L).get(key)
         account = own.account(iban) if own else None
@@ -475,6 +478,8 @@ def set_dates(*, key: str, iban: str, opened: str | None, retired: str | None, L
             raise CompanyError("Luna deschiderii se scrie AAAA-LL, de exemplu 2023-07, sau ziua: 2023-07-14.")
         if retired and not (len(retired) == 10 and companies.opening(retired)):
             raise CompanyError("Ziua închiderii se scrie AAAA-LL-ZZ, de exemplu 2026-10-31.")
+        if retired and retired > today.isoformat() and retired != account.retired:
+            raise CompanyError("Contul se închide doar cu o zi care a trecut sau azi.")
         if retired and account.pays:
             raise CompanyError("Plățile pleacă din acest cont: alege întâi alt cont pentru plăți, apoi închide-l.")
         try:

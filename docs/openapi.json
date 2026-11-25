@@ -10348,7 +10348,7 @@
     "company-bank": "{ \"key\": \"EXEMPLU\", \"iban\": \"<RON IBAN>\" } (both required)",
     "company-account": "{ \"key\": \"EXEMPLU\", \"iban\": \"<IBAN>\", \"currency\": \"EUR\" } (all required)",
     "company-statement-password": "{ \"key\": \"EXEMPLU\", \"bank\": \"bt\", \"password\": \"<parola>\" } (all required; bank: a catalogue bank with password-protected PDF statements). Write-only: never returned or logged.",
-    "company-account-dates": "{ \"key\": \"EXEMPLU\", \"account\": \"<account id>\", \"opened\": \"2024-03\" or \"2024-03-14\" or \"\", \"retired\": \"2026-10-31\" or \"\" } (all required; \"\" forgets a date). The account payment files debit is never closed here.",
+    "company-account-dates": "{ \"key\": \"EXEMPLU\", \"account\": \"<account id>\", \"opened\": \"2024-03\" or \"2024-03-14\" or \"\", \"retired\": \"2026-10-31\" or \"\" } (key, account and at least one date; \"\" forgets a date, one left out is kept; a closing day after today is refused). The account payment files debit is never closed here.",
     "company-alias-add": "{ \"key\": \"EXEMPLU\", \"alias\": \"Exemplu Grup\" } (both required)",
     "company-alias-remove": "{ \"key\": \"EXEMPLU\", \"alias\": \"Exemplu Grup\" } (both required)",
     "statement-csv-format": "account, co; column names from fiscalm.bank.csv.FIELDS plus date_format and decimal, all strings. App admin configuration.",
