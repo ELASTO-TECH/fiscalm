@@ -13,9 +13,10 @@ The engine supplies an editable name from the firm's short name and the date, ad
 Automatic supplier rules use the newest open file without questions or previous downloads, or create one. They
 leave any file the person has already downloaded untouched.
 
-Downloads are recorded per file with their membership revision, payment IDs and value date. Import confirmation
-accepts the latest recorded download only while its membership is current. A missing file, several downloads or
-an orphan file requires an explicit answer. Questions freeze edits. Import and deletion moves are journalled
+Every download is recorded per file with its membership revision, payment IDs and value date; the file's sheet lists
+them. Downloading again never locks the file. Import confirmation accepts the latest recorded download only while its
+membership is current and its bytes are the file on disk. A missing or an orphan file requires an explicit answer.
+Questions freeze edits. Import and deletion moves are journalled
 before changing disk files and recovered on the next run.
 
 Sandbox allows local file creation and edits. Generating or downloading a bank file requires Live.

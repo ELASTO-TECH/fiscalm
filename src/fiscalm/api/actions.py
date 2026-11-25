@@ -1089,11 +1089,6 @@ def _file_missing_import(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     return _res(ok, "Ai confirmat importul în bancă." if ok else STALE_DOWNLOAD)
 
 
-def _file_not_imported(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
-    ok = pay.mark_not_imported(L, int(args["file_id"]), co, int(args["download_id"]))
-    return _res(ok, "Poți modifica fișierul. Descarcă-l din nou înainte să-l imporți." if ok else STALE_DOWNLOAD)
-
-
 def _file_import(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     ok = pay.import_file(L, int(args["file_id"]), co, int(args["download_id"]), ctx.at.date())
     return _res(ok, "Ai confirmat importul în bancă.")
@@ -1207,7 +1202,6 @@ ACTIONS = {
     'order-discard': Action(_order_discard, 'id', public=False, actor=True, description='co, id: company-scoped order sheet ID. App-only local configuration.'),
     'emag-refund': Action(_emag_resolve, 'id', public_description='id: company-scoped order sheet ID; prepares a refund draft, never sends money.'),
     'emag-resolve': Action(_emag_resolve, 'id', public_description='id: company-scoped order sheet ID; acknowledges the current review.'),
-    'payment_file_not_imported': Action(_file_not_imported, 'file_id download_id', public=False, errors=(PaymentFileError, ValueError), schema={'type':'object','properties':{'file_id':{'type':'integer'},'download_id':{'type':'integer'}},'required':['file_id','download_id']}),
     'payment_file_restore': Action(_file_restore, 'file_id version', effect='payment_file', public=False, errors=(PaymentFileError, ValueError), schema={'type':'object','properties':{'file_id':{'type':'integer'},'version':{'type':'string'}},'required':['file_id','version']}),
     'payment_file_missing_import': Action(_file_missing_import, 'file_id version', effect='payment_file', public=False, errors=(PaymentFileError, ValueError), schema={'type':'object','properties':{'file_id':{'type':'integer'},'version':{'type':'string'}},'required':['file_id','version']}),
     'payment_file_create': Action(_file_create, 'name invoice_ids', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'name': {'type': 'string'}, 'invoice_ids': {'type': 'array', 'items': {'type': ['string', 'integer']}}}, 'required': ['name', 'invoice_ids']}),

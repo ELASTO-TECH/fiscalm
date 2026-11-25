@@ -10105,7 +10105,6 @@
     "order-discard": "local",
     "emag-refund": "local",
     "emag-resolve": "local",
-    "payment_file_not_imported": "local",
     "payment_file_restore": "payment_file",
     "payment_file_missing_import": "payment_file",
     "payment_file_create": "local",
@@ -10196,7 +10195,6 @@
     "order-discard": "member",
     "emag-refund": "member",
     "emag-resolve": "member",
-    "payment_file_not_imported": "member",
     "payment_file_restore": "member",
     "payment_file_missing_import": "member",
     "payment_file_create": "member",
@@ -14420,7 +14418,6 @@
                 "question": {
                   "enum": [
                     "missing",
-                    "downloads",
                     "orphan",
                     null
                   ]
@@ -24303,7 +24300,6 @@
           "question": {
             "enum": [
               "missing",
-              "downloads",
               "orphan",
               null
             ]
@@ -24390,7 +24386,6 @@
           "question": {
             "enum": [
               "missing",
-              "downloads",
               "orphan",
               null
             ]
@@ -24559,50 +24554,6 @@
                     "kind",
                     "version",
                     "count"
-                  ]
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "downloads"
-                    },
-                    "versions": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "id": {
-                            "type": "integer"
-                          },
-                          "version": {
-                            "type": "string"
-                          },
-                          "at": {
-                            "type": "string"
-                          },
-                          "count": {
-                            "type": "integer"
-                          },
-                          "total": {
-                            "description": "Exact decimal amount with two places; never binary floating point. Currency is a separate field.",
-                            "type": "string",
-                            "pattern": "^-?[0-9]+\\.[0-9]{2}$"
-                          }
-                        },
-                        "required": [
-                          "id",
-                          "version",
-                          "at",
-                          "count",
-                          "total"
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "versions"
                   ]
                 },
                 {

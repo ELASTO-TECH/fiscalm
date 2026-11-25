@@ -92,13 +92,11 @@ function useMay(f: PaymentFileDetail, live: boolean) {
   const rename = useCan(actionRole("payment_file_rename")), remove = useCan(actionRole("payment_file_remove"));
   const del = useCan(actionRole("payment_file_delete")), download = useCan(actionRole("payment_file_download"));
   const imp = useCan(actionRole("payment_file_import"));
-  const notImported = useCan(actionRole("payment_file_not_imported"));
   const restore = useCan(actionRole("payment_file_restore")), imported = useCan(actionRole("payment_file_missing_import"));
   return {
     rename: rename && mode("payment_file_rename") && f.can_rename, remove: remove && mode("payment_file_remove") && f.can_remove,
     remove_file: del && mode("payment_file_delete") && f.can_delete, download: download && mode("payment_file_download") && f.can_download,
     import: imp && mode("payment_file_import") && f.can_import,
-    notImported: notImported && mode("payment_file_not_imported"),
     answer: restore && imported && mode("payment_file_restore") && mode("payment_file_missing_import"),
   };
 }
@@ -122,6 +120,9 @@ function FileBody({ f, reload, onClose }: { f: PaymentFileDetail; reload: () => 
     {may.rename ? <Rename f={f} send={send} /> : null}
     {f.changed_since_download && f.downloaded_at ? <p className="mt-0 mb-4 rounded-card bg-wait/10 px-3 py-2.5 text-sm leading-relaxed text-wait" role="note">
       Modificat după descărcarea din {dmt(f.downloaded_at, s.today)}. Descarcă versiunea nouă înainte de import.</p> : null}
+    {/* Downloading again never locks the file: the history is shown, and the latest download is the one imported. */}
+    {f.downloads.length > 1 ? <p className="mt-0 mb-4 text-sm leading-relaxed text-muted">
+      Descărcat de {f.downloads.length} ori: {f.downloads.map((d) => dmt(d.at, s.today)).join("; ")}.</p> : null}
     {f.questions.map((q, i) => <Question key={i} f={f} q={q} may={may} send={send} reload={reload} />)}
     <FileActions f={f} may={may} send={send} reload={reload} onDeleted={onClose} />
     <Panel padded={false}>
@@ -223,27 +224,13 @@ function Question({ f, q, may, send, reload }: { f: PaymentFileDetail; q: Paymen
   if (q.kind === "orphan") {
     return <p className={`${box} text-danger`} role="note">{q.name} nu e în evidența fiscalm. Verifică-l înainte să-l imporți în {where}.</p>;
   }
-  if (q.kind === "missing") {
-    return <div className={box}>
-      <p className="m-0 font-semibold">Fișierul a fost importat în {where}?</p>
-      <p className="mt-1 mb-0 text-muted">Fișierul ({nOf(q.count, "o plată", "plăți")}) nu mai este în fiscalm.{s.live ? "" : " Răspunzi în Live."}</p>
-      {may.answer ? <Actions>
-        <Button type="button" className="btn g" disabled={busy} onClick={() => void send({ action: "payment_file_missing_import", file_id: f.id, version: q.version })}>Da, l-am importat</Button>
-        <Button type="button" className="btn" disabled={busy || restore.busy} onClick={() => void restore.start({ action: "payment_file_restore", file_id: f.id, version: q.version })}>Nu, refă fișierul</Button>
-      </Actions> : null}
-    </div>;
-  }
   return <div className={box}>
-    <p className="m-0 font-semibold">Ce versiune ai importat în {where}?</p>
-    <p className="mt-1 mb-0 text-muted">Descărcat de {nOf(q.versions.length, "o dată", "ori")}.</p>
-    {may.import || may.notImported ? <div className="mt-3 grid gap-2">
-      {may.import ? q.versions.map((v) => <Button key={v.id} type="button" className="btn g" disabled={busy}
-        onClick={() => void send({ action: "payment_file_import", file_id: f.id, download_id: v.id })}>
-        {dmt(v.at, s.today)}: {nOf(v.count, "o plată", "plăți")}, {lei(v.total)} lei</Button>) : null}
-      {/* None of them: the file stays open, and needs a new download before its import. */}
-      {may.notImported && q.versions[0] ? <Button type="button" className="btn g" disabled={busy}
-        onClick={() => void send({ action: "payment_file_not_imported", file_id: f.id, download_id: q.versions[0].id })}>Nu am importat niciuna</Button> : null}
-    </div> : null}
+    <p className="m-0 font-semibold">Fișierul a fost importat în {where}?</p>
+    <p className="mt-1 mb-0 text-muted">Fișierul ({nOf(q.count, "o plată", "plăți")}) nu mai este în fiscalm.{s.live ? "" : " Răspunzi în Live."}</p>
+    {may.answer ? <Actions>
+      <Button type="button" className="btn g" disabled={busy} onClick={() => void send({ action: "payment_file_missing_import", file_id: f.id, version: q.version })}>Da, l-am importat</Button>
+      <Button type="button" className="btn" disabled={busy || restore.busy} onClick={() => void restore.start({ action: "payment_file_restore", file_id: f.id, version: q.version })}>Nu, refă fișierul</Button>
+    </Actions> : null}
   </div>;
 }
 

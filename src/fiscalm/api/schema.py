@@ -47,7 +47,7 @@ def named_file_summary() -> dict:
             "payment_count": INTEGER,
             "total": MONEY,
             "changed_since_download": BOOL,
-            "question": {"enum": ["missing", "downloads", "orphan", None]},
+            "question": {"enum": ["missing", "orphan", None]},
             "import_in": NULL_STRING,
             "confirmed_count": INTEGER,
             "skipped_count": INTEGER,
@@ -1258,22 +1258,6 @@ def schemas() -> dict:
                 {
                     "oneOf": [
                         obj({"kind": {"const": "missing"}, "version": STRING, "count": INTEGER}),
-                        obj(
-                            {
-                                "kind": {"const": "downloads"},
-                                "versions": array(
-                                    obj(
-                                        {
-                                            "id": INTEGER,
-                                            "version": STRING,
-                                            "at": STRING,
-                                            "count": INTEGER,
-                                            "total": MONEY,
-                                        }
-                                    )
-                                ),
-                            }
-                        ),
                         obj({"kind": {"const": "orphan"}, "name": STRING}),
                     ]
                 }

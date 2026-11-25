@@ -155,7 +155,6 @@ function fileCard(s: State, f: PaymentFile, own?: string): ReactElement {
   const where = f.import_in ?? "aplicația băncii";
   const [title, body, late] = f.question === "orphan" ? [`Un fișier necunoscut lângă ${f.name}`, `Verifică-l înainte să-l imporți în ${where}.`, true]
     : f.question === "missing" ? [`${f.name} a fost importat în ${where}?`, `Fișierul nu mai este în fiscalm.${s.live ? "" : " Răspunzi în Live."}`, false]
-    : f.question === "downloads" ? [`Ce versiune din ${f.name} ai importat în ${where}?`, "Descărcat de mai multe ori.", false]
     : f.downloaded_at && !f.changed_since_download ? [`${f.name} a fost importat în ${where}?`, `Descărcat pe ${dmt(f.downloaded_at, s.today)}.`, false]
     : [`${f.name}: de descărcat`, `${cap(nOf(f.payment_count, "o plată", "plăți"))}, ${lei(f.total)} ${curOf(f.currency)}. Se importă în ${where}.`, false];
   return <Task co={own} key={`${s.co}pf${f.id}`} icon={late ? "warning-circle" : "tray-arrow-down"} title={title} body={body} late={late}>

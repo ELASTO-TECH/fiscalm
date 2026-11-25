@@ -237,20 +237,12 @@ def named_files(ledger: Ledger, company: str) -> list[dict]:
         (company,),
     ):
         snapshots.setdefault(row["file_id"], []).append(dict(row) | {"items": json.loads(row["items"])})
-    answers = {
-        r["id"]: int(r["value"])
-        for r in ledger.db.execute(
-            "SELECT f.id,m.value FROM payment_files f JOIN meta m ON m.key='payment_download_answer:' || f.id WHERE f.company=?",
-            (company,),
-        )
-    }
-    return [
-        _named_summary(ledger, f, members.get(f["id"], []), snapshots.get(f["id"], []), proofs, answers.get(f["id"], 0))
-        for f in files
-    ]
+    return [_named_summary(ledger, f, members.get(f["id"], []), snapshots.get(f["id"], []), proofs) for f in files]
 
 
-def _named_summary(ledger: Ledger, file, rows: list, downloads_: list[dict], proofs: dict, answered: int) -> dict:
+def _named_summary(ledger: Ledger, file, rows: list, downloads_: list[dict], proofs: dict) -> dict:
+    """A file downloaded several times stays editable: the latest download is the one to import, and an edit since
+    then only shows `changed_since_download` (import waits for a new download). Questions are about the file itself."""
     confirmable = [r for r in rows if r["status"] != "skipped"]
     confirmed = bool(confirmable) and all("payment " + r["item_id"] in proofs for r in confirmable)
     changed = bool(downloads_) and downloads_[0]["revision"] != file["revision"]
@@ -260,8 +252,6 @@ def _named_summary(ledger: Ledger, file, rows: list, downloads_: list[dict], pro
         if file["path"] and not path.exists() and not file["imported_at"] and not confirmed
         else "orphan"
         if path.exists() and not rows
-        else "downloads"
-        if sum(d["id"] > answered for d in downloads_) > 1 and not file["imported_at"] and not confirmed
         else None
     )
     return {
@@ -301,14 +291,6 @@ def editable_file(ledger: Ledger, file_id: int, company: str):
     if summary["question"]:
         raise FileRefusal(QUESTION_REFUSAL)
     return file
-
-
-def mark_not_imported(ledger: Ledger, file_id: int, company: str, download_id: int) -> bool:
-    with pay_lock(), ledger.tx():
-        file = open_file(ledger, file_id, company)
-        if file["path"] and not named_path(file).exists():
-            raise FileRefusal("Fișierul lipsește. Confirmă dacă l-ai importat înainte să-l schimbi.")
-        return ledger.answer_file_not_imported(file_id, company, file["revision"], download_id)
 
 
 def add_invoices(
@@ -488,6 +470,10 @@ def import_file(ledger: Ledger, file_id: int, company: str, download_id: int, to
                     "Versiunea nu mai este actuală. Verifică în bancă ce plăți ai importat înainte să continui."
                 )
             source = named_path(file)
+            # The file on disk is what the bank got last: a row that is not those bytes (two downloads recorded in one
+            # second before #51 can order wrong) is never imported; a new download settles it.
+            if source.exists() and hashlib.sha256(source.read_bytes()).hexdigest() != pick["version"]:
+                raise FileRefusal("Descarcă fișierul din nou înainte să-l imporți.")
             dest = finance_home() / company / "plati" / f"payment-file-{file_id}{named_path(file).suffix}"
             job = {
                 "src": str(source),

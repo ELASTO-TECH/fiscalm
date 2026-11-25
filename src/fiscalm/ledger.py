@@ -1234,13 +1234,9 @@ class Ledger:
                 (file_id, company, revision),
             ).fetchone():
                 return None
-            existing = db.execute(
-                "SELECT id FROM payment_downloads WHERE file_id=? AND version=? AND revision=?",
-                (file_id, version, revision),
-            ).fetchone()
-            if existing:
-                db.execute("UPDATE payment_downloads SET created_at=? WHERE id=?", (now(), existing["id"]))
-                return existing["id"]
+            # Every download is its own row, the same bytes again included: the history shows each one. The latest is
+            # the newest created_at, then the highest id (a tie within one second); rows recorded before #51 reused
+            # an older id with a refreshed time, which the same order still reads right.
             return db.execute(
                 "INSERT INTO payment_downloads(file_id,version,revision,items,created_at,value_date) "
                 "VALUES(?,?,?,?,?,?)",
@@ -1271,22 +1267,20 @@ class Ledger:
             return True
 
     def answer_file_not_imported(self, file_id: int, company: str, revision: int, download_id: int) -> bool:
+        """The latest download was not imported: bump the revision so that download can no longer be imported."""
         with self.tx() as db:
             latest = db.execute(
                 "SELECT id FROM payment_downloads WHERE file_id=? ORDER BY created_at DESC,id DESC LIMIT 1", (file_id,)
             ).fetchone()
             if (latest["id"] if latest else 0) != download_id:
                 return False
-            if not db.execute(
-                "UPDATE payment_files SET revision=revision+1 WHERE id=? AND company=? AND revision=? AND imported_at IS NULL",
-                (file_id, company, revision),
-            ).rowcount:
-                return False
-            highest = db.execute(
-                "SELECT coalesce(max(id),0) FROM payment_downloads WHERE file_id=?", (file_id,)
-            ).fetchone()[0]
-            self.set_meta(f"payment_download_answer:{file_id}", str(highest))
-            return True
+            return bool(
+                db.execute(
+                    "UPDATE payment_files SET revision=revision+1 "
+                    "WHERE id=? AND company=? AND revision=? AND imported_at IS NULL",
+                    (file_id, company, revision),
+                ).rowcount
+            )
 
     def clear_inactive_file_path(self, file_id: int, company: str, revision: int) -> bool:
         with self.tx() as db:

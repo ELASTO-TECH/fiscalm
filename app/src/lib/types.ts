@@ -298,11 +298,10 @@ export type FilePayment = {
   added_after_download: boolean;
 };
 
-/** A question about one file the engine can't answer alone: its download is gone from its folder (`missing`), it was
- * downloaded several times (`downloads`), or a file nobody made lies in its folder (`orphan`). */
+/** A question about one file the engine can't answer alone: its download is gone from its folder (`missing`), or a
+ * file nobody made lies in its folder (`orphan`). Downloading a file again is never a question. */
 export type PaymentFileQuestion =
   | { kind: "missing"; version: string; count: number }
-  | { kind: "downloads"; versions: { id: number; version: string; at: string; count: number; total: string }[] }
   | { kind: "orphan"; name: string };
 
 /** A file with its payments and downloads (GET payment-files/<id>), and what the person may do with it now: the engine
