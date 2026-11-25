@@ -73,8 +73,15 @@ def test_a_statement_learned_from_its_file_names_accounts_only_for_its_own_month
     ledger.add_document("x", "NORD", "2026-10", "statement", "/x/x.pdf")
     monkeypatch.setattr(statements, "parse", lambda path, co: stranger)
     assert statement_intake.learn_accounts(ledger, ledger.document("x")) == []
-    ledger.add_document("y", "NORD", "2026-10", "statement", "/x/y.xml", accounts=[X1])  # stored naming a stranger
-    assert statement_intake.month_missing(ledger, "NORD", "2026-10") is None
+    ron = companies.get("NORD").ibans["RON"]
+    for section in (
+        statements.Account(ron, "EUR"),  # the firm's account in another currency
+        statements.Account(ron, "RON", period=(date(2026, 11, 1), date(2026, 11, 30))),  # a section of November
+    ):
+        stranger.accounts = [section]
+        assert statement_intake.learn_accounts(ledger, ledger.document("x")) == []
+    ledger.add_document("y", "NORD", "2026-08", "statement", "/x/y.xml", accounts=[X1])  # stored naming a stranger
+    assert statement_intake.month_missing(ledger, "NORD", "2026-08") is None
 
 
 def test_the_pack_takes_a_months_statements_only_with_every_account_of_their_banks(ledger, tmp_path):

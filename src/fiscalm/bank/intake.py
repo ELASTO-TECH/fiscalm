@@ -157,8 +157,8 @@ def _csv_docs(L: Ledger, company: str) -> list:
 def learn_accounts(L: Ledger, doc) -> list[str]:
     """The accounts a stored statement covers. One stored before accounts were recorded is read from its file and
     the answer is kept on the document, so it is read once; a file that can't be read, or that reads as another
-    firm's or another month's statement, or names an account that isn't the firm's (a PDF reads under the firm it is
-    opened for, so its accounts are what prove it is that firm's), proves no account."""
+    firm's, or has a section that isn't the firm's account in its currency for days of the row's month (a PDF reads
+    under the firm it is opened for, so its accounts are what prove it is that firm's), proves no account."""
     if doc["accounts"]:
         return json.loads(doc["accounts"])
     try:
@@ -166,8 +166,7 @@ def learn_accounts(L: Ledger, doc) -> list[str]:
     except (OSError, RuntimeError, ValueError):
         return []
     found = statement_ibans(st)
-    co = companies.get(doc["company"], L=L)
-    if st.company != doc["company"] or st.month != doc["month"] or not all(co.account(i) for i in found):
+    if st.company != doc["company"] or not all(_section_of(st, a, doc["month"]) for a in st.accounts):
         return []
     if found:
         with L.tx() as db:
@@ -175,6 +174,15 @@ def learn_accounts(L: Ledger, doc) -> list[str]:
                 "UPDATE documents SET accounts=? WHERE sha=? AND accounts IS NULL", (json.dumps(found), doc["sha"])
             )
     return found
+
+
+def _section_of(st: statements.Statement, a: statements.Account, month: str) -> bool:
+    """A statement section is the firm's account, in the currency the firm keeps it in, for days of `month` only."""
+    own = companies.get(st.company).account(a.iban)
+    lo, hi = a.period or (st.period_start, st.period_end)
+    return bool(
+        own and own.currency == a.currency and lo and hi and lo.strftime("%Y-%m") == hi.strftime("%Y-%m") == month
+    )
 
 
 def hold_csv_days(L: Ledger, st: statements.Statement) -> None:
