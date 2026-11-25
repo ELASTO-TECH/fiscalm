@@ -78,10 +78,15 @@ OPEN = "open"
 
 def awaiting(L: Ledger, company: str | None = None) -> list:
     """Invoices the user marked paid that no statement debit or mail has confirmed yet (ledger.USER_MARKED)."""
+    return net_invoices(L, _marked(L, company))
+
+
+def _marked(L: Ledger, company: str | None = None) -> list:
+    """awaiting's rows whole, for a reader that nets the credits itself (once)."""
     q, args = f"SELECT * FROM efactura WHERE {USER_MARKED}", []
     if company:
         q, args = q + " AND company=?", [company]
-    return net_invoices(L, L.db.execute(q + " ORDER BY paid_at DESC, message_id", args).fetchall())
+    return L.db.execute(q + " ORDER BY paid_at DESC, message_id", args).fetchall()
 
 
 def mail_proved(L: Ledger, company: str) -> list:
@@ -855,7 +860,7 @@ def _open_invoices(L: Ledger, company: str):
     """The received invoices whose debit is still to come (open, marked, or proved by a mail), and what rivals needs to
     see the rest."""
     have = covered(L, company, "efactura")
-    rows = [*L.efactura_rows(status=OPEN, company=company), *awaiting(L, company), *mail_proved(L, company)]
+    rows = [*L.efactura_rows(status=OPEN, company=company), *_marked(L, company), *mail_proved(L, company)]
     rows = [r for r in rows if not r["parse_error"]]
     credits = credited(L, company)
     rows = net_invoices(L, rows)

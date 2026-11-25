@@ -398,11 +398,18 @@ def test_a_mail_proved_invoice_takes_its_debit_like_an_open_one(ledger, home, se
             "VALUES('3009','NORD','x.zip','paid','2026-10-20','synthetic','ef-proof:imap:other')"
         )
         ledger.db.commit()
-    efactura.judged(ledger, "3001", ["imap:proof"])
-    assert efactura.confirm_by_mail(ledger, "3001", "imap:proof", "mail: plata confirmata")
-    if case == "credited":  # a rival for its rest, netted once, never settled by a matcher (as when open)
+    proved = "3001"
+    if case == "credited":  # 3001's rest (200, netted once) is a rival of a mail-proved 200 invoice, marked or not
+        _stored(ledger, monkeypatch, **{"3003": ubl(number="TEST 3", total="200.00")})
+        proved = "3003"
+    efactura.judged(ledger, proved, ["imap:proof"])
+    assert efactura.confirm_by_mail(ledger, proved, "imap:proof", "mail: plata confirmata")
+    if case == "credited":
         t = _tx("200.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
-        assert efactura.rivals(ledger, "NORD")(t) == {("partial", "3001")}
+        assert efactura.rivals(ledger, "NORD")(t) == {("partial", "3001"), ("efactura", "3003")}
+        assert ledger.mark_efactura_paid("3001", "user: platita")
+        assert efactura.rivals(ledger, "NORD")(t) == {("partial", "3001"), ("efactura", "3003")}
+        assert efactura.match_statement(ledger, _debit_st(t)) == [] and statements.tx_key(t) not in ledger.used_txs()
         return
     t = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
     assert efactura.match_statement(ledger, _debit_st(t)) == ["3001"]
