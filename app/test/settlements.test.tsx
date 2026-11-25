@@ -9,8 +9,8 @@ const id = "a".repeat(32), tx = "b".repeat(20);
 export const settlement = (): Settlement => ({
   id, kind: "settlement", company: "NORD", source: "fan", report_key: "BATCH-1", reference: "BATCH-1", candidate: null,
   payer: { id: "synthetic-payer", name: "Curier Exemplu SRL" }, date: "2026-10-30", currency: "RON",
-  gross: "300.00", fee: "6.00", net: "294.00", status: "pending", error: "confirmation_required", failed_line: null,
-  tx_key: null, invoice_count: 2, confirmed_count: 1, auto_after: 3, can_confirm: true, human_confirmed: false,
+  gross: "300.00", fee: "6.00", net: "294.00", status: "pending", error: "statement_confirmation_required", failed_line: null,
+  tx_key: null, invoice_count: 2, can_confirm: true, human_confirmed: false,
   credit: { id: tx, date: "2026-10-31", amount: "294.00", currency: "RON" },
   sheet: { co: "NORD", set: id }, links: { transaction: null, issued: ["5001", "5002"] },
   lines: [{ position: 1, reference: "NRD 0042", awb: null, order: null, gross: "100.00", fee: "2.00", invoice: "5001", proved: false },
@@ -58,7 +58,7 @@ it("confirms exactly the displayed credit from the task card, the sheet one link
   renderApp({ state: () => json(s), onPost });
   const u = userEvent.setup();
   const card = (await screen.findByText("Decontare de confirmat")).closest(".task") as HTMLElement;
-  expect(card).toHaveTextContent("2 facturi, net 294,00 lei, de la Curier Exemplu SRL. Așteaptă confirmarea ta: intrare de 294,00 lei pe 31 oct. După încă 2 confirmări, următoarele decontări care trec verificările se confirmă automat.");
+  expect(card).toHaveTextContent("2 facturi, net 294,00 lei, de la Curier Exemplu SRL. Așteaptă confirmarea ta: intrare de 294,00 lei pe 31 oct.");
   expect(within(card).getByRole("link", { name: "Vezi decontarea" })).toHaveAttribute("href", `?co=NORD&tab=sarcini&set=${id}`);
   await u.click(within(card).getByRole("button", { name: "Confirmă decontarea" }));
   await waitFor(() => expect(onPost).toHaveBeenCalledTimes(1));
@@ -71,14 +71,6 @@ it("allows verified local confirmation in shadow mode", async () => {
   at(`?co=NORD&tab=sarcini&set=${id}`); renderApp({ state: () => json(s), onPost });
   for (const button of await screen.findAllByRole("button", { name: "Confirmă decontarea" })) expect(button).toBeEnabled();
   expect(onPost).not.toHaveBeenCalled();
-});
-
-it("counts nothing toward settling on its own for a payer without CUI or IBAN", async () => {
-  const s = fixture(); s.settlements = [{ ...settlement(), auto_after: null, confirmed_count: 5 }];
-  at(`?co=NORD&tab=sarcini&set=${id}`); renderApp({ state: () => json(s) });
-  const dialog = await screen.findByRole("dialog", { busy: false });
-  expect(dialog).not.toHaveTextContent("Încă");
-  expect(within(dialog).getByRole("button", { name: "Confirmă decontarea" })).toBeEnabled();
 });
 
 it.each([

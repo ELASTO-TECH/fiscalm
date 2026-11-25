@@ -1006,10 +1006,8 @@ export type Settlement = {
   partner?: string;
   id: string; kind: "settlement"; company: Co; source: string; report_key: string; reference: string | null; candidate: (SettlementCredit & { payer: string }) | null;
   payer: { id: string; name: string }; date: string; currency: string; gross: string; fee: string; net: string;
-  credit: SettlementCredit | null; invoice_count: number; confirmed_count: number; can_confirm: boolean; human_confirmed: boolean;
+  credit: SettlementCredit | null; invoice_count: number; can_confirm: boolean; human_confirmed: boolean;
   status: "pending" | "collected" | "withdrawn"; error: string | null; failed_line: number | null; tx_key: string | null;
-  /** Confirmed settlements after which this payer's batches settle on their own; null: a payer without CUI or IBAN, always confirmed. */
-  auto_after: number | null;
   sheet: { co: Co; set: string }; links: { transaction: string | null; issued: string[] };
   lines: { position: number; reference: string | null; awb: string | null; order: string | null; gross: string; fee: string; invoice: string | null; proved: boolean }[];
 };

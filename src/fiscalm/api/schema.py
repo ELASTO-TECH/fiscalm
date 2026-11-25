@@ -547,18 +547,12 @@ def schemas() -> dict:
                         "anyOf": [obj({**strings("id", "date", "amount", "currency", "payer")}), {"type": "null"}]
                     },
                     "invoice_count": INTEGER,
-                    "confirmed_count": INTEGER,
                     "can_confirm": BOOL,
                     "human_confirmed": BOOL,
                     "payer": obj(strings("id", "name")),
                     **{n: MONEY for n in ("gross", "fee", "net")},
                     **nullable("error", "tx_key"),
                     "failed_line": {"type": ["integer", "null"]},
-                    "auto_after": {
-                        "type": ["integer", "null"],
-                        "description": "Person-confirmed settlements after which this payer's batches settle on their own; "
-                        "null when the payer has no CUI or IBAN, so every batch waits for a person.",
-                    },
                     "sheet": obj(strings("co", "set")),
                     "links": obj({"transaction": NULL_STRING, "issued": STRINGS}),
                     "lines": array(

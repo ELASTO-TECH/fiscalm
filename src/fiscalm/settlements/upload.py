@@ -324,7 +324,7 @@ def accept_report(
         COLLECTED
         if row["status"] == "collected"
         else TO_CONFIRM
-        if row["error"] in ("confirmation_required", "statement_confirmation_required")
+        if row["error"] == "statement_confirmation_required"
         else WAITING
         if row["error"] in (None, "credit_missing_or_ambiguous")
         else TO_CHECK

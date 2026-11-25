@@ -12,7 +12,7 @@ from threading import Barrier
 
 import pytest
 from test_invoicing import setup_invoice as setup_invoice
-from test_settlements import collect, statement, store_bank
+from test_settlements import statement, store_bank
 
 from fiscalm import integrations
 from fiscalm.commerce import shopify as s
@@ -637,10 +637,9 @@ def test_payout_atomic_import_and_bank_collection(shop, monkeypatch, home):
     with pytest.raises(settlements.SettlementError, match="wrong_company"):
         L.settle_report(rid, settlements.BankEvidence("STUDIO9", None, None, st.accounts))
     assert L.issued_rows()[0]["status"] == "open"
-    # Shared bank guards retain first-three confirmation and atomic reservation.
+    # The shared bank guards settle the verified payout on its own, with one atomic reservation.
     store_bank(L, st)
-    assert settlements.match_statement(L, st) == []
-    assert collect(L, rid, st) == [own]
+    assert settlements.match_statement(L, st) == [own]
     assert len(L.used_txs()) == 1
     assert L.db.execute("SELECT amount FROM settlement_fees").fetchone()[0] == "2.00"
 

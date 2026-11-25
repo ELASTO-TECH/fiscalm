@@ -13625,9 +13625,6 @@
                 "invoice_count": {
                   "type": "integer"
                 },
-                "confirmed_count": {
-                  "type": "integer"
-                },
                 "can_confirm": {
                   "type": "boolean"
                 },
@@ -13681,13 +13678,6 @@
                     "integer",
                     "null"
                   ]
-                },
-                "auto_after": {
-                  "type": [
-                    "integer",
-                    "null"
-                  ],
-                  "description": "Person-confirmed settlements after which this payer's batches settle on their own; null when the payer has no CUI or IBAN, so every batch waits for a person."
                 },
                 "sheet": {
                   "type": "object",
@@ -13798,7 +13788,6 @@
                 "reference",
                 "candidate",
                 "invoice_count",
-                "confirmed_count",
                 "can_confirm",
                 "human_confirmed",
                 "payer",
@@ -13808,7 +13797,6 @@
                 "error",
                 "tx_key",
                 "failed_line",
-                "auto_after",
                 "sheet",
                 "links",
                 "lines"

@@ -23,17 +23,15 @@ Optional line `company` must equal the report company.
 Collected line-to-invoice links are journalled in the same transaction as the credit reservation,
 invoice collection and fees.
 
-### First three batches from a payer
+### Automatic settlement and person confirmation
 
-The first three batches per firm/payer always wait, even with perfect matching. A successful explicit
-user confirmation re-reads immutable company-contained bank evidence and collects under the write lock.
-The displayed credit id must still match. The confirmation journal commits with collection, fees and
-line proof; failures and double submits count zero. From then on, valid batches collect automatically.
-Only a payer the report names by CUI or IBAN earns that trust; one known only by name waits for a person every
-time, and the projection's `auto_after` is null for it.
+A batch that passes every rule above settles on its own, from the first report of any payer (2026-11-25).
+A person confirms only a credit read from a legacy PDF copy without a stored-copy checksum
+(`statement_confirmation_required`). The confirmation re-reads immutable company-contained bank evidence and
+collects under the write lock; the displayed credit id must still match. The confirmation journal commits with
+collection, fees and line proof and pins the copy's checksum; failures and double submits record nothing.
 Confirmation goes through an authenticated app user or a person-owned, write-scoped v1 key with `confirmed:"yes"`;
 it is a local action, available in Sandbox and Live. Automatic matching cannot supply a human actor.
-Legacy PDF copies without a stored-copy checksum require a person to pin the copy before automatic use, even after the payer is trained.
 Relevant bank evidence is bounded to the report date plus 14 days; an unrelated old statement cannot block a new batch.
 See openapi.json for the action payload and preview fields.
 
