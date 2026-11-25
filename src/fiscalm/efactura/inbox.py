@@ -1315,10 +1315,12 @@ class PaymentFacts:
         return (r["company"], r["item_id"]) in self._unfiled
 
     def queued_payee(self, r) -> str | None:
-        """The IBAN the invoice's payment row pays (a linked invoice), else None."""
+        """The IBAN the invoice's payment row pays (a linked invoice), else None; only a linked one reads payments."""
+        if r["status"] != "linked":
+            return None
         if self._payees is None:
             self._read_payments()
-        return self._payees.get((r["company"], r["item_id"])) if r["status"] == "linked" else None
+        return self._payees.get((r["company"], r["item_id"]))
 
     def _read_payments(self) -> None:
         rows = list(self._L.payments())
