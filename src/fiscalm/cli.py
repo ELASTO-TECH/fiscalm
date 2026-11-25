@@ -1340,6 +1340,7 @@ def cmd_settlement(a, L: Ledger) -> int:
                 if len(parts) != 1 or not spec.get("attachment"):
                     raise ReportError("Exactly one named attachment required")
                 data = parts[0].get_payload(decode=True)
+                spec = spec | {"mailed_by": senders[0][1].lower()}  # a mailed report waits for a person
             result = {"id": settlements.import_report(L, a.company, data, spec)}
         print(json.dumps(result, ensure_ascii=False))
         return 0

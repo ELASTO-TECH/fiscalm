@@ -214,7 +214,7 @@ export type SpvState = "not_required" | "none" | "uploading" | "uploaded" | "acc
 /** Someone the company trades with: a supplier, a client or both, by CUI (or by name when there is none). */
 export type Partner = {
   held?: { invoice: string; amount: string; currency: string }[];
-  report_formats?: { signature: string; source: string; mapping: Record<string, string>; courier?: string }[];
+  report_formats?: { signature: string; source: string; mapping: Record<string, string>; courier?: string; senders: string[] }[];
   id: string;
   company: Co;
   name: string;

@@ -501,6 +501,23 @@ def test_mail_import_and_duplicate(home, ledger):
     args = ["settlement", "import", str(mail), "--mail", "--company", "NORD", "--spec", str(cfg)]
     assert main(args) == 0
     assert settlements.state(ledger, "NORD")[0]["report_key"] == "mail1"
+    ledger.add_issued(
+        dict(
+            message_id="mail-1",
+            company="NORD",
+            number="TEST-1",
+            issue_date="2026-10-01",
+            currency="RON",
+            total="100.00",
+            doc_type="invoice",
+            status="open",
+            raw_path="",
+        )
+    )
+    credit = statement(amount=Decimal("98.00"))
+    store_bank(ledger, credit)  # verified against the credit, a mailed report still waits for a person
+    settlements.match_statement(ledger, credit)
+    assert settlements.state(ledger, "NORD")[0]["error"] == "mail_confirmation_required" and not ledger.used_txs()
     assert not (home.parent / "report.csv").exists()
     assert main(args) == 1
     assert main(["settlement", "list", "--company", "NORD"]) == 0

@@ -258,7 +258,9 @@ def schemas() -> dict:
             **strings("id", "company", "name", "last"),
             **nullable("cui", "vat_id", "country", "client_id", "ro_vat_status"),
             "held": array(obj({"invoice": STRING, "amount": MONEY, "currency": STRING})),
-            "report_formats": array(obj({"signature": STRING, "source": STRING, "mapping": OBJECT, "courier": STRING})),
+            "report_formats": array(
+                obj({"signature": STRING, "source": STRING, "mapping": OBJECT, "courier": STRING, "senders": STRINGS})
+            ),
             "address": {"type": ["object", "null"]},
             "iban_last4": STRINGS,
             "roles": STRINGS,

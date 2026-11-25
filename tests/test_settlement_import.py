@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+from email.message import EmailMessage
 
 import pytest
 from test_settlements import collect, setup, statement, store_bank
 
 from fiscalm import companies
 from fiscalm.api import actions
+from fiscalm.ledger import Ledger
+from fiscalm.mail import imap, invoices
 from fiscalm.settlements import engine as settlements, upload as bank_upload
 from fiscalm.settlements.reports import SOURCES, STRIPE, ReportError, money, parse, table
 
@@ -651,3 +655,236 @@ def test_first_fan_borderou_settles_on_its_own(ledger):
     assert result["message"] == bank_upload.COLLECTED
     assert {r["message_id"]: r["status"] for r in ledger.issued_rows()} == {"fan-1": "collected", "fan-2": "collected"}
     assert ledger.db.execute("SELECT count(*) FROM settlement_confirmations").fetchone()[0] == 0
+
+
+def test_mailed_report_from_a_named_sender_is_imported(ledger, mail_account, monkeypatch):
+    """Read-only intake: a CSV in the saved format from an address a person named is imported with that payer and
+    the day the file says; another format, or another sender, imports nothing."""
+    day = date.today() - timedelta(days=5)
+    for n, total in ((1, "50.00"), (2, "100.00")):
+        ledger.add_issued(
+            dict(
+                message_id=f"m{n}",
+                company="NORD",
+                number=f"TEST-{n}",
+                status="open",
+                raw_path="",
+                total=total,
+                currency="RON",
+                doc_type="invoice",
+                issue_date=(day - timedelta(days=9)).isoformat(),
+            )
+        )
+    header = "Factura;Ramburs;Comision;Data plata\n"
+    described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+    first = (header + f"TEST-1;50,00;1,00;{day:%d.%m.%Y}\n").encode()
+    bank_upload.accept_report(ledger, "NORD", first, "text/csv", description=described, report_date=day.isoformat())
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    with pytest.raises(ValueError):
+        bank_upload.set_senders(ledger, "NORD", partner, sig, "not an address")
+    assert bank_upload.set_senders(ledger, "NORD", partner, sig, "Rapoarte@Curier.example\n") == [
+        "rapoarte@curier.example"
+    ]
+    other = (header + f"TEST-1;50,00;1,00;{(day - timedelta(days=1)):%d.%m.%Y}\n").encode()
+    again = bank_upload.accept_report(
+        ledger, "NORD", other, "text/csv", description=described, report_date=day.isoformat()
+    )
+    assert ledger.withdraw_report(again["id"], "NORD")
+    kept = json.loads(ledger.db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])["senders"]
+    assert kept == ["rapoarte@curier.example"]  # the same description uploaded again keeps the senders
+
+    def mailed(sender):
+        mail = EmailMessage()
+        mail["From"], mail["Subject"], mail["Message-ID"] = f"Curier <{sender}>", "Decont", f"<{sender}>"
+        mail.add_attachment((header + f"TEST-2;100,00;2,00;{day:%d.%m.%Y}\n").encode(), "text", "csv", filename="r.csv")
+        mail.add_attachment(b"Other,Columns\n1,2\n", "text", "csv", filename="other.csv")
+        return imap.parse(mail_account["id"], bytes(mail), date.today())
+
+    msg = mailed("rapoarte@curier.example")
+    assert (len(msg.tables), msg.attachments) == (2, ())
+    store_bank(ledger, statement(date=day + timedelta(days=2), amount=Decimal("98.00"), counterparty=NETOPIA["name"]))
+    assert invoices.handle(ledger, msg) == "settlement:added:1,settlement:unknown-format:1"
+    assert invoices.handle(ledger, mailed("someone@curier.example")) == "no-documents"
+    rows = settlements.state(ledger, "NORD")
+    assert len(rows) == 2 and {r["date"] for r in rows} == {day.isoformat()}
+    # Verified against the credit, the mailed report still waits: a From header is no proof of who sent it.
+    mailed_row = next(r for r in rows if r["lines"][0]["reference"] == "TEST-2")
+    assert (mailed_row["error"], mailed_row["can_confirm"]) == ("mail_confirmation_required", True)
+    body = {"id": mailed_row["id"], "tx": mailed_row["credit"]["id"], "confirmed": "yes"}
+    assert settlements.perform(ledger, "NORD", body, "synthetic person")["ok"]
+    assert ledger.issued("m2")["status"] == "collected"
+    # Withdrawn, the same file mailed again stays out; a revoked sender's mail in flight stores nothing.
+    other = next(r for r in rows if r["id"] != mailed_row["id"])
+    assert ledger.withdraw_report(other["id"], "NORD")
+    first_mail = EmailMessage()
+    first_mail["From"], first_mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<again>"
+    first_mail.add_attachment(first, "text", "csv", filename="r.csv")
+    again = imap.parse(mail_account["id"], bytes(first_mail), date.today())
+    assert invoices.handle(ledger, again) == "settlement:refused:1"  # the withdrawn report stays withdrawn
+    late = EmailMessage()
+    late["From"], late["Message-ID"] = "Curier <rapoarte@curier.example>", "<late>"
+    late.add_attachment((header + f"TEST-9;5,00;0;{day:%d.%m.%Y}\n").encode(), "text", "csv", filename="r.csv")
+    original = bank_upload._report_spec
+
+    def revoked_meanwhile(*args):  # another connection removes the sender between reading and storing
+        other_connection = Ledger()
+        try:
+            bank_upload.set_senders(other_connection, "NORD", partner, sig, "")
+        finally:
+            other_connection.close()
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_report_spec", revoked_meanwhile)
+    assert invoices.handle(ledger, imap.parse(mail_account["id"], bytes(late), date.today())) == "settlement:refused:1"
+    data = json.loads(ledger.db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])
+    assert data["senders"] == [] and len(settlements.state(ledger, "NORD")) == 1
+
+
+def test_a_sender_naming_two_payers_imports_nothing_and_invoices_still_read(ledger, mail_account):
+    """One address on two payers' formats: the attachment never chooses; the mail's PDFs are read the invoice way."""
+    header = b"Factura;Ramburs;Comision\n"
+    for name in ("Synthetic Processor SRL", "Other Processor SRL"):
+        described = NETOPIA | dict(name=name, mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+        data = header + name.encode()[:5] + b";100,00;2,00\n"
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    for partner, sig in ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchall():
+        bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<two>"
+    mail.add_attachment(header + b"TEST-1;100,00;2,00\n", "text", "csv", filename="r.csv")
+    mail.add_attachment(b"%PDF-1.4 synthetic", "application", "pdf", filename="factura.pdf")
+    result = invoices.handle(ledger, imap.parse(mail_account["id"], bytes(mail), date.today()))
+    assert result.startswith("settlement:ambiguous-sender,") and len(result.split(",")) == 2
+
+
+def test_mailed_payer_is_decided_again_under_the_write_lock(ledger, mail_account, monkeypatch):
+    """The sender named on a second payer while a mail is read: the report is not filed under the first one. A request
+    naming a saved payer and a new description together is refused (it could write back an old sender list)."""
+    header = b"Factura;Ramburs;Comision;Data plata\n"
+    for name in ("Synthetic Processor SRL", "Other Processor SRL"):
+        described = NETOPIA | dict(name=name, mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+        data = header + name.encode()[:5] + b";100,00;2,00;10.10.2026\n"
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    (first, sig), (second, _) = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchall()
+    bank_upload.set_senders(ledger, "NORD", first, sig, "rapoarte@curier.example")
+    with pytest.raises(bank_upload.Refused):
+        bank_upload.accept_report(
+            ledger, "NORD", header + b"T;1,00;0;10.10.2026\n", "text/csv", partner=first, description=NETOPIA
+        )
+    original = bank_upload._report_spec
+
+    def named_twice_meanwhile(*args):
+        other = Ledger()
+        try:
+            bank_upload.set_senders(other, "NORD", second, sig, "rapoarte@curier.example")
+        finally:
+            other.close()
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_report_spec", named_twice_meanwhile)
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<twice>"
+    mail.add_attachment(header + b"TEST-7;100,00;2,00;10.10.2026\n", "text", "csv", filename="r.csv")
+    msg = imap.parse(mail_account["id"], bytes(mail), date.today())
+    assert settlement_from_mail(ledger, msg) == "settlement:refused:1"
+
+
+def settlement_from_mail(L, msg):
+    return bank_upload.from_mail(L, msg.address, msg.tables, lambda: ["NORD"], UPLOAD["today"])
+
+
+def test_an_unreadable_workbook_never_stops_the_mails_invoices(ledger, mail_account):
+    """A workbook zipfile can't read (another compression) is one unreadable table; the PDF beside it is still read."""
+    broken = bytearray(workbook(cells(["Ref", "Gross", "Fee"], ["T", "1", "0"])))
+    at = broken.index(b"PK\x01\x02") + 10  # the first entry's compression method, in the central directory
+    broken[at : at + 2] = (99).to_bytes(2, "little")
+    damaged = io.BytesIO()  # a deflated entry whose stream is cut
+    with zipfile.ZipFile(damaged, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("xl/worksheets/sheet1.xml", f"<worksheet {NS}><sheetData>{'<row/>' * 200}</sheetData></worksheet>")
+    damaged = bytearray(damaged.getvalue())
+    start = damaged.index(b"sheet1.xml") + len(b"sheet1.xml")
+    damaged[start : start + 40] = b"\xff" * 40
+    unknown = workbook(sheet='<?xml version="1.0" encoding="x-unknown"?><worksheet/>')  # an encoding Python lacks
+    for bad in (bytes(broken), bytes(damaged), unknown):
+        with pytest.raises(ReportError):
+            table(bad, "xlsx")
+    assert bank_upload._mailed_date(ledger, "NORD", "gone", "gone", [["Data"], ["01.10.2026"]]) == ""  # deleted
+    described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+    bank_upload.accept_report(
+        ledger, "NORD", b"Factura;Ramburs;Comision\nT;1,00;0\n", "text/csv", description=described, **UPLOAD
+    )
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<broken>"
+    mail.add_attachment(bytes(broken), "application", "octet-stream", filename="r.xlsx")
+    mail.add_attachment(b"%PDF-1.4 synthetic", "application", "pdf", filename="factura.pdf")
+    result = invoices.handle(ledger, imap.parse(mail_account["id"], bytes(mail), date.today()))
+    assert result.startswith("settlement:unreadable:1,") and len(result.split(",")) == 2
+
+
+def test_mailed_report_read_with_a_changed_format_or_a_busy_ledger(ledger, mail_account, monkeypatch):
+    """Columns corrected while a mail is read: nothing is stored with the old reading. A ledger that can't write
+    raises, so the mail is read again later instead of being counted as an unreadable table."""
+    header = b"Factura;Ramburs;Comision;Ref;Data plata\n"
+    described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+    bank_upload.accept_report(
+        ledger, "NORD", header + b"T;1,00;0;R;10.10.2026\n", "text/csv", description=described, **UPLOAD
+    )
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<changed>"
+    mail.add_attachment(header + b"TEST-1;100,00;2,00;TEST-2;10.10.2026\n", "text", "csv", filename="r.csv")
+    msg = imap.parse(mail_account["id"], bytes(mail), date.today())
+    original = bank_upload._report_spec
+
+    def corrected_meanwhile(*args):
+        other = Ledger()
+        try:
+            with other.tx() as db:
+                data = json.loads(db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])
+                data["mapping"]["reference"] = "Ref"
+                db.execute("UPDATE partner_settlement_formats SET data=?", (json.dumps(data),))
+        finally:
+            other.close()
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_report_spec", corrected_meanwhile)
+    assert settlement_from_mail(ledger, msg) == "settlement:refused:1" and len(settlements.state(ledger, "NORD")) == 1
+    monkeypatch.setattr(bank_upload, "_report_spec", original)
+
+    def busy(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(bank_upload.settlements, "import_payouts", busy)
+    with pytest.raises(sqlite3.OperationalError):
+        settlement_from_mail(ledger, msg)
+
+
+def test_mailed_day_comes_from_the_format_the_lines_are_read_with(ledger, mail_account, monkeypatch):
+    """The payout-day column removed while a mail is read: no day is taken from the reading before; with two date
+    columns and none mapped the file names no day, so nothing is stored."""
+    header = b"Factura;Ramburs;Comision;Data plata;Data decont\n"
+    mapping = dict(reference="Factura", gross="Ramburs", fee="Comision", date="Data plata")
+    described = NETOPIA | dict(mapping=mapping)
+    first = header + b"T;1,00;0;10.10.2026;09.10.2026\n"
+    bank_upload.accept_report(ledger, "NORD", first, "text/csv", description=described, **UPLOAD)
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    original = bank_upload._choose
+
+    def changed_meanwhile(*args):
+        with ledger.tx() as db:
+            data = json.loads(db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])
+            del data["mapping"]["date"]
+            db.execute("UPDATE partner_settlement_formats SET data=?", (json.dumps(data),))
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_choose", changed_meanwhile)
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<day>"
+    mail.add_attachment(header + b"TEST-1;100,00;2,00;10.10.2026;09.10.2026\n", "text", "csv", filename="r.csv")
+    msg = imap.parse(mail_account["id"], bytes(mail), date.today())
+    assert settlement_from_mail(ledger, msg) == "settlement:refused:1"
+    assert len(settlements.state(ledger, "NORD")) == 1

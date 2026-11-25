@@ -58,7 +58,8 @@ fallbacks and workflows when replacing them; do not preserve installation-specif
    to the Decontare from `tx`.
    A batch that passes every check above settles on its own, from the first report of any payer; no count of
    earlier confirmations is required (maintainer decision, 2026-11-25). A person confirms only a credit read
-   from a legacy statement copy without a stored checksum.
+   from a legacy statement copy without a stored checksum, and a report that arrived by mail (a sender address
+   is no proof of who sent it).
    Every writer goes through guarded `Ledger` methods whose `WHERE` clauses re-check the state read.
    Two connections racing must not double-settle; write a test that proves it.
 4. **Crash-safe file moves.** Moving payment files is journalled in the ledger first and finished on

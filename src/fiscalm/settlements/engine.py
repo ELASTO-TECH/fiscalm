@@ -88,6 +88,8 @@ def _check_spec(spec: dict) -> None:
 
 
 REQUIRED = ("source", "report_key", "date", "currency", "payer_name")
+# Waiting reasons a person answers (`confirmation_required`: the gate retired 2026-11-25, rows from before it).
+CONFIRMABLE = ("confirmation_required", "statement_confirmation_required", "mail_confirmation_required")
 # Each payout of a file keeps the whole file as its evidence; their sum stays bounded.
 EVIDENCE_LIMIT = 16 * 1024 * 1024
 
@@ -105,15 +107,17 @@ def _store_reports(L: Ledger, company: str, data: bytes, spec: dict, reports: li
     base["partner"] = partner_id(company, spec.get("payer_cui") or None, spec["payer_name"])
     if not base["partner"]:
         raise ReportError("Missing partner identity")
-    base.update({k: spec[k] for k in ("channel", "courier") if k in spec})
+    base.update({k: spec[k] for k in ("channel", "courier", "mailed_by") if k in spec})
     if len(reports) * len(data) > EVIDENCE_LIMIT:
         raise ReportError("Too many payouts for one file")
     ids, digest, single = [], hashlib.sha256(data).hexdigest(), len(reports) == 1
     with L.tx() as db:
         # The same bytes are one file, however mapped: never stored twice. A payout corrected after a withdrawal
         # comes back as a corrected file.
+        # A mailed file a person withdrew stays withdrawn when the mail comes again.
+        withdrawn = "" if spec.get("mailed_by") else " AND status!='withdrawn'"
         if db.execute(
-            "SELECT 1 FROM settlement_reports WHERE company=? AND (digest=? OR digest LIKE ?) AND status!='withdrawn'",
+            "SELECT 1 FROM settlement_reports WHERE company=? AND (digest=? OR digest LIKE ?)" + withdrawn,
             (company, digest, digest + ":%"),
         ).fetchone():
             raise sqlite3.IntegrityError("duplicate report file")
@@ -387,7 +391,7 @@ def recheck_pending(L: Ledger, company: str) -> list[str]:
                 )
                 db.execute(
                     "UPDATE settlement_reports SET error=? WHERE id=? AND status='pending' "
-                    "AND error IS NOT ? AND (? != 'credit_missing_or_ambiguous' OR error IS NULL OR error IN ('confirmation_required','statement_confirmation_required','competing_reports'))",
+                    "AND error IS NOT ? AND (? != 'credit_missing_or_ambiguous' OR error IS NULL OR error IN ('confirmation_required','statement_confirmation_required','mail_confirmation_required','competing_reports'))",
                     (reason, r["id"], reason, reason),
                 )
     return done
@@ -495,9 +499,7 @@ def snapshot(L: Ledger, company: str) -> tuple[list[dict], list[dict]]:
                 "credit": json.loads(r["credit"]) if r["credit"] else None,
                 "invoice_count": r["invoice_count"] if r["credit"] else len(lines),
                 "human_confirmed": bool(r["human_confirmed"]),
-                "can_confirm": r["status"] == "pending"
-                and error in ("confirmation_required", "statement_confirmation_required")  # the first: retired gate
-                and bool(r["credit"]),
+                "can_confirm": r["status"] == "pending" and error in CONFIRMABLE and bool(r["credit"]),
                 "failed_line": int(failed[1]) if failed else None,
                 "sheet": {"co": company, "set": r["id"]},
                 "links": {"transaction": r["tx_key"], "issued": list(dict.fromkeys(proof[n] for n in sorted(proof)))},
@@ -590,6 +592,7 @@ def partner_money(
                 "source": d["source"],
                 "mapping": d["mapping"],
                 "courier": d.get("courier", ""),
+                "senders": d.get("senders", []),
             }
         )
     claims: dict[str, set[str]] = {}

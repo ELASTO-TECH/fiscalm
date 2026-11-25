@@ -6,6 +6,7 @@ import csv
 import io
 import re
 import zipfile
+import zlib
 from datetime import date
 from decimal import Decimal
 from xml.etree import ElementTree as ET
@@ -121,6 +122,11 @@ def table(data: bytes, kind: str, delimiter: str = ",") -> list[list[str]]:
         ValueError,
         AttributeError,
         KeyError,
+        RuntimeError,  # an encrypted ZIP entry
+        NotImplementedError,  # a compression zipfile can't read
+        zlib.error,  # a damaged compressed stream
+        OSError,  # a damaged BZIP2 or LZMA member
+        LookupError,  # an XML encoding Python doesn't know
     ) as e:
         raise ReportError("Unreadable report; check format and mapping") from e
     if not 2 <= len(rows) <= 10001 or any(len(r) > 128 or any(len(v) > 1024 for v in r) for r in rows):

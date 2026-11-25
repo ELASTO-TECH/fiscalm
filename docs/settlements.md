@@ -29,7 +29,7 @@ invoice collection and fees.
 
 A batch that passes every rule above settles on its own, from the first report of any payer (2026-11-25).
 A person confirms only a credit read from a legacy PDF copy without a stored-copy checksum
-(`statement_confirmation_required`). The confirmation re-reads immutable company-contained bank evidence and
+(`statement_confirmation_required`), and a report that arrived by mail (`mail_confirmation_required`). The confirmation re-reads immutable company-contained bank evidence and
 collects under the write lock; the displayed credit id must still match. The confirmation journal commits with
 collection, fees and line proof and pins the copy's checksum; failures and double submits record nothing.
 Confirmation goes through an authenticated app user or a person-owned, write-scoped v1 key with `confirmed:"yes"`;
@@ -80,6 +80,15 @@ in it become adjustment lines that keep the payout for a person, and a charge wi
 codes, signed commission columns) are not parsed; map a transaction-only export instead. The tests use synthetic
 reports only; no courier's or processor's live export has been checked.
 Shopify Payments payouts come through the Shopify connector; see [self-hosting](self-hosting.md#shopify-payments-payouts).
+
+Mailed reports: on a saved format, an administrator names the exact sender addresses (`settlement-format-senders`,
+at most ten). Mail intake (read-only IMAP) then imports a CSV or XLSX attachment from one of those addresses when its
+header is exactly that format, for the firms the mailbox covers, with that payer and the payment day the file names
+(its mapped date column, else one day a date column names on every line); a file without one waits for a manual
+upload. Another sender or format imports nothing, and the file's content never chooses the payer. A sender named on
+two payers' or firms' formats imports nothing. The sender and the mailbox's firm are checked again under the write
+lock. A mailed report settles only once a person confirms it; a mailed file a person withdrew stays withdrawn when
+the mail comes again. The message's PDFs and XMLs are still read as invoices.
 
 In the app, Tranzacții accepts report uploads using a column mapping saved on the courier/processor partner;
 the partner's sheet can delete a saved mapping (`settlement-format-delete`).

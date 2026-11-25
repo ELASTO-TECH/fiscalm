@@ -96,6 +96,8 @@ class Message:
     subject: str
     date: str  # YYYY-MM-DD from the Date header, else the day it was read
     attachments: tuple[Attachment, ...]
+    # CSV or XLSX tables (kind "csv"/"xlsx"): only a settlement report from a sender a person named reads them.
+    tables: tuple[Attachment, ...] = ()
 
 
 def accounts(L: Ledger) -> list[integrations.Instance]:
@@ -329,15 +331,28 @@ def _kind(part, data: bytes) -> str | None:
     return None
 
 
+def _table(part, data: bytes) -> str | None:
+    """A CSV or XLSX by its name and bytes: an XLSX is a ZIP, a CSV is UTF-8 text."""
+    name = (part.get_filename() or "").lower()
+    if name.endswith(".xlsx") and data.startswith(b"PK\x03\x04"):
+        return "xlsx"
+    try:
+        return "csv" if name.endswith(".csv") and data.decode("utf-8-sig") else None
+    except UnicodeError:
+        return None
+
+
 def parse(account: str, raw: bytes, today: date) -> Message:
     """A message as plain data. Its attachments: every non-body part whose bytes are a PDF or an XML document, in
     order, up to ATTACHMENTS_MAX, each at most ATTACHMENT_MAX bytes (larger ones are left out)."""
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     found: list[Attachment] = []
+    tables: list[Attachment] = []
     for part in msg.walk():
-        if len(found) >= ATTACHMENTS_MAX:
+        if len(found) >= ATTACHMENTS_MAX and len(tables) >= ATTACHMENTS_MAX:
             break
-        if part.is_multipart() or part.get_content_type() in ("text/plain", "text/html"):
+        named_csv = (part.get_filename() or "").lower().endswith(".csv")
+        if part.is_multipart() or (part.get_content_type() in ("text/plain", "text/html") and not named_csv):
             continue
         try:
             data = part.get_payload(decode=True)
@@ -346,8 +361,10 @@ def parse(account: str, raw: bytes, today: date) -> Message:
         if not isinstance(data, bytes) or not data or len(data) > ATTACHMENT_MAX:
             continue
         kind = _kind(part, data)
-        if kind:
+        if kind and len(found) < ATTACHMENTS_MAX:  # invoices and tables each keep their own allowance
             found.append(Attachment(kind, data, _plain(part.get_filename())[:120]))
+        elif (table := _table(part, data)) and len(tables) < ATTACHMENTS_MAX:
+            tables.append(Attachment(table, data, _plain(part.get_filename())[:120]))
     try:
         sender = _plain(msg.get("From"))
         subject = _plain(msg.get("Subject"))
@@ -355,7 +372,8 @@ def parse(account: str, raw: bytes, today: date) -> Message:
         sender, subject = "", ""
     address = email.utils.parseaddr(sender)[1].lower()
     mid = _message_id(msg.get("Message-ID")) or "sha256:" + hashlib.sha256(raw).hexdigest()
-    return Message(account, mid, sender, address if "@" in address else "", subject, _date(msg, today), tuple(found))
+    address = address if "@" in address else ""
+    return Message(account, mid, sender, address, subject, _date(msg, today), tuple(found), tuple(tables))
 
 
 def _record(

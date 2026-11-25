@@ -1,5 +1,5 @@
 "use client";
-import { Actions, Button, Input, Label, Panel, sectionHeadingStyle, detailListStyle, bannerLateStyle, noteLeftStyle } from "./Controls";
+import { Actions, Button, Input, Label, Panel, Textarea, sectionHeadingStyle, detailListStyle, bannerLateStyle, noteLeftStyle } from "./Controls";
 // Parteneri: who the company trades with (the engine's `partners`), the list under Facturi and a partner's sheet, which
 // leads to every invoice with them; each invoice leads back here (docs/information-architecture.md).
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -339,12 +339,13 @@ function PartnerBody({ s, p, initial, status, onClose }: { s: State; p: Partner;
             <RememberedList s={s} partner={p.id} first={pages.remembered!} />
           </section>
         ) : null}
-        {pages.report_formats!.total ? <PartnerHistory s={s} partner={p.id} collection="report_formats" first={pages.report_formats!} cls="card pad" heading={<h2>Formate de raport salvate</h2>}>
-          {(f) => <div key={f.signature} className="flex flex-wrap items-center justify-between gap-3 py-2">
+        {pages.report_formats!.total ? <Company s={s}><PartnerHistory s={s} partner={p.id} collection="report_formats" first={pages.report_formats!} cls="card pad" heading={<h2>Formate de raport salvate</h2>}>
+          {(f) => <div key={`${p.id}:${f.signature}`} className="flex flex-wrap items-center justify-between gap-3 py-2">
             <p className="m-0 min-w-0 flex-1 basis-56 wrap-anywhere">{Object.entries(f.mapping).map(([k, v]) => `${REPORT_FIELDS.find(([key]) => key === k)?.[1] ?? "Coloană"}: ${v}`).join(", ")}</p>
             <Act action="settlement-format-delete" body={{ partner: p.id, signature: f.signature }} label="Șterge formatul" cls="btn g"
               confirm={{ text: "Ștergi formatul? La următorul raport alegi din nou coloanele.", yes: "Șterge formatul", danger: true }} />
-          </div>}</PartnerHistory> : null}
+            <FormatSenders key={`${p.id}:${f.signature}:${f.senders.join(",")}`} partner={p.id} signature={f.signature} saved={f.senders} />
+          </div>}</PartnerHistory></Company> : null}
         {pages.transactions!.total ? (
           <section aria-labelledby="p-tx">
             <div className={sectionHeadingStyle}><h2 id="p-tx">Tranzacții asociate</h2></div>
@@ -354,6 +355,22 @@ function PartnerBody({ s, p, initial, status, onClose }: { s: State; p: Partner;
       </>}
     </Sheet>
   );
+}
+
+/** The exact addresses whose mailed reports in this format are imported for this payer; administrators only. */
+function FormatSenders({ partner, signature, saved }: { partner: string; signature: string; saved: string[] }) {
+  const [senders, setSenders] = useState(saved.join("\n"));
+  const admin = useCan("manage_firms");
+  const id = `senders-${signature.slice(0, 12)}`;
+  return <details className="w-full">
+    <Summary>{`Rapoarte primite pe mail${saved.length ? ` (${saved.length})` : ""}`}</Summary>
+    <Label htmlFor={id}>Adresele de la care vine raportul</Label>
+    <p className={noteLeftStyle} id={`${id}-note`}>Câte una pe linie. Raportul cu aceste coloane, primit de la ele, se încarcă singur.</p>
+    <Textarea id={id} value={senders} rows={2} maxLength={2550} disabled={!admin} aria-describedby={`${id}-note`}
+      onChange={(e) => setSenders(e.target.value)} />
+    {admin ? <Actions><Act action="settlement-format-senders" body={{ partner, signature, senders }} label="Salvează adresele"
+      off={senders === saved.join("\n")} why="Nicio modificare de salvat." /></Actions> : null}
+  </details>;
 }
 
 /** Modifică: the saved client's details in the invoicing form, saved with its id (`client-save`). A changed CUI can give the
