@@ -184,9 +184,9 @@ def test_a_statement_stored_before_owns_its_month_against_the_bank(ledger):
     assert usable(ledger, bank) == [False]
 
 
-def test_richer_statement_evidence_of_a_bank_owned_month_waits_for_a_person(ledger, home):
-    """Known trade-off: the bank's line lacked the payee's IBAN, the statement's has it, but the month is the bank's:
-    the payment stays to confirm by hand rather than risk settling twice."""
+def test_a_bank_line_of_one_payments_exact_amount_settles_it_and_the_statement_line_settles_nothing_more(ledger, home):
+    """The bank's line lacks the payee's IBAN, but it is the one candidate of its exact amount (maintainer decision,
+    2026-11-25): it settles the payment; the statement's richer line of the same month never settles it twice."""
     (home / "state").mkdir(exist_ok=True)
     (home / "state" / "LIVE").touch()
     download_batch(ledger, [_op(ledger, 1)])
@@ -204,11 +204,11 @@ def test_richer_statement_evidence_of_a_bank_owned_month_waits_for_a_person(ledg
         ref="F1",
         counterparty_iban=p["payee_iban"],
     )
+    assert ledger.payments(company="NORD")[0]["status"] == "paid"
     assert (
         recon.auto_mark_paid(ledger, statements.Statement("NORD", None, None, [statements.Account(RON, "RON", [rich])]))
         == []
     )
-    assert ledger.payments(company="NORD")[0]["status"] == "exported"
 
 
 def test_a_refusal_or_an_ended_consent_is_kept_on_the_connection(ledger):

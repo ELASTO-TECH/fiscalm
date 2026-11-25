@@ -96,23 +96,9 @@ def test_cash_or_card_the_purchase_counts_once(ledger, home):
     # The card debit fits the bon's purchase and the open invoice: it settles neither, the user picks.
     assert efactura.match_statement(ledger, st) == [] and ledger.efactura("702")["status"] == "open"
     assert [sorted(c[1] for c in json.loads(a["candidates"])) for a in ledger.ambiguous()] == [["701", "702"]]
-    # Once the other invoice is paid otherwise, the debit fits the bon's purchase by the shop's name alone: it waits until
-    # the name is remembered for the supplier (efactura.statement_partner), then it is used up, never looked for again.
+    # Once the other invoice is paid otherwise, the debit fits the bon's purchase alone: it is used up at once, never
+    # looked for again (maintainer decision, 2026-11-25: no first-time confirmation of a name).
     ledger.mark_efactura_paid("702", "statement 2026-10-25 iban REF T1", "other-debit")
-    assert efactura.match_statement(ledger, st) == [] and key not in ledger.used_txs()
-    t = st.accounts[0].txs[0]
-    ledger.remember(
-        "NORD",
-        "name",
-        efactura.line_keys(t, set())["name"],
-        {
-            "kind": "documents",
-            "partner": efactura.supplier_partner("NORD", ledger.efactura("701")),
-            "reason": None,
-            "note": None,
-        },
-        None,
-    )
     assert efactura.match_statement(ledger, st) == [] and key in ledger.used_txs()
     assert efactura.bon_paid(ledger, "NORD") == [] and not ledger.settle_bon_card("701", "a-second-debit")
     # Cash: no debit ever comes and the invoice stays paid.

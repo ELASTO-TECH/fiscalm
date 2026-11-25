@@ -75,7 +75,7 @@ Raport lunar ── every Factură, Bon, Extras, Tranzacție of that firm and mo
 | Partener | its invoices (primite, emise), what is owed either way, the bank accounts it was paid from or to, its CUI data from ANAF; for a courier or processor, what it holds for the firm and its Decontări; the associations the user made for it (section 4) |
 | Plată | what it pays (Factură, Taxă, contabil); its Fișier de plăți; the Tranzacție that confirmed it |
 | Fișier de plăți | its payments, each with what it pays and its proof; its downloads |
-| Tranzacție | what it settled (Factură, Plată, Factură emisă), or the candidates when it fits several, or, with nothing in the bank's text naming the supplier, the invoices of exactly its amount dated up to 45 days before it ("Plată de lămurit"; a person confirms, nothing settles by amount alone); for a credit explained by a Decontare, every invoice it collected and the fee; its Extras |
+| Tranzacție | what it settled (Factură, Plată, Factură emisă), or the candidates when it fits several ("Plată de lămurit"): by account or name, or, with nothing in the bank's text naming the supplier, by exactly its amount within 45 days (exactly one such candidate settles on its own); for a credit explained by a Decontare, every invoice it collected and the fee; its Extras |
 | Decontare | its Tranzacție (credit); each line's Factură emisă and AWB; the fee |
 | Bon | the Factură primită of the same purchase (if any); the card Tranzacție |
 | Raport lunar | every entity of the month, and what is missing |

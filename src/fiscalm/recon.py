@@ -478,13 +478,14 @@ def auto_mark_paid(ledger: Ledger, st: statements.Statement) -> list[str]:
     When the payment details name an invoice number, only that invoice is marked: two open
     accountant's invoices of 350 lei must not both be settled by one transfer that names one of them.
     A debit pays one item, ever (ledger `settled_tx`, shared with the e-Factura matcher), and a
-    debit that fits several candidates, payment rows or e-Factura invoices (efactura.rivals), pays none.
+    debit that fits several candidates, payment rows or e-Factura invoices (efactura.candidates), pays none; one that
+    fits exactly one by its amount alone pays it (maintainer decision, 2026-11-25).
     """
     ledger.record_statement(st)  # the evidence behind every debit it settles (Ledger.paid_proofs)
     done = []
     open_items = ledger.payments(status=("pending", "exported"), company=st.company)
     used = ledger.used_txs()
-    rivals = efactura.rivals(ledger, st.company)
+    rivals = efactura.candidates(ledger, st.company)
     advance = efactura.remembered_advance(ledger, st.company)  # the owner's money: never a payment row's
 
     def settle(p, t):
