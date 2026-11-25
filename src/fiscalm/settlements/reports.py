@@ -146,6 +146,10 @@ def _relationships(z: zipfile.ZipFile, name: str) -> list[tuple[str, str, str]]:
     return rels
 
 
+def _chart(z: zipfile.ZipFile, path: str) -> bool:
+    return path in z.namelist() and _xml(z.read(path)).tag == f"{{{NS['s']}}}chartsheet"
+
+
 def _worksheets(z: zipfile.ZipFile) -> list[str]:
     """Every worksheet of the workbook, none left unread. Any manifest present is read strictly: the package's one
     office document is xl/workbook.xml and is there; the workbook lists its sheets, each resolving through the
@@ -166,9 +170,10 @@ def _worksheets(z: zipfile.ZipFile) -> list[str]:
         if book.tag != f"{{{NS['s']}}}workbook" or book.find("s:sheets", NS) is None:
             raise ReportError("Unreadable worksheet")  # another dialect (Strict OOXML) or no sheet list
         for sheet in book.findall("s:sheets/s:sheet", NS):
-            kind, path = rels.get(sheet.get(_RID) or "-", ("", ""))
-            if not kind.endswith("/chartsheet"):
-                declared.append(path if kind.endswith("/worksheet") else "")
+            kind, path = rels.get(sheet.get(_RID), ("", ""))
+            if kind.endswith("/chartsheet") and _chart(z, path):
+                continue  # a chart sheet holds no lines; one that isn't really a chart sheet refuses below
+            declared.append(path if kind.endswith("/worksheet") else "")
     named = [path for kind, path in rels.values() if kind.endswith("/worksheet")]
     if any(not re.fullmatch(r"xl/[A-Za-z0-9_/]+\.xml", n) or ".." in n or n not in names for n in declared + named):
         raise ReportError("Unreadable worksheet")

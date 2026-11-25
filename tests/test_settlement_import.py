@@ -160,6 +160,16 @@ def test_xlsx_sheets_with_one_header_read_as_one_table():
         {"xl/workbook.xml": strict},  # another dialect: its sheet list can't be read
         {"xl/worksheets/sub/refunds.xml": refunds},  # nested under xl/worksheets/
         {"xl/worksheets/SHEET3.XML": refunds},  # upper case
+        {  # Refunds outside xl/worksheets/, said to be a chart sheet
+            "xl/refunds.xml": refunds,
+            "xl/worksheets/sheet2.xml": None,
+            "xl/_rels/workbook.xml.rels": rels.format(
+                '<Relationship Id="rId1" Type="x/worksheet" Target="worksheets/sheet1.xml"/>'
+                '<Relationship Id="rId2" Type="x/chartsheet" Target="refunds.xml"/>'
+            ).encode(),
+        },
+        {"xl/workbook.xml": both_book.replace(b' r:id="rId2"', b"")},  # a sheet without its id
+        {"_rels/.rels": rels.format("").encode()},  # a package naming no workbook
     ):
         with pytest.raises(ReportError):
             table(variant(**parts), "xlsx")

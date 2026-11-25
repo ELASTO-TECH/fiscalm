@@ -51,7 +51,8 @@ a negative gross or a non-`charge` category is an adjustment line (kept, flagged
 Cells starting with `=`, `+`, `-` or `@` are data (phone numbers, signed fees); only XLSX formula nodes refuse, and
 exports that a spreadsheet opens escape such cells (`rezumat.csv`). Blank CSV lines refuse. XLSX row
 positions/visibility do not select evidence: all stored rows are included. Worksheets with the same header row are
-read as one table; any other non-empty sheet (a summary, a title row, another layout) refuses the file.
+read as one table; any other non-empty sheet (a summary, a title row, another layout) refuses the file. Only
+Transitional XLSX (Excel's default) is read; a Strict OOXML workbook refuses.
 
 A file covering several payouts (a mapped `batch` column with several ids) is stored as one report per payout, all
 or none, each keyed by its payout id; with a mapped `date` column every line of a payout names its one payment day,
