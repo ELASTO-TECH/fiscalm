@@ -12030,6 +12030,64 @@
                           ]
                         },
                         {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "ai",
+                              "description": "The AI integration's checked proposal; never applied."
+                            },
+                            "as": {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "enum": [
+                                    "documents",
+                                    "label",
+                                    "transfer",
+                                    "advance"
+                                  ]
+                                },
+                                "partner": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "reason": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "note": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "partner",
+                                "reason",
+                                "note"
+                              ]
+                            },
+                            "invoices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              },
+                              "description": "Open invoices whose remaining total is the amount."
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "as",
+                            "invoices"
+                          ]
+                        },
+                        {
                           "type": "null"
                         }
                       ]
@@ -16031,9 +16089,10 @@
               null,
               "saved",
               "bank",
-              "transfer"
+              "transfer",
+              "ai"
             ],
-            "description": "Made by no person: a saved rule (saved), the bank's own fee or interest line (bank), or both ends of a transfer between the firm's accounts, one naming the other's account (transfer). Undoing or changing it leaves the transaction to people."
+            "description": "Made by no person: a saved rule (saved), the bank's own fee or interest line (bank), or both ends of a transfer between the firm's accounts, one naming the other's account (transfer), or a Fără document label the AI integration was sure of on a line no open document fits by amount (ai). Undoing or changing it leaves the transaction to people."
           }
         },
         "required": [
@@ -18835,6 +18894,64 @@
                               ]
                             },
                             {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "const": "ai",
+                                  "description": "The AI integration's checked proposal; never applied."
+                                },
+                                "as": {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "enum": [
+                                        "documents",
+                                        "label",
+                                        "transfer",
+                                        "advance"
+                                      ]
+                                    },
+                                    "partner": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    },
+                                    "reason": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    },
+                                    "note": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "partner",
+                                    "reason",
+                                    "note"
+                                  ]
+                                },
+                                "invoices": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  },
+                                  "description": "Open invoices whose remaining total is the amount."
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "as",
+                                "invoices"
+                              ]
+                            },
+                            {
                               "type": "null"
                             }
                           ]
@@ -20560,7 +20677,7 @@
         "required": [
           "pages"
         ],
-        "description": "Current transaction-form choices, without linking or settling anything. Without collection, one full owner projection returns initial partners, invoices, payments, selected and receipts pages; with collection, just that page. Each has an exact matching total and offset cursor (default 50, maximum 200). Only partners of the transaction's direction are offered, including a credit holder's complete exposure. Invoices retain the existing open/marked, SPV-ready, non-rejected, positive-left and account/original-currency filters; amounts restore this link's own contribution before editing. Closed items selected by the current link remain available. selected pages all existing invoice choices independently of the primary row's nested-list cap; position preserves invoice order across pages/search. Invoices sort by date then case-folded number; partners by case-folded display name. Prepared payments retain held/in-file/lost/imported order, for debits with RON account or original currency only. Payment page IDs are keyed opaque identifiers; raw item_id is private and never appears in a cursor. receipts lists, for a debit only, the firm's uploaded files with no amount yet (held, unsent, without an invoice), in the documents order: the bon a person may name for it with tx-receipt. q is an accent-insensitive display-text substring (maximum 200 characters); it excludes private payment keys. partner applies only to invoices or the initial bundle; selected always uses the current link's partner. Only the initial bundle has proposed: at most the one open invoice of either partner whose number the bank details name, when the transaction equals its remaining amount in its currency (never for an explained transaction); its partner is the default partner before the one the bank text points to. A proposal is never applied: the user confirms it. Reads are current, not a cross-request snapshot; replace choices after writes."
+        "description": "Current transaction-form choices, without linking or settling anything. Without collection, one full owner projection returns initial partners, invoices, payments, selected and receipts pages; with collection, just that page. Each has an exact matching total and offset cursor (default 50, maximum 200). Only partners of the transaction's direction are offered, including a credit holder's complete exposure. Invoices retain the existing open/marked, SPV-ready, non-rejected, positive-left and account/original-currency filters; amounts restore this link's own contribution before editing. Closed items selected by the current link remain available. selected pages all existing invoice choices independently of the primary row's nested-list cap; position preserves invoice order across pages/search. Invoices sort by date then case-folded number; partners by case-folded display name. Prepared payments retain held/in-file/lost/imported order, for debits with RON account or original currency only. Payment page IDs are keyed opaque identifiers; raw item_id is private and never appears in a cursor. receipts lists, for a debit only, the firm's uploaded files with no amount yet (held, unsent, without an invoice), in the documents order: the bon a person may name for it with tx-receipt. q is an accent-insensitive display-text substring (maximum 200 characters); it excludes private payment keys. partner applies only to invoices or the initial bundle; selected always uses the current link's partner. Only the initial bundle has proposed: at most the one open invoice of either partner whose number the bank details name, when the transaction equals its remaining amount in its currency (never for an explained transaction); else the open invoices of an AI proposal whose remaining amounts add up to the transaction in one currency. Its partner is the default partner before the one the bank text points to. A proposal is never applied: the user confirms it. Reads are current, not a cross-request snapshot; replace choices after writes."
       },
       "CoveredRow": {
         "oneOf": [

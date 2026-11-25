@@ -132,7 +132,8 @@ function Linked({ t, link, onChange }: { t: Transaction; link: TxLink; onChange:
 }
 
 /** Who made an explanation no person made (links.apply_rules). */
-const BY_RULE = { saved: "după regula salvată", bank: "după extrasul băncii", transfer: "după ambele capete ale transferului" };
+const BY_RULE = { saved: "după regula salvată", bank: "după extrasul băncii", transfer: "după ambele capete ale transferului",
+  ai: "după asistentul AI" };
 
 /** What a label, an advance, a transfer or a bon says; a transfer's other end and a bon open their own sheets. */
 function Marked({ t }: { t: Transaction }) {
@@ -253,7 +254,8 @@ function LinkForm({ t, link, onDone, onCancel }: {
   const { run, busy } = useApp();
   const initial = useDetail().transaction!.choices;
   const [was] = useState(link?.id ?? "");
-  const offer = link ? undefined : initial.proposed?.data[0];
+  const offers = link ? [] : initial.proposed?.data ?? [];
+  const offer = offers[0];
   const [initialPartner] = useState(link?.partner ?? offer?.partner ?? t.partner ?? "");
   const [partner, setPartner] = useState(initialPartner);
   const [partnerChoice, setPartnerChoice] = useState(s.partners.find((p) => p.id === initialPartner));
@@ -261,7 +263,7 @@ function LinkForm({ t, link, onDone, onCancel }: {
   const partners = useChoicePage(t.id, "partners", !q ? initial.partners : undefined, q);
   const restored = useSelected(t.id, initial.selected!);
   const [readySelection, setReadySelection] = useState(!initial.selected!.next_cursor);
-  const [chosen, setChosen] = useState(initial.selected!.data.length || offer?.partner !== initialPartner ? initial.selected!.data : [offer]);
+  const [chosen, setChosen] = useState(initial.selected!.data.length || offer?.partner !== initialPartner ? initial.selected!.data : offers);
   if (!readySelection && !restored.loading && !restored.error) {
     setChosen(restored.data[0]); setReadySelection(true);
   }
@@ -315,9 +317,10 @@ function LinkForm({ t, link, onDone, onCancel }: {
  * (MarkForm). A line the bank marks as its fee or interest starts on Fără document with that label; a card payment no
  * partner or invoice points to starts on its bon (a merchant abroad has no invoice to cover). */
 function Explain({ t, link, onDone, onCancel }: { t: Transaction; link?: TxLink; onDone: () => void; onCancel?: () => void }) {
-  const kept = t.proposal?.kind === "remembered" ? t.proposal.as : undefined;
-  const proposed = useDetail().transaction!.choices.proposed?.data[0];
-  const offer = link ? undefined : proposed;
+  const kept = t.proposal?.kind === "remembered" || t.proposal?.kind === "ai" ? t.proposal.as : undefined;
+  const proposed = useDetail().transaction!.choices.proposed?.data ?? [];
+  // one tap confirms one invoice; several (the AI's) start the form preselected, confirmed there
+  const offer = link || proposed.length !== 1 ? undefined : proposed[0];
   // a bon only explains a debit nothing explains yet (its matcher skips the user's explanations), so not when changing one
   const debit = t.direction === "debit";
   const labels: Partial<Record<Kind, string>> = !debit ? KIND_LABEL : link ? { ...KIND_LABEL, documents: DEBIT_LABEL.documents } : DEBIT_LABEL;
@@ -399,7 +402,7 @@ function MarkForm({ t, kind, link, onDone, onCancel }: {
   const s = useCompany();
   const { run, busy } = useApp();
   const [was] = useState(link?.id ?? "");
-  const kept = t.proposal?.kind === "remembered" && t.proposal.as.kind === kind ? t.proposal.as : undefined;
+  const kept = (t.proposal?.kind === "remembered" || t.proposal?.kind === "ai") && t.proposal.as.kind === kind ? t.proposal.as : undefined;
   const same = link?.kind === kind ? link : kept;
   const [label, setLabel] = useState<TransactionLabel | "">(kind === "label" ? (same?.reason as TransactionLabel | null) ?? t.bank_says ?? "" : "");
   const [text, setText] = useState(same?.note ?? "");

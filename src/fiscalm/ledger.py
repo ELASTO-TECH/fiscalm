@@ -1073,6 +1073,34 @@ class Ledger:
             )
         }
 
+    def ai_proposals(self, company: str) -> dict[str, dict]:
+        """What the AI integration proposed for lines still to explain (ai_explain): {tx_key: {kind, partner,
+        invoices, reason, note}}; kind 'none' marks a line asked with nothing to propose."""
+        return {
+            r["tx_key"]: {k: r[k] for k in ("kind", "partner", "reason", "note")}
+            | {"invoices": json.loads(r["invoices"])}
+            for r in self.db.execute("SELECT * FROM tx_ai WHERE company=?", (company,))
+        }
+
+    def keep_ai_proposals(self, company: str, proposals: dict[str, dict]) -> None:
+        """Keep the AI's checked proposals by line, replacing an older one for the same line."""
+        with self.tx() as db:
+            for key, p in proposals.items():
+                db.execute(
+                    "INSERT OR REPLACE INTO tx_ai(tx_key,company,kind,partner,invoices,reason,note,at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        key,
+                        company,
+                        p["kind"],
+                        p.get("partner"),
+                        json.dumps(p.get("invoices") or []),
+                        p.get("reason"),
+                        p.get("note"),
+                        now(),
+                    ),
+                )
+
     def card_allows(self, company: str, card: str) -> bool:
         return not card or self.card_owner(company, card) == company
 

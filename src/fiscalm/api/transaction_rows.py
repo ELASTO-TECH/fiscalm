@@ -94,11 +94,14 @@ def _proposed(p: dict, refs: dict) -> dict | None:
         return {"text": f"Se potrivește cu {_count(len(p['invoices']))}", "to": {"tab": "sarcini"}, "proposal": True}
     if p["kind"] == "settlement":
         return {"text": "Decontare de verificat", "to": {"set": p["settlement"]}, "proposal": True}
-    if p["kind"] == "remembered":
+    if p["kind"] in ("remembered", "ai"):
         choice = p["as"]
         partner = refs["partners"].get(choice.get("partner"))
         text = remembered_text(choice, partner)
-        return {"text": "Regulă salvată: " + text.lower(), "proposal": True}
+        return {
+            "text": ("Regulă salvată: " if p["kind"] == "remembered" else "Propunere AI: ") + text.lower(),
+            "proposal": True,
+        }
     if p["kind"] == "receipt":
         doc = refs["documents"].get(p["document"])
         return {

@@ -521,7 +521,9 @@ and payment-file generation/downloads. Local work retains every authorization an
 an offline mode. ANAF reads, IMAP intake and bank reads use their respective credentials and
 configuration. Adding a firm by CUI contacts ANAF’s public service without credentials. The configured AI integration also works in Sandbox:
 its configuration by the administrator consents to document text being sent to that provider. AI only assists
-where rules cannot decide; checked answers never choose the firm or settle a payment.
+where rules cannot decide; checked answers never choose the firm or settle a payment. Statement lines the rules
+left to explain are sent with the firm's open invoices and partners (`tx-rules`, each tick); the answer is a proposal
+on the transaction's sheet, applied alone only as a Fără document label on a line no open document fits by amount.
 
 Existing payment files encountered in Sandbox are journalled and moved to
 `.shadow/*.blocked` under the payment folder, preserving their bytes
