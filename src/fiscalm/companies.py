@@ -152,7 +152,7 @@ class Account:
     def held_between(self, first: date | None, last: date | None) -> bool:
         """The account may have existed between these days: not opened after `last`'s month, not retired before
         `first`. An unknown day or date counts as held."""
-        opened_later = bool(self.opened and last and self.opened > last.strftime("%Y-%m"))
+        opened_later = bool(self.opened and last and self.opened[:7] > last.strftime("%Y-%m"))
         retired_before = bool(self.retired and first and self.retired < first.isoformat())
         return not (opened_later or retired_before)
 
@@ -345,6 +345,16 @@ _ACCOUNT_KEYS = {"iban", "currency", "bank", "pays", "retired", "opened"}
 MONTH = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])")
 
 
+def opening(value: str) -> bool:
+    """An account's opening as a person sets it: its month (YYYY-MM) or its exact day (YYYY-MM-DD)."""
+    if MONTH.fullmatch(value):
+        return True
+    try:
+        return len(value) == 10 and date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
 def accounts_from(c: dict, key: str) -> tuple[Account, ...]:
     """Validate accounts, refusing duplicate IBANs, multiple paying accounts per
     currency, retired paying accounts and banks that contradict the IBAN."""
@@ -381,9 +391,9 @@ def accounts_from(c: dict, key: str) -> tuple[Account, ...]:
         if not isinstance(pays, bool) or pays and retired_on:
             raise bad("a retired account cannot pay")
         opened = r.get("opened") or ""
-        if not isinstance(opened, str) or opened and not MONTH.fullmatch(opened):
+        if not isinstance(opened, str) or opened and not opening(opened):
             raise bad("invalid account opening month")
-        if opened and retired_on and opened > retired_on[:7]:
+        if opened and retired_on and opened > retired_on[: len(opened)]:
             raise bad("an account cannot open after it was retired")
         out.append(Account(iban, ccy, bank, pays=pays, retired=retired_on, opened=opened))
     if len({a.iban for a in out}) != len(out):

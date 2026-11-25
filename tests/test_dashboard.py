@@ -350,7 +350,7 @@ def test_a_bank_feed_read_from_mid_month_counts_until_a_statement_brings_the_mon
 
 
 def test_a_bt_pdf_with_two_periods_dates_each_balance_by_the_period_above_it():
-    september = bt_text().replace("01/10/2026 - 31/10/2026", "01/09/2026 - 30/09/2026")
+    september = bt_text().replace("01/10/2026 - 31/10/2026", "01/09/2026 - 30/09/2026").replace("/10/2026", "/09/2026")
     text = bt_text() + september.replace(RON, EUR).replace("RON  Cod", "EUR  Cod")
     accounts = statements.parse_text(text, "NORD").accounts
     assert len(accounts) == 2 and all(a.balanced for a in accounts)
@@ -362,6 +362,8 @@ def test_a_bt_pdf_with_two_periods_dates_each_balance_by_the_period_above_it():
     # a section with no period above it, in a file naming two, proves none
     text = bt_text().split("\n", 1)[1] + bt_text() + september
     assert statements.parse_text(text, "NORD").accounts[0].closing is None
+    # a line outside its section's period proves none either
+    assert statements.parse_text(bt_text() + september.replace("05/09", "05/10"), "NORD").accounts[1].closing is None
 
 
 def test_the_newest_balance_of_a_month_wins_and_two_that_disagree_prove_none(ledger, home):

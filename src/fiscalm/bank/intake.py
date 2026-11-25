@@ -70,12 +70,11 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
     before accounts were recorded is read to learn its accounts; if it can't be read, nothing is imported."""
     if not st.period_start or not st.period_end:
         raise statements.StatementError("Cannot verify statement period")
+    lo, hi = span(st)
     mine = set(statement_ibans(st))
     if not mine:
         raise statements.StatementError("Statement names no account")
-    months = _months(
-        st.period_start.replace(day=1) - timedelta(days=1), st.period_end.replace(day=28) + timedelta(days=4)
-    )
+    months = _months(lo.replace(day=1) - timedelta(days=1), hi.replace(day=28) + timedelta(days=4))
     docs = [
         d
         for m in sorted(months, key=lambda m: m != st.month)
@@ -108,8 +107,18 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
             raise StoredStatementUnavailable(
                 "Cannot verify adjacent statement period; restore the stored document and retry"
             )
-        if st.period_start <= previous.period_end and previous.period_start <= st.period_end:
+        theirs_lo, theirs_hi = span(previous)
+        if lo <= theirs_hi and theirs_lo <= hi:
             raise statements.StatementError("Overlapping statement already imported")
+
+
+def span(st: statements.Statement) -> tuple[date, date]:
+    """Every day a statement covers: from its accounts' printed periods (one may start later than another), else
+    its own."""
+    periods = [a.period for a in st.accounts if a.period]
+    if not periods:
+        return st.period_start, st.period_end
+    return min(p[0] for p in periods + [(st.period_start,) * 2]), max(p[1] for p in periods + [(st.period_end,) * 2])
 
 
 def _months(lo, hi) -> set[str]:
@@ -149,7 +158,8 @@ def hold_csv_days(L: Ledger, st: statements.Statement) -> None:
     ranges: dict[str, list[tuple]] = {}
     for doc in _csv_docs(L, st.company):  # any month: a CSV may span several
         csv = _read_stored(doc, st.company)
-        if csv.period_end < st.period_start or csv.period_start > st.period_end:
+        lo, hi = span(st)
+        if csv.period_end < lo or csv.period_start > hi:
             continue
         for a in csv.accounts:
             ranges.setdefault(companies.normalize_iban(a.iban), []).append((csv.period_start, csv.period_end))
@@ -242,7 +252,8 @@ def combine(parts: list[statements.Statement]) -> statements.Statement:
     co = companies.get(parts[0].company)
     for run in runs.values():
         _refuse_gaps(sorted(run, key=lambda s: s[0]), last, co)
-    return statements.Statement(parts[0].company, first, last, [a for p in parts for a in p.accounts])
+    # the whole month: its accounts are those held from the 1st (each section keeps its own printed days)
+    return statements.Statement(parts[0].company, last.replace(day=1), last, [a for p in parts for a in p.accounts])
 
 
 def _span(p: statements.Statement, a: statements.Account) -> tuple[date, date]:
@@ -265,15 +276,18 @@ def opening(a: statements.Account) -> Decimal:
 
 def _late_start(start: date, a: statements.Account, co) -> bool:
     """An account's month may start after the 1st only when the days before could hold no movement, and its opening
-    balance is proven: no banking day before `start` (weekends, legal holidays), or the account opened that month
-    (set by a person) and opened at zero."""
+    balance is proven: no banking day before `start` (weekends, legal holidays), or the account opened on that exact
+    day (set by a person, `company opened` YYYY-MM-DD; only non-banking days between) and opened at zero."""
     month = start.replace(day=1)
     if not a.trustworthy:
         return False
     if banking_days.none_between(month, start):
         return True
     own = co.account(a.iban)
-    return bool(own and own.opened == start.strftime("%Y-%m") and opening(a) == 0)
+    day = own.opened if own and len(own.opened) == 10 else ""
+    if not day or not month.isoformat() <= day <= start.isoformat():
+        return False
+    return banking_days.none_between(date.fromisoformat(day), start) and opening(a) == 0
 
 
 def _refuse_gaps(run: list[tuple[date, date, statements.Account]], last: date, co) -> None:
@@ -322,13 +336,20 @@ def _by_account(st: statements.Statement) -> dict[str, list[tuple[date, statemen
 
 
 def _stored_sections(L: Ledger, company: str, day: date, iban: str) -> list[tuple[date, statements.Account]]:
-    """The account's sections in the stored statements of `day`'s month (one file, or one per day), by first day."""
-    found = [
-        section
-        for doc in L.documents(company=company, month=day.strftime("%Y-%m"), kind="statement")
-        if not str(doc["path"]).endswith(".csv") and (not doc["accounts"] or iban in json.loads(doc["accounts"]))
-        for section in _by_account(_read_stored(doc, company)).get(iban, [])
-    ]
+    """The account's sections in the stored statements of `day`'s month (one file, or one per day), by first day. A
+    document on record for the account that shows none of its sections can't show where it closed: nothing is
+    imported (one stored before accounts were recorded shows which it covers when read)."""
+    found = []
+    for doc in L.documents(company=company, month=day.strftime("%Y-%m"), kind="statement"):
+        named = json.loads(doc["accounts"]) if doc["accounts"] else None
+        if str(doc["path"]).endswith(".csv") or (named is not None and iban not in named):
+            continue
+        sections = _by_account(_read_stored(doc, company)).get(iban, [])
+        if named is not None and not sections:
+            raise StoredStatementUnavailable(
+                "A stored statement of a neighbouring month does not show this account; restore it and retry"
+            )
+        found += sections
     return sorted(found, key=lambda s: s[0])
 
 

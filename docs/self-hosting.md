@@ -594,7 +594,8 @@ by its password, or by its text (an unprotected BT statement under any name, who
 password is read for it). `fiscalm ingest` refuses a CSV on its own: it is uploaded on its account. A BT account's
 month may start after the 1st, as older statements print it, only when no day with movements is left out: the days
 before are no banking day (weekends and Romanian legal holidays, Orthodox Easter included, `bank.banking_days`), or
-the account opened that month (`fiscalm company opened`) at a zero balance. Its opening balance must be proven by the
+the account opened on that day (`fiscalm company opened --month YYYY-MM-DD`; a month alone is not enough) at a zero
+balance. The month's accounts are those held from its 1st. Its opening balance must be proven by the
 statement and equal the previous month's stored closing balance for that account, when one is on record, whichever
 of the two months is imported first. CAMT.053 is accepted by an administrator in Tranzacții, or from the operator CLI:
 `fiscalm ingest FILE` (store and reconcile) or `fiscalm statement FILE` (inspect). Mail and public

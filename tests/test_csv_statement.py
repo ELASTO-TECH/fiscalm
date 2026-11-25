@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from firms import set_firm
+from firms import iban as bank_iban, set_firm
 from pdf_fake import bt_statement
 from test_api import (
     _req,  # noqa: F401
@@ -334,6 +334,25 @@ def test_a_bt_pdf_set_after_a_csv_holds_the_csvs_days_too(ledger, tmp_path):
     assert r["status"] == "added"
     held = ledger.db.execute("SELECT COUNT(*) FROM settled_tx WHERE what='twin csv'").fetchone()[0]
     assert held == 1  # the 2nd, a CSV day; the 25th settles as usual
+
+
+def test_a_csv_overlaps_a_pdf_section_by_section(ledger, tmp_path):
+    """Review: a PDF whose USD section starts on the 12th still covers RON from the 1st: a RON CSV of those days is
+    the same movements again, refused."""
+    nord, usd = companies.get("NORD"), bank_iban("RO00BTRLUSDCRT0000000001")
+    set_firm(
+        "NORD",
+        dataclasses.replace(nord, accounts=(*nord.accounts, companies.Account(usd, "USD", "bt", opened="2026-10-12"))),
+    )
+    whole = ("01/10/2026", "31/10/2026")
+    sections = [("USD", usd, Decimal(0), [], ("12/10/2026", "31/10/2026"))]
+    sections += [(c, i, Decimal("5000.00"), [], whole) for c, i in (("RON", RON), ("EUR", EUR))]
+    pdf = bt_statement(tmp_path / "oct.pdf", nord.cui, whole, sections)
+    assert recon.ingest_statements(ledger, [pdf], finance_home(), lambda co: "synthetic")[0]["status"] == "added"
+    columns(RON)
+    with pytest.raises(su.Refused):
+        su.accept(ledger, "NORD", "", SIGNED, "text/csv", rid(RON))
+    assert len(ledger.documents(kind="statement")) == 1
 
 
 def test_a_csv_never_stands_for_the_months_statement(ledger):

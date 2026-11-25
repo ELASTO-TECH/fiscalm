@@ -17,14 +17,15 @@ _FIXED = (
     (1, 24, 2017),  # Unirea Principatelor
     (5, 1, 0),
     (6, 1, 2017),  # Ziua Copilului
-    (8, 15, 0),
+    (8, 15, 2009),  # Adormirea Maicii Domnului (Legea 202/2008)
     (11, 30, 2012),  # Sfântul Andrei
     (12, 1, 0),
     (12, 25, 0),
     (12, 26, 0),
 )
 # days from Orthodox Easter Sunday: Good Friday (from 2018), Easter Sunday and Monday, Rusalii Sunday and Monday
-_MOVABLE = ((-2, 2018), (0, 0), (1, 0), (49, 0), (50, 0))
+_MOVABLE = ((-2, 2018), (0, 0), (1, 0), (49, 2009), (50, 2009))
+FIRST, LAST = 2009, 2099  # the years this rule knows; outside them only weekends are days off
 
 
 def orthodox_easter(year: int) -> date:
@@ -37,6 +38,8 @@ def orthodox_easter(year: int) -> date:
 
 
 def holidays(year: int) -> set[date]:
+    if not FIRST <= year <= LAST:
+        return set()
     easter = orthodox_easter(year)
     fixed = {date(year, m, d) for m, d, since in _FIXED if year >= since}
     return fixed | {easter + timedelta(days=n) for n, since in _MOVABLE if year >= since}

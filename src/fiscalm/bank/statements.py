@@ -411,18 +411,20 @@ def parse_text(text: str, company: str) -> Statement:
         cur, cur_lines = None, []
 
     period_start, period_end, one_period = _pdf_period(text)
-    section = None  # the last period printed outside a table: the one above the next account's section
+    section = None  # a statement header's period since the last account opened: the next account's own
 
     lines = text.splitlines()
     for i, ln in enumerate(lines):
         s = ln.strip()
-        if not in_table and (m := re.search(_PERIOD, ln)):
+        if not in_table and (m := re.search(_HEADER, ln)):
             section = parse_dmy(m.group(1)), parse_dmy(m.group(2))
         if _opens_account(ln):
             close()
             nxt = lines[i + 1] if i + 1 < len(lines) else ""
             acct = _pdf_account(nxt)
+            # its own header, else the file's one period; a section under none, in a file of several, has none
             acct.period = section or ((period_start, period_end) if one_period and period_start else None)
+            section = None
             accounts.append(acct)
             in_table = False
             continue
@@ -483,6 +485,7 @@ def _pdf_columns(line: str) -> tuple[int, int] | None:
 
 
 _PERIOD = r"din (\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})"
+_HEADER = r"(?i)\bextras\b.*?" + _PERIOD  # a statement's own header ("EXTRAS CONT ... din"), not a line's text
 
 
 def _pdf_period(text: str) -> tuple[date | None, date | None, bool]:
@@ -523,11 +526,12 @@ def _pdf_balance(
 
 def _pdf_trust(accounts: list[Account], opening: dict[int, Decimal], final: dict[int, Decimal]) -> None:
     """The closing balance counts only when the opening one and the lines add up to it, to the cent; it is dated by
-    the period printed above its section, so a section without one proves nothing."""
+    the period printed above its section, so a section without one, or with a line outside it, proves nothing."""
     for a in accounts:
         start, end = opening.get(id(a)), final.get(id(a))
         a.trustworthy = bool(
             a.period
+            and all(a.period[0] <= t.date <= a.period[1] for t in a.txs)
             and start is not None
             and end is not None
             and a.balanced

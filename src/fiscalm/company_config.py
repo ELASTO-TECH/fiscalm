@@ -458,15 +458,16 @@ def add_account(*, key: str, iban: str, currency: str, L: Ledger | None = None) 
 
 
 def set_opened(*, key: str, iban: str, month: str, L: Ledger | None = None) -> dict:
-    """Record the first month a company's account existed (YYYY-MM; "" forgets it). A statement of an earlier month
-    does not owe that account (bank.intake.missing_accounts); every later one does."""
+    """Record the first month a company's account existed (YYYY-MM), or its exact day (YYYY-MM-DD; "" forgets it). A
+    statement of an earlier month does not owe that account (bank.intake.missing_accounts); every later one does. Only
+    the exact day lets its first month start after the 1st (bank.intake)."""
     with editing(L) as L:
         own = companies.all(L).get(key)
         account = own.account(iban) if own else None
         if not account:
             raise CompanyError("Contul nu este al acestei firme.")
-        if month and not companies.MONTH.fullmatch(month):
-            raise CompanyError("Luna deschiderii se scrie AAAA-LL, de exemplu 2023-07.")
+        if month and not companies.opening(month):
+            raise CompanyError("Luna deschiderii se scrie AAAA-LL, de exemplu 2023-07, sau ziua: 2023-07-14.")
         try:
             updated = dataclasses.replace(
                 own, accounts=tuple(dataclasses.replace(a, opened=month) if a == account else a for a in own.accounts)
