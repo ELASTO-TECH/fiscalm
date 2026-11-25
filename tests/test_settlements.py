@@ -283,9 +283,10 @@ def test_payer_iban_never_falls_back_to_name(ledger, identity, right):
         ({"payer_name": "Atelier Sa SRL"}, {"counterparty": "Atelier"}, "Atelier Sa"),
         ({"payer_cui": "12345678"}, {"counterparty": "Other SRL", "description": "CUI 12345678"}, "Other 12345678"),
         ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE123456789"}, "Other RO123456789"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH VAT DE 123456789"}, "Other SA 123456789"),
         ({"payer_cui": "12345678"}, {"counterparty": "Other Firm ID 12345678X"}, "Other Firm CUI:12345678"),
     ],
-    ids=["legal_form", "alphabet", "inner_word", "form_word", "memo", "foreign_vat", "longer_id"],
+    ids=["legal_form", "alphabet", "inner_word", "form_word", "memo", "foreign_vat", "spaced_vat", "longer_id"],
 )
 def test_first_report_needs_its_own_payer(ledger, identity, wrong, right):
     """With no confirmation gate, only the payer itself can bring a batch's credit."""
@@ -305,6 +306,24 @@ def test_report_that_may_be_the_payers_competes(ledger):
     for report in (rid, other):
         with pytest.raises(settlements.SettlementError):
             collect(ledger, report, st)
+    assert not ledger.used_txs() and {r["status"] for r in ledger.issued_rows()} == {"open"}
+
+
+def test_a_second_plausible_credit_makes_the_batch_wait(ledger):
+    """Two equal credits that may both be the payout: the one naming the CUI on the party doesn't win."""
+    rid = setup(ledger)
+    edit_report(ledger, payer_cui="12345678")
+    named = statement(counterparty="Synthetic Courier SRL CUI 12345678")
+    named.accounts[0].txs.append(
+        statements.Tx(
+            **(
+                vars(named.txs[0])
+                | {"counterparty": "Synthetic Courier SRL", "description": "CUI 12345678", "ref": "b"}
+            )
+        )
+    )
+    with pytest.raises(settlements.SettlementError, match="^credit_missing_or_ambiguous$"):
+        collect(ledger, rid, named)
     assert not ledger.used_txs() and {r["status"] for r in ledger.issued_rows()} == {"open"}
 
 

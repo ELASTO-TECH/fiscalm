@@ -123,11 +123,18 @@ def _payer(report: dict, credit: statements.Tx, company: str, *, claim: bool = F
             )
         )
     if report["payer_cui"]:
-        # Only on the paying party, as a Romanian CUI (optionally RO): a memo can name anyone's tax id, and a foreign
-        # VAT number (DE123456789) is another firm's.
-        cui = rf"(?<![A-Za-z0-9])(?:RO)?{report['payer_cui']}(?![A-Za-z0-9])"
-        return re.search(cui, credit.counterparty or "", re.I) is not None
+        return _cui_named(report["payer_cui"], credit.counterparty or "")
     return same_payer(report["payer_name"], credit.counterparty)
+
+
+def _cui_named(cui: str, party: str) -> bool:
+    """The paying party names this Romanian CUI as a whole id (`RO` allowed). A memo can name anyone's tax id, and
+    after another country's code (`DE123456789`, `VAT DE 123456789`) the digits are another firm's."""
+    for m in re.finditer(rf"(?<![A-Za-z0-9])(?:RO)?{cui}(?![A-Za-z0-9])", party, re.I):
+        code = re.search(r"(?:^|[^A-Za-z0-9])([A-Za-z]{2})[ \t]*$", party[: m.start()])
+        if not code or code[1].upper() in {"RO"} | companies.LEGAL_FORMS:
+            return True
+    return False
 
 
 def _readings(name: str) -> list[tuple[list[str], str]]:
@@ -226,9 +233,10 @@ def verify(L: Ledger, stored: sqlite3.Row, st: statements.Statement) -> tuple[st
         and t.currency == r["currency"]
         and t.amount == gross - fee
         and 0 <= (t.date - date.fromisoformat(r["date"])).days <= 14
-        and _payer(r, t, st.company)
+        and _payer(r, t, st.company, claim=True)
     ]
-    if len(candidates) != 1:
+    # Every credit that may be this payer's counts: one only, and it must pass the strict payer check.
+    if len(candidates) != 1 or not _payer(r, candidates[0], st.company):
         raise SettlementError("credit_missing_or_ambiguous")
     t = candidates[0]
     if statements.tx_key(t) in L.used_txs():
