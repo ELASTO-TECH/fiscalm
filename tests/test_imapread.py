@@ -410,6 +410,14 @@ def test_texts_and_sent_are_read_only_searches(ledger, fake):
     assert got[0]["complete"] and got[0]["firms"] == "all"  # fetched whole, dated: it may prove a payment
     account(ledger, fake, name="Second")  # the same mail seen through a second account is still one proof
     assert len(imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)) == 1
+    two = EmailMessage()  # a confirmation, and a second text that _text never reads: never complete
+    two["From"], two["Subject"], two["Date"] = "Lumen <shop@lumen.example>", "Plata", "Mon, 02 Nov 2026 10:00:00 +0000"
+    two["Message-ID"] = "<two@lumen.example>"
+    two.set_content("Lumen plata confirmata")
+    two.add_attachment("<p>Lumen: payment reversed</p>", subtype="html", disposition="inline")
+    fake.add(two.as_bytes(), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    assert {m["key"]: m["complete"] for m in got}["imap:two@lumen.example"] is False
     assert fake.verbs() <= ALLOWED
 
 

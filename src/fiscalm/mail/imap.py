@@ -560,9 +560,17 @@ def authenticated_domain(msg, authserv: str) -> str:
     return domain if ok and domain else ""
 
 
+def _bodies(part) -> int:
+    """How many separate texts a message carries: an alternative (plain and HTML of one text) counts once."""
+    if part.is_multipart():
+        return 1 if part.get_content_subtype() == "alternative" else sum(_bodies(p) for p in part.iter_parts())
+    return int(part.get_content_type() in ("text/plain", "text/html") and not part.get_filename())
+
+
 def _text_record(msg, mid: str, end: date, account: integrations.Instance, size: int) -> dict:
-    """complete: the whole message was fetched, its subject not clipped and its Date readable (else the date is `end`,
-    a guess): only a complete mail can settle an invoice on its own."""
+    """complete: the whole message was fetched, it has one text (_text reads only the plain parts of several), its
+    subject is not clipped and its Date readable (else the date is `end`, a guess): only a complete mail can settle an
+    invoice on its own."""
     authserv = RECEIVERS.get(str(account.config.get("host") or "").lower(), "")
     subject = _plain(msg.get("Subject"))
     try:
@@ -577,7 +585,7 @@ def _text_record(msg, mid: str, end: date, account: integrations.Instance, size:
         "text": _text(msg),
         "domain": authenticated_domain(msg, authserv),
         "firms": account.firm_scope,
-        "complete": size < TEXT_BYTES and len(subject) < TEXT_MAX and dated,
+        "complete": size < TEXT_BYTES and _bodies(msg) == 1 and len(subject) < TEXT_MAX and dated,
     }
 
 

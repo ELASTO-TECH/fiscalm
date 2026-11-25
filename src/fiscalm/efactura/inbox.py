@@ -1312,6 +1312,7 @@ def _coherent(ev: list[dict], decisions: list[dict]) -> list[dict]:
         for d in decisions
         if count[d["message_id"]] == 1
         and d["message_id"] in shown
+        and d["confidence"] in ("high", "medium", "none")
         and (d["mail_key"] in shown[d["message_id"]] and d["confidence"] != "none" if d["paid"] else True)
     ]
 
@@ -1341,9 +1342,10 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], l
 
 def _rivals(L: Ledger) -> list:
     """Every invoice a payment mail may be about, by what is left to pay of it: open, marked or proved by another mail
-    (net of credits and the user's links, as the statement matcher sees them) and approved ones. Only an open or
+    (net of credits and the user's links, as the statement matcher sees them), approved and paid ones. Only an open or
     marked whole invoice is ever settled (confirm_by_mail); the others are doubt."""
-    out = [r for r in L.efactura_rows(status="linked") if not r["parse_error"]]
+    # paid ones too: the mail may be the receipt of a purchase a debit already proved
+    out = [r for s in ("linked", "paid") for r in L.efactura_rows(status=s) if not r["parse_error"]]
     for co in companies.all(L):
         _, rows, have, _ = _open_invoices(L, co)
         out += [r | {"total": f"{Decimal(r['total']) - have.get(r['message_id'], Decimal(0)):.2f}"} for r in rows]
@@ -1402,9 +1404,9 @@ def _shows_total(text: str, total: str, currency: str) -> bool:
     for m in _MONEY.finditer(text):
         if Decimal(re.sub(r"\D", "", m.group(1)) + "." + m.group(2)) != Decimal(total):
             continue
-        if re.search(r"[\d+\-−]", text[max(0, m.start() - 3) : m.start()]):
-            continue  # a sign, or digits just before it: a refund, or part of a longer amount
         before, after = text[max(0, m.start() - 8) : m.start()], text[m.end() : m.end() + 8]
+        if re.search(r"\d", before[-3:]) or re.search(r"[+\-−]", before):
+            continue  # digits just before it (part of a longer amount), or a sign before it or its currency
         if re.search(rf"\b(?:{cur})\s*$", before, re.I) or re.search(rf"^\s*(?:{cur})\b", after, re.I):
             return True
     return False
@@ -1423,7 +1425,9 @@ def _review_key(mail_key: str) -> str:
 def set_review(L: Ledger, mail: dict, message_ids: list[str], reason: str) -> dict:
     """A payment mail the AI read as proof that settled nothing on its own: kept with the invoices it may prove, for a
     person to confirm one (confirm_by_mail) or dismiss it. Mail text stays out: a person opens the mail."""
-    item = {"mail_key": mail["key"], "message_ids": message_ids, "reason": reason[:200]}
+    kept = json.loads(L.get_meta(_review_key(mail["key"])) or "{}").get("message_ids", [])  # still to answer
+    ids = sorted(set(kept) | set(message_ids))
+    item = {"mail_key": mail["key"], "message_ids": ids, "reason": reason[:200]}
     item |= {k: mail[k][:200] for k in ("from", "subject", "date")}
     L.set_meta(_review_key(mail["key"]), json.dumps(item, ensure_ascii=False))
     return item
