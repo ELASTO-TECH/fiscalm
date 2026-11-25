@@ -172,7 +172,9 @@ def test_multi_payout_file_becomes_one_report_per_payout(ledger):
     duplicate."""
     for n in (1, 2):
         ledger.add_issued(dict(message_id=f"m{n}", company="NORD", number=f"TEST-{n}", status="open", raw_path=""))
-    data = b"Borderou;Factura;Ramburs;Comision;Data\nB-1;TEST-1;100,00;2,00;09.10.2026\nB-2;TEST-2;50,00;1,00;11.10.2026\n"
+    data = (
+        b"Borderou;Factura;Ramburs;Comision;Data\nB-1;TEST-1;100,00;2,00;09.10.2026\nB-2;TEST-2;50,00;1,00;11.10.2026\n"
+    )
     mapping = dict(batch="Borderou", reference="Factura", gross="Ramburs", fee="Comision", date="Data")
     described = NETOPIA | dict(source="fan", name="Synthetic Courier SRL", mapping=mapping)
     result = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
