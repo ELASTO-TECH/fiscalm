@@ -800,8 +800,13 @@ def rivals(L: Ledger, company: str):
     pool += [(("history", r["message_id"]), r, r["total"], r["currency"], _ibans(r), -5) for r in old]
     pool += [(("partial", r["message_id"]), r, r["total"], r["currency"], _ibans(r), -5) for r in partial]
 
+    payable = {_reference(r["number"]) for r in [*invoices, *bons]} | {_reference(p["doc_ref"]) for p in items}
+    elsewhere = [pattern for ref, pattern in refs.items() if ref not in payable]
+
     def of(t: statements.Tx) -> set[tuple[str, str]]:
         if not L.card_allows(company, t.card_last4):
+            return set()
+        if any(pattern.search(t.description) for pattern in elsewhere):  # it names an invoice no longer to pay
             return set()
         names = _named(known, t)
         return {key for key, no, fits in cands if (not names or no in names) and fits(t)}
@@ -831,7 +836,7 @@ def _known_numbers(L: Ledger, company: str, old: list) -> tuple[set[str], set[st
     known = {n for r in rows if (n := number_of(r["number"]))} | {n for p in pays if (n := payment_number(p))}
     known |= {n for r in old if (n := number_of(r["number"]))}
     numbers = [*(r["number"] for r in rows), *(p["doc_ref"] for p in pays), *(r["number"] for r in old)]
-    return known, [pattern for n in numbers if (pattern := _pattern(n))]
+    return known, {ref: pattern for n in numbers if (pattern := _pattern(n)) and (ref := _reference(n))}
 
 
 def _pattern(number: str | None) -> re.Pattern | None:
@@ -843,15 +848,15 @@ def _pattern(number: str | None) -> re.Pattern | None:
         return None
     body = parts[0]
     for a, b in zip(parts, parts[1:], strict=False):
-        body += (r"[-/. ]" if a.isdigit() and b.isdigit() else r"[-/. ]?") + b
+        body += (r"[-/._ ]" if a.isdigit() and b.isdigit() else r"[-/._ ]?") + b
     return re.compile(rf"(?<![A-Z0-9]){body}(?![A-Z0-9])", re.I)
 
 
-def _mentions(t: statements.Tx, known: set[str], refs: list[re.Pattern]) -> bool:
+def _mentions(t: statements.Tx, known: set[str], refs: dict[str, re.Pattern]) -> bool:
     """A debit's text names some known invoice: its number as digits (the matchers' rule) or a whole reference as
     written ('ALFA-1234', '123-456'). Such a debit is for that invoice: it never settles anything by its amount
     alone (it settles the invoice it names by its account or name: rivals)."""
-    return bool(_named(known, t)) or any(pattern.search(t.description) for pattern in refs)
+    return bool(_named(known, t)) or any(pattern.search(t.description) for pattern in refs.values())
 
 
 def _named(known: set[str], t: statements.Tx) -> set[str]:
@@ -982,7 +987,7 @@ def _settle_debits(L: Ledger, st: statements.Statement) -> list[str]:
             for t in debits
             if tx_key(t) not in used
             and len(left := fits_of[tx_key(t)] - settled) == 1
-            and ((k := next(iter(left)))[0] == "payment" or k[1] in rows or k[1] in bons)
+            and ((k := next(iter(left)))[0] == "payment" or (k[0] == "efactura" and (k[1] in rows or k[1] in bons)))
         ),
         None,
     ):

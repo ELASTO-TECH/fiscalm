@@ -731,6 +731,30 @@ def test_payment_rows_settle_whatever_the_order_of_debits_naming_them(ledger, ho
     assert sorted(recon.auto_mark_paid(ledger, _debit_st(*debits))) == sorted(rows)
 
 
+@pytest.mark.parametrize("case", ["partly paid", "a paid invoice named, the supplier's name too", "underscores"])
+def test_what_is_not_to_pay_in_full_or_named_paid_settles_nothing(ledger, home, sec, monkeypatch, case):
+    """Final re-check of #40: an invoice a credit note covers in part is never marked paid by an amount; a debit
+    naming a paid invoice (INV-1234-56, or INV_2026_0042) settles no other one, even by the supplier's name."""
+    _stored(
+        ledger,
+        monkeypatch,
+        **{
+            "3001": ubl(number="INV-1234", total="40.00", iban=""),
+            "3002": ubl(number="INV_2026_0042" if case == "underscores" else "INV-1234-56", total="40.00", iban=""),
+        },
+    )
+    ledger.db.execute("UPDATE efactura SET status='paid', paid_tx='x' WHERE message_id='3002'")
+    ledger.db.commit()
+    if case == "partly paid":
+        monkeypatch.setattr(efactura, "credited", lambda L, co: {"3001": Decimal("0.00")})
+        debit = _tx("40.00", date(2026, 10, 21), desc="Plata la POS SHOPX7K2")
+    elif case == "underscores":
+        debit = _tx("40.00", date(2026, 10, 21), desc="Plata INV_2026_0042")
+    else:
+        debit = _tx("40.00", date(2026, 10, 21), "CENTRUL MEDICAL", desc="Plata la POS CENTRUL MEDICAL INV-1234-56")
+    assert efactura.match_statement(ledger, _debit_st(debit)) == [] and ledger.efactura("3001")["status"] == "open"
+
+
 def test_a_direct_debit_with_the_shops_name_is_not_a_till_receipts_card_payment(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"3001": ubl(supplier="ALPHA ELECTRONIC SRL", total="99.90", iban="")})
     ledger.db.execute("UPDATE efactura SET status='paid', paid_tx='bon:sha-bon' WHERE message_id='3001'")
