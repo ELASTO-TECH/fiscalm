@@ -15,6 +15,7 @@ from fiscalm import companies, integrations, pack, recon
 from fiscalm.bank import banking_days, intake as statement_intake, statements, upload
 from fiscalm.ledger import finance_home
 from fiscalm.mail import imap as imapread, invoices as mail_invoices
+from fiscalm.pdftext import pdf_text
 
 ING = "RO00INGB0000000000000009"
 X1, X2, Y = "RO00XXXX0000000000000001", "RO00XXXX0000000000000002", "RO00YYYY0000000000000002"
@@ -567,6 +568,28 @@ def test_a_neighbour_is_what_is_stored_or_what_passes_its_own_checks(ledger, tmp
     )
     assert [r["status"] for r in results] == ["refused"] * 3
     assert "chain" in results[2]["errors"][0] and "period" in results[0]["errors"][0]
+
+
+@pytest.mark.parametrize("final,trusted", [("next page", True), ("missing", False)])
+def test_a_final_balance_after_a_page_break_still_proves_the_month(ledger, tmp_path, monkeypatch, final, trusted):
+    """The final balance alone on the next page, after the footer and the bank's info block, still closes the
+    account; a statement without one proves nothing. A statement stored before, read again, records its lines."""
+    nord, month = companies.get("NORD"), ("01/10/2026", "31/10/2026")
+    moves = [("05/10/2026", "P-1", Decimal("2000.00")), ("12/10/2026", "P-2", Decimal("-1000.00"))]
+    sections = [(c, i, Decimal("10000.00"), moves) for c, i in nord.ibans.items()]
+    pdf = bt_statement(tmp_path / "oct.pdf", nord.cui, month, sections, final=final)
+    st = statements.parse_text(pdf_text(statements.decrypt_to(pdf, tmp_path / "d", lambda co: "synthetic")[2]), "NORD")
+    assert [a.trustworthy for a in st.accounts] == [trusted, trusted]
+    real_trust = statements._pdf_trust
+    monkeypatch.setattr(
+        statements, "_pdf_trust", lambda accounts, *a: [setattr(x, "trustworthy", False) for x in accounts]
+    )
+    assert recon.ingest_files(ledger, [pdf], password_lookup=lambda co: "synthetic")[0]["status"] == "added"
+    assert not ledger.db.execute("SELECT 1 FROM statement_txs").fetchone()  # stored by an earlier version: no lines
+    monkeypatch.setattr(statements, "_pdf_trust", real_trust)
+    assert recon.ingest_files(ledger, [pdf], password_lookup=lambda co: "synthetic")[0]["status"] == "duplicate"
+    lines = ledger.db.execute("SELECT COUNT(*) FROM statement_txs").fetchone()[0]
+    assert lines == (4 if trusted else 0)
 
 
 @pytest.mark.parametrize(

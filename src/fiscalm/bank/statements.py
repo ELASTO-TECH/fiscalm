@@ -415,14 +415,16 @@ def parse_text(text: str, company: str) -> Statement:
 
     period_start, period_end, one_period = _pdf_period(text)
     section = serial = None  # a statement header's period (and a daily one's number) since the last account opened
+    carried = False  # after a page footer, until a header, an account or a table: the account's closing rows may come
 
     lines = text.splitlines()
     for i, ln in enumerate(lines):
         s = ln.strip()
-        if not in_table and (m := re.search(_HEADER, ln)):
-            section, serial = (parse_dmy(m.group(1)), parse_dmy(m.group(2))), None
-        elif not in_table and (m := re.search(_DAILY, ln)):
-            section, serial = (parse_dmy(m.group(2)),) * 2, int(m.group(1))
+        header = None if in_table else _section_header(ln)
+        if carried and (header or _opens_account(ln)):
+            carried = False  # another statement or account: the closing rows that follow are not this account's
+        if not in_table and header:
+            section, serial = header
         if _opens_account(ln):
             close()
             nxt = lines[i + 1] if i + 1 < len(lines) else ""
@@ -437,10 +439,16 @@ def parse_text(text: str, company: str) -> Statement:
         columns = _pdf_columns(ln)
         if columns is not None:
             debit_end, credit_end = columns
-            in_table = acct is not None
+            in_table, carried = acct is not None, False
             continue
         if s.startswith("BANCA TRANSILVANIA S.A."):
+            carried = carried or (in_table and id(acct) not in final)
             in_table = False  # page footer; current tx may continue on next page
+            continue
+        if carried and (row := _closing_row(ln)):  # the totals or final balance alone on the next page
+            close()
+            _carried_balance(acct, row, opening, final)
+            carried = row.group("title").strip() != "SOLD FINAL CONT"
             continue
         if not in_table or not s:
             continue
@@ -485,6 +493,40 @@ def parse_text(text: str, company: str) -> Statement:
     return Statement(
         company=company, period_start=period_start, period_end=period_end, accounts=accounts, one_period=one_period
     )
+
+
+def _section_header(line: str) -> tuple[tuple[date, date], int | None] | None:
+    """A statement header's period, and an older daily one's number."""
+    if m := re.search(_HEADER, line):
+        return (parse_dmy(m.group(1)), parse_dmy(m.group(2))), None
+    if m := re.search(_DAILY, line):
+        return (parse_dmy(m.group(2)),) * 2, int(m.group(1))
+    return None
+
+
+_CLOSING = re.compile(
+    rf"^\s*(?P<title>RULAJ TOTAL CONT|SOLD FINAL CONT)\s{{2,}}(?P<a1>{_AMT})(?:\s{{2,}}(?P<a2>{_AMT}))?\s*$"
+)
+
+
+def _closing_row(line: str) -> re.Match[str] | None:
+    """A row of an account's totals (two amounts) or final balance (one), nothing else on it: it may follow a page
+    break."""
+    row = _CLOSING.match(line)
+    return row if row and bool(row.group("a2")) == (row.group("title") == "RULAJ TOTAL CONT") else None
+
+
+def _carried_balance(acct: Account, row: re.Match[str], opening: dict, final: dict) -> None:
+    """A closing row read after a page break. Totals the bank printed already are never replaced: two that disagree
+    leave the account unproven and unbalanced for good (its totals and final balance are marked unknown, and nothing
+    later sets them)."""
+    if id(acct) in final and final[id(acct)] is None:
+        return
+    if row.group("title").strip() == "RULAJ TOTAL CONT" and acct.total_debit is not None:
+        if (acct.total_debit, acct.total_credit) != (parse_amount(row.group("a1")), parse_amount(row.group("a2"))):
+            final[id(acct)], acct.total_debit, acct.total_credit = None, None, None
+        return
+    _pdf_balance(acct, row, row.group("title").strip(), opening, final)
 
 
 def _pdf_columns(line: str) -> tuple[int, int] | None:
@@ -533,7 +575,7 @@ def _pdf_balance(
 ) -> None:
     if title.startswith("SOLD ANTERIOR") and acct.txs == [] and id(acct) not in opening:
         opening[id(acct)] = parse_amount(row.group("a1"))
-    if title.startswith("SOLD FINAL CONT"):
+    if title.startswith("SOLD FINAL CONT") and final.get(id(acct), 0) is not None:  # None: contradicted totals
         final[id(acct)] = parse_amount(row.group("a1"))
     if title.startswith("RULAJ TOTAL CONT") and row.group("a2"):
         acct.total_debit = parse_amount(row.group("a1"))
