@@ -985,13 +985,18 @@ PAID = "Lumen Ambient: plata de 240,00 RON a fost acceptata"
             False,
         ),
         ("a mail cut short", NETOPIA, "netopia-payments.com", PAID + " anulata?" * 300, "high", False),
+        ("undated, or fetched in part", NETOPIA, "netopia-payments.com", PAID, "high", False),
+        ("a subdomain not listed", NETOPIA, "receipts.netopia-payments.com", PAID, "high", False),
+        ("a grouped amount, apostrophe", NETOPIA, "netopia-payments.com", "Lumen Ambient: 1’240,00 RON", "high", False),
+        ("a refund", NETOPIA, "netopia-payments.com", "Lumen Ambient: -240,00 RON", "high", False),
     ],
 )
 def test_judge_settles_only_a_sure_unique_authenticated_mail(
     ledger, home, sec, monkeypatch, case, sender, domain, text, confidence, settled
 ):
+    complete = case != "undated, or fetched in part"
     _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
-    mail = _mail(sender, "Plata confirmata", text) | {"domain": domain}
+    mail = _mail(sender, "Plata confirmata", text) | {"domain": domain, "complete": complete}
     res, calls = _judge(ledger, [mail], ("3001", 0, confidence))
     row = ledger.efactura("3001")
     if settled:
@@ -1004,12 +1009,33 @@ def test_judge_settles_only_a_sure_unique_authenticated_mail(
     assert _judge(ledger, [mail], ("3001", 0, confidence))[1] == []  # the pair is never sent again
 
 
+@pytest.mark.parametrize("case", ["short name word", "credited twin"])
+def test_judge_settles_nothing_another_firm_or_balance_may_explain(ledger, home, sec, monkeypatch, case):
+    supplier = "Q7 AMBIENT SRL" if case == "short name word" else "LUMEN AMBIENT SRL"
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier=supplier, total="240.00", number="F-LUM 1")})
+    text = "Z9 Ambient: plata de 240,00 RON acceptata"  # names another firm sharing a word
+    if case == "credited twin":  # 300.00 less a 60.00 credit: 240.00 left of it too
+        storno = (
+            b"<cbc:Note>Storno factura seria TEST nr. 0002 din data 20/10/2026</cbc:Note><cbc:DocumentCurrencyCode>"
+        )
+        credit = ubl(supplier=supplier, number="COR 2", total="-60.00").replace(b"<cbc:DocumentCurrencyCode>", storno)
+        _stored(
+            ledger, monkeypatch, **{"3002": ubl(supplier=supplier, number="TEST 2", total="300.00"), "3003": credit}
+        )
+        text = PAID
+    mail = _mail(NETOPIA, "Plata confirmata", text) | {"domain": "netopia-payments.com", "complete": True}
+    assert _judge(ledger, [mail], ("3001", 0, "high"))[0]["settled"] == []
+    assert ledger.efactura("3001")["status"] == "open"
+
+
 def test_judge_records_a_mail_that_proves_nothing(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
     order = _mail("Lumen <shop@lumen.example>", "Comanda inregistrata", "Total de plata 240,00 RON la livrare")
     assert _judge(ledger, [order | {"firms": ["STUDIO9"]}])[1] == []  # another firm's mailbox: never read for NORD
     assert len(_judge(ledger, [order])[1]) == 1  # an answer with no decision for it: the next one reads it again
     assert len(_judge(ledger, [order], ("3001", 0, "none"), ("3001", 0, "high"))[1]) == 1  # two: not answered either
+    unsure = {"message_id": "3001", "paid": True, "confidence": "none", "mail_key": order["key"], "reason": "?"}
+    efactura.judge(ledger, ask=lambda p: {"decisions": [unsure]}, read=lambda q: [order])  # paid, but not at all sure
     res, calls = _judge(ledger, [order], ("3001", 0, "none"))
     assert len(calls) == 1 and res == {"invoices": 1, "settled": [], "review": []}
     assert ledger.efactura("3001")["status"] == "open" and not efactura.reviews(ledger, "NORD")
@@ -1020,7 +1046,10 @@ def test_judge_records_a_mail_that_proves_nothing(ledger, home, sec, monkeypatch
 def test_judge_leaves_a_mail_fitting_twin_invoices_to_a_person(ledger, home, sec, monkeypatch, approved):
     twins = {m: ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number=f"F-LUM {m}") for m in ("3001", "3002")}
     _stored(ledger, monkeypatch, **twins)
-    mail = _mail(NETOPIA, "Plata confirmata", "Lumen Ambient 240,00 RON") | {"domain": "netopia-payments.com"}
+    mail = _mail(NETOPIA, "Plata confirmata", "Lumen Ambient 240,00 RON") | {
+        "domain": "netopia-payments.com",
+        "complete": True,
+    }
     if approved:  # in the payment file, still to pay: a rival, though never settled by a mail
         efactura.approve(ledger, "3002", origin="person")
         assert _judge(ledger, [mail], ("3001", 0, "high"))[0]["settled"] == []
@@ -1039,7 +1068,10 @@ def test_two_judges_racing_settle_a_mail_once(ledger, home, sec, monkeypatch):
     from fiscalm.ledger import Ledger
 
     _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
-    mail = _mail(NETOPIA, "Plata confirmata", "Lumen Ambient 240,00 RON") | {"domain": "netopia-payments.com"}
+    mail = _mail(NETOPIA, "Plata confirmata", "Lumen Ambient 240,00 RON") | {
+        "domain": "netopia-payments.com",
+        "complete": True,
+    }
     decision = {"message_id": "3001", "paid": True, "confidence": "high", "mail_key": mail["key"], "reason": "plata"}
     gate, results = threading.Barrier(2), []
 

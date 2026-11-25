@@ -407,6 +407,7 @@ def test_texts_and_sent_are_read_only_searches(ledger, fake):
     assert [(m["key"], m["subject"], m["text"]) for m in got] == [
         ("imap:inv-1@cloud.example", "Plata primita", "Lumen 486,00 lei")
     ]
+    assert got[0]["complete"] and got[0]["firms"] == "all"  # fetched whole, dated: it may prove a payment
     account(ledger, fake, name="Second")  # the same mail seen through a second account is still one proof
     assert len(imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)) == 1
     assert fake.verbs() <= ALLOWED

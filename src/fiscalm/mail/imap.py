@@ -560,8 +560,15 @@ def authenticated_domain(msg, authserv: str) -> str:
     return domain if ok and domain else ""
 
 
-def _text_record(msg, mid: str, end: date, account: integrations.Instance) -> dict:
+def _text_record(msg, mid: str, end: date, account: integrations.Instance, size: int) -> dict:
+    """complete: the whole message was fetched, its subject not clipped and its Date readable (else the date is `end`,
+    a guess): only a complete mail can settle an invoice on its own."""
     authserv = RECEIVERS.get(str(account.config.get("host") or "").lower(), "")
+    subject = _plain(msg.get("Subject"))
+    try:
+        dated = email.utils.parsedate_to_datetime(str(msg.get("Date"))) is not None
+    except (TypeError, ValueError, IndexError, OverflowError):
+        dated = False
     return {
         "key": f"imap:{mid}",
         "sender": _plain(msg.get("From")),
@@ -570,6 +577,7 @@ def _text_record(msg, mid: str, end: date, account: integrations.Instance) -> di
         "text": _text(msg),
         "domain": authenticated_domain(msg, authserv),
         "firms": account.firm_scope,
+        "complete": size < TEXT_BYTES and len(subject) < TEXT_MAX and dated,
     }
 
 
@@ -609,7 +617,7 @@ def texts(L: Ledger, start: date, end: date, words: list[str], *, connect=None) 
                 mid = _message_id(msg.get("Message-ID")) or "sha256:" + hashlib.sha256(rec[1]).hexdigest()
                 if any(m["key"] == f"imap:{mid}" for m in out):
                     continue  # the same mail in two accounts is one mail: one proof, ever
-                out.append(_text_record(msg, mid, end, account))
+                out.append(_text_record(msg, mid, end, account, len(rec[1])))
         except (OSError, imaplib.IMAP4.error, ValueError, _OutOfTime, _TooLarge, ReadError):
             continue
         finally:

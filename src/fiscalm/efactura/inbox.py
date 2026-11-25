@@ -1168,7 +1168,8 @@ def evidence(L: Ledger, read=None) -> list[dict]:
                     "date": str(m["date"]),
                     "subject": m["subject"],
                     "text": m["text"][:MAIL_TEXT],
-                    "whole": len(m["text"]) <= MAIL_TEXT,  # a cut mail may hide another firm or a refund
+                    # a cut mail may hide another firm or a refund; an undated one, the day it came
+                    "whole": len(m["text"]) <= MAIL_TEXT and m.get("complete", False),
                     "domain": m.get("domain", ""),
                     "firms": m.get("firms", "all"),
                 }
@@ -1311,7 +1312,7 @@ def _coherent(ev: list[dict], decisions: list[dict]) -> list[dict]:
         for d in decisions
         if count[d["message_id"]] == 1
         and d["message_id"] in shown
-        and (not d["paid"] or d["mail_key"] in shown[d["message_id"]])
+        and (d["mail_key"] in shown[d["message_id"]] and d["confidence"] != "none" if d["paid"] else True)
     ]
 
 
@@ -1322,14 +1323,13 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], l
     otherwise the mail and every invoice of its mailbox's firms it fits wait for a person (set_review)."""
     mails = {(e["message_id"], m["key"]): m for e in ev for m in e["mails"]}
     paid = [d for d in decisions if d["paid"] and d["confidence"] in ("high", "medium") and _key(d) in mails]
-    # an approved invoice still to pay is a rival too, though only an open or marked one is settled
-    unpaid = _unpaid(L) + [r for r in L.efactura_rows(status="linked") if not r["parse_error"]]
+    unpaid, eligible = _rivals(L), {r["message_id"] for r in _unpaid(L)}
     settled, review = [], []
     for key in dict.fromkeys(d["mail_key"] for d in paid):
         named = [d for d in paid if d["mail_key"] == key]
         mail, one = mails[_key(named[0])], named[0]
         fits = [r for r in unpaid if _fits_mail(r, mail)]  # any firm's: a twin elsewhere is doubt too
-        if len(named) == 1 and _sure(one, fits, mail) and _settle(L, one):
+        if len(named) == 1 and one["message_id"] in eligible and _sure(one, fits, mail) and _settle(L, one):
             settled.append(one["message_id"])
         elif not _mail_used(L, key):
             ids = {d["message_id"] for d in named} | {
@@ -1337,6 +1337,17 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], l
             }
             review.append(set_review(L, mail, sorted(ids), one["reason"]))
     return settled, review
+
+
+def _rivals(L: Ledger) -> list:
+    """Every invoice a payment mail may be about, by what is left to pay of it: open, marked or proved by another mail
+    (net of credits and the user's links, as the statement matcher sees them) and approved ones. Only an open or
+    marked whole invoice is ever settled (confirm_by_mail); the others are doubt."""
+    out = [r for r in L.efactura_rows(status="linked") if not r["parse_error"]]
+    for co in companies.all(L):
+        _, rows, have, _ = _open_invoices(L, co)
+        out += [r | {"total": f"{Decimal(r['total']) - have.get(r['message_id'], Decimal(0)):.2f}"} for r in rows]
+    return out
 
 
 def _sure(d: dict, fits: list, mail: dict) -> bool:
@@ -1352,9 +1363,10 @@ def _sure(d: dict, fits: list, mail: dict) -> bool:
 
 
 def _names_supplier(r, mail: dict) -> bool:
-    """Every word of the supplier's name in the mail: one shared word ("SERVICES") names another firm as well."""
+    """Every word of the supplier's name but its legal form, short ones too ("Q7 AMBIENT"), in the mail: one shared
+    word names another firm as well."""
     words = set(_norm(mail["subject"] + " " + mail["text"]).split())
-    return set(name_words(r["supplier_name"])) <= words
+    return set(firm_core(r["supplier_name"])) <= words
 
 
 def _settle(L: Ledger, d: dict) -> bool:
@@ -1381,7 +1393,7 @@ def _fits_mail(r, mail: dict) -> bool:
 
 
 # An amount as written: digits, grouped by spaces, dots or commas or not, then two decimals ("1 240,00", "1,240.00").
-_MONEY = re.compile(r"(?<![\d.,])(\d{1,3}(?:[ \u00a0.,]\d{3})+|\d+)[.,](\d{2})(?![\d])")
+_MONEY = re.compile(r"(?<![\d.,'’])(\d{1,3}(?:[ \u00a0.,'’]\d{3})+|\d+)[.,](\d{2})(?![\d])")
 
 
 def _shows_total(text: str, total: str, currency: str) -> bool:
@@ -1390,6 +1402,8 @@ def _shows_total(text: str, total: str, currency: str) -> bool:
     for m in _MONEY.finditer(text):
         if Decimal(re.sub(r"\D", "", m.group(1)) + "." + m.group(2)) != Decimal(total):
             continue
+        if re.search(r"[\d+\-−]", text[max(0, m.start() - 3) : m.start()]):
+            continue  # a sign, or digits just before it: a refund, or part of a longer amount
         before, after = text[max(0, m.start() - 8) : m.start()], text[m.end() : m.end() + 8]
         if re.search(rf"\b(?:{cur})\s*$", before, re.I) or re.search(rf"^\s*(?:{cur})\b", after, re.I):
             return True
@@ -1399,8 +1413,7 @@ def _shows_total(text: str, total: str, currency: str) -> bool:
 def _trusted(mail: dict) -> bool:
     """The mailbox's provider authenticated the sender as a payment processor (imap.authenticated_domain). A supplier's
     own domain is not known to fiscalm, so its mails always wait for a person."""
-    domain = mail["domain"]
-    return any(domain == d or domain.endswith("." + d) for d in PROCESSOR_DOMAINS)
+    return mail["domain"] in PROCESSOR_DOMAINS
 
 
 def _review_key(mail_key: str) -> str:
