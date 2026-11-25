@@ -147,13 +147,15 @@ class StatementView:
         self.load(since)
         explained = self._lines[2]
         out = []
+        window = since.isoformat(), today.isoformat()
         for r in self._lines[1]:
-            if r["tx_key"] in explained or not since.isoformat() <= r["day"] <= today.isoformat():
+            others = [statements.Tx.from_dict(json.loads(x)) for x in json.loads(r["readings"] or "[]")]
+            days = [r["day"], *(t.date.isoformat() for t in others)]  # a later read may correct the booking date
+            if r["tx_key"] in explained or not any(window[0] <= d <= window[1] for d in days):
                 continue
             if not r["tx"]:
                 raise Refused(STATEMENTS)
-            readings = [r["tx"], *json.loads(r["readings"] or "[]")]  # every reading may name the payer
-            out += [statements.Tx.from_dict(json.loads(x)) for x in readings]
+            out += [statements.Tx.from_dict(json.loads(r["tx"])), *others]  # every reading may name the payer
         return out
 
     def load(self, since: date) -> None:

@@ -1740,16 +1740,18 @@ class Ledger:
         return [r for r in rows if r["tx_key"] not in hidden and r["day"] >= since]
 
     def credit_lines(self, company: str, since: str) -> list:
-        """Every credit on record for the company from `since` (an ISO day) on, each with its settled_tx reservation
+        """Every credit on record for the company from `since` (an ISO day) on, by any reading's date (a bank may
+        correct a booking date on a later read), each with its settled_tx reservation
         (`what`, or null), twins and conflicts included: the raw evidence of who may have paid, which account_lines
         narrows to one line per payment. Rows: tx_key, iban, day, amount, source, tx (statements.Tx as JSON, or null),
         readings (a JSON array of the line's other readings, statements.Tx JSON each) and what."""
         return self.db.execute(
             "SELECT t.tx_key, t.iban, t.day, t.amount, t.source, t.tx, s.what, (SELECT json_group_array(r.tx) "
             "FROM statement_tx_readings r WHERE r.tx_key=t.tx_key) AS readings FROM statement_txs t "
-            "LEFT JOIN settled_tx s ON s.tx_key=t.tx_key WHERE t.company=? AND t.direction='credit' AND t.day>=? "
+            "LEFT JOIN settled_tx s ON s.tx_key=t.tx_key WHERE t.company=? AND t.direction='credit' AND (t.day>=? "
+            "OR EXISTS (SELECT 1 FROM statement_tx_readings r WHERE r.tx_key=t.tx_key AND json_extract(r.tx,'$.date')>=?)) "
             "ORDER BY t.day, t.rowid",
-            (company, since),
+            (company, since, since),
         ).fetchall()
 
     @staticmethod

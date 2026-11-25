@@ -208,15 +208,17 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
     assert bool(r.tasks(L, "NORD", TODAY, rows)) is reminded
 
 
-@pytest.mark.parametrize("later", ["payer", "cui"])
+@pytest.mark.parametrize("later", ["payer", "cui", "corrected_day"])
 def test_a_later_reading_of_a_feed_line_is_kept_beside_the_first(reminder, later):
     # The feed keys a line by the bank's reference: a later read may name the payer, or carry the client's CUI in
     # new text. The stored line stays as first read; the reminder checks every reading.
     L, iid = reminder
-    first = _client_credit(L, iid, counterparty="", iban="", desc="Plata FACT TEST-42")
+    # corrected_day: first booked before the invoice's lookback, then on a day inside it.
+    day = date(2026, 10, 15) if later == "corrected_day" else date(2026, 11, 10)
+    first = _client_credit(L, iid, day=day, counterparty="", iban="", desc="Plata FACT TEST-42")
     cui = i.invoice(L, iid, company="NORD")["data"]["client"]["cui"]
-    kw = {} if later == "payer" else dict(counterparty="", iban="")
-    second = _client_credit(L, iid, desc="" if later == "payer" else f"Plata CUI {cui}", **kw)
+    kw = dict(counterparty="", iban="") if later == "cui" else {}
+    second = _client_credit(L, iid, desc=f"Plata CUI {cui}" if later == "cui" else "", **kw)
     first.ref = second.ref = "eb:ref-1"
     L.record_statement(_st(first))
     L.record_statement(_st(second))
