@@ -281,11 +281,11 @@ def test_a_file_downloaded_twice_stays_editable_and_imports_its_latest_download(
     with pytest.raises(PaymentFileError):  # the edit came after both downloads: import needs a new one
         pay.import_file(ledger, ident, "NORD", latest["download_id"], D0)
     a = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0)
-    pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0 + timedelta(days=1))
+    b = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0 + timedelta(days=1))
     again = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0)  # A, B, then A again
     assert state.payment_file_detail(ledger, ident)["downloads"][0]["id"] == again["download_id"] != a["download_id"]
     with pytest.raises(PaymentFileError):
-        pay.import_file(ledger, ident, "NORD", latest["download_id"], D0)
+        pay.import_file(ledger, ident, "NORD", b["download_id"], D0)
     assert pay.import_file(ledger, ident, "NORD", again["download_id"], D0)
     assert Path(ledger.payment_file(ident)["path"]).read_bytes() == again["data"]
 
