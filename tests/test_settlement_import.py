@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import zipfile
 from datetime import date, timedelta
 from decimal import Decimal
@@ -821,3 +822,41 @@ def test_an_unreadable_workbook_never_stops_the_mails_invoices(ledger, mail_acco
     mail.add_attachment(b"%PDF-1.4 synthetic", "application", "pdf", filename="factura.pdf")
     result = invoices.handle(ledger, imap.parse(mail_account["id"], bytes(mail), date.today()))
     assert result.startswith("settlement:unreadable:1,") and len(result.split(",")) == 2
+
+
+def test_mailed_report_read_with_a_changed_format_or_a_busy_ledger(ledger, mail_account, monkeypatch):
+    """Columns corrected while a mail is read: nothing is stored with the old reading. A ledger that can't write
+    raises, so the mail is read again later instead of being counted as an unreadable table."""
+    header = b"Factura;Ramburs;Comision;Ref\n"
+    described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+    bank_upload.accept_report(ledger, "NORD", header + b"T;1,00;0;R\n", "text/csv", description=described, **UPLOAD)
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    monkeypatch.setattr(bank_upload, "_mailed_date", lambda *args: UPLOAD["report_date"])
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<changed>"
+    mail.add_attachment(header + b"TEST-1;100,00;2,00;TEST-2\n", "text", "csv", filename="r.csv")
+    msg = imap.parse(mail_account["id"], bytes(mail), date.today())
+    original = bank_upload._report_spec
+
+    def corrected_meanwhile(*args):
+        other = Ledger()
+        try:
+            with other.tx() as db:
+                data = json.loads(db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])
+                data["mapping"]["reference"] = "Ref"
+                db.execute("UPDATE partner_settlement_formats SET data=?", (json.dumps(data),))
+        finally:
+            other.close()
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_report_spec", corrected_meanwhile)
+    assert settlement_from_mail(ledger, msg) == "settlement:refused:1" and len(settlements.state(ledger, "NORD")) == 1
+    monkeypatch.setattr(bank_upload, "_report_spec", original)
+
+    def busy(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(bank_upload.settlements, "import_payouts", busy)
+    with pytest.raises(sqlite3.OperationalError):
+        settlement_from_mail(ledger, msg)

@@ -82,6 +82,7 @@ COLLECTED = "Raportul de decontare a fost încărcat. Facturile din el sunt înc
 TO_CONFIRM = "Raportul de decontare a fost încărcat. Confirmă decontarea în Sarcini."
 WAITING = "Raportul de decontare a fost încărcat. Se asociază cu încasarea când plata apare în extras."
 DUPLICATE = "Raportul de decontare era deja încărcat."
+CHANGED = "Coloanele acestui partener s-au schimbat între timp. Încarcă din nou raportul."
 REVOKED = "Expeditorul sau căsuța de mail nu mai este acceptat pentru acest partener."
 SAID = (TO_CHECK, TO_CONFIRM, WAITING, COLLECTED)  # from least to most settled
 NOT_KNOWN = "Fișierul nu este un extras de cont sau un raport de decontare pe care fiscalm îl poate citi."
@@ -452,6 +453,16 @@ def _said(row) -> str:
     return WAITING if row["error"] in (None, "credit_missing_or_ambiguous") else TO_CHECK
 
 
+def _same_format(db, company: str, sig: str, described: dict) -> bool:
+    """The saved format is still the description the file was read with (its senders aside)."""
+    row = db.execute(
+        "SELECT data FROM partner_settlement_formats WHERE company=? AND partner=? AND signature=?",
+        (company, described["partner"], sig),
+    ).fetchone()
+    now = {k: v for k, v in json.loads(row["data"]).items() if k not in ("partner", "senders")} if row else None
+    return now == {k: v for k, v in described.items() if k not in ("partner", "senders")}
+
+
 def _store(
     L: Ledger, company: str, data: bytes, spec: dict, described: dict, sig: str, *, new: bool, still_allowed=None
 ) -> list[str] | dict:
@@ -459,6 +470,8 @@ def _store(
         with L.tx() as db:  # the payer is saved with its first report or not at all
             if still_allowed is not None and not still_allowed(db):
                 raise Refused(409, REVOKED)  # rechecked under the write lock: a person may have just changed it
+            if not new and not _same_format(db, company, sig, described):
+                raise Refused(409, CHANGED)  # the lines were read with a description a person has since changed
             if new:  # a saved format is used as it is now, never written back from what was read before
                 db.execute(  # the senders a person named stay: a description never carries them
                     "INSERT INTO partner_settlement_formats VALUES(?,?,?,?) "
@@ -587,6 +600,8 @@ def from_mail(L: Ledger, address: str, tables: tuple, firms, today: date | None 
     for attached in tables:
         try:
             result = _mailed_table(L, attached, formats, address, firms, today or date.today())
+        except sqlite3.Error:
+            raise  # the ledger, not the file: the mail is read again on the next run (mail.reader retries)
         except Exception:  # noqa: BLE001 - an attachment is untrusted: whatever it breaks, the mail's invoices are read
             result = "unreadable"
         counts[result] = counts.get(result, 0) + 1
