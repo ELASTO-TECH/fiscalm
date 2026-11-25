@@ -962,21 +962,26 @@ def _judge(ledger, mails, *decisions):
     return efactura.judge(ledger, ask=ask, read=lambda q: mails), calls
 
 
+PAID = "Lumen Ambient: plata de 240,00 RON a fost acceptata"
+
+
 @pytest.mark.parametrize(
-    "case, sender, domain, confidence, settled",
+    "case, sender, domain, text, confidence, settled",
     [
-        ("processor, authenticated", NETOPIA, "netopia-payments.com", "high", True),
-        ("supplier, authenticated", "Lumen <shop@lumen.example>", "lumen.example", "high", True),
-        ("display name only", "Lumen Ambient <attacker@example.invalid>", "", "high", False),
-        ("authenticated, not the supplier's", "Lumen Ambient <pay@other.example>", "other.example", "high", False),
-        ("the AI is unsure", NETOPIA, "netopia-payments.com", "medium", False),
+        ("processor, authenticated", NETOPIA, "netopia-payments.com", PAID, "high", True),
+        ("the supplier, authenticated", "Lumen <shop@lumen.example>", "lumen.example", PAID, "high", False),
+        ("display name only", "NETOPIA <attacker@example.invalid>", "", PAID, "high", False),
+        ("a look-alike domain", "NETOPIA <no@netopia-pay.example>", "netopia-pay.example", PAID, "high", False),
+        ("the AI is unsure", NETOPIA, "netopia-payments.com", PAID, "medium", False),
+        ("a longer amount", NETOPIA, "netopia-payments.com", "Lumen Ambient: 1240,00 RON acceptata", "high", False),
+        ("another currency", NETOPIA, "netopia-payments.com", "Lumen Ambient: 240,00 EUR acceptata", "high", False),
     ],
 )
 def test_judge_settles_only_a_sure_unique_authenticated_mail(
-    ledger, home, sec, monkeypatch, case, sender, domain, confidence, settled
+    ledger, home, sec, monkeypatch, case, sender, domain, text, confidence, settled
 ):
     _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
-    mail = _mail(sender, "Plata confirmata", "Lumen Ambient: plata de 240,00 RON a fost acceptata") | {"domain": domain}
+    mail = _mail(sender, "Plata confirmata", text) | {"domain": domain}
     res, calls = _judge(ledger, [mail], ("3001", 0, confidence))
     row = ledger.efactura("3001")
     if settled:
@@ -991,7 +996,9 @@ def test_judge_settles_only_a_sure_unique_authenticated_mail(
 def test_judge_records_a_mail_that_proves_nothing(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
     order = _mail("Lumen <shop@lumen.example>", "Comanda inregistrata", "Total de plata 240,00 RON la livrare")
-    res, calls = _judge(ledger, [order | {"domain": "lumen.example"}], ("3001", 0, "none"))
+    assert _judge(ledger, [order | {"firms": ["STUDIO9"]}])[1] == []  # another firm's mailbox: never read for NORD
+    assert len(_judge(ledger, [order])[1]) == 1  # an answer with no decision for it: the next one reads it again
+    res, calls = _judge(ledger, [order], ("3001", 0, "none"))
     assert len(calls) == 1 and res == {"invoices": 1, "settled": [], "review": []}
     assert ledger.efactura("3001")["status"] == "open" and not efactura.reviews(ledger, "NORD")
     assert _judge(ledger, [order], ("3001", 0, "none"))[1] == []
@@ -1002,7 +1009,7 @@ def test_judge_leaves_a_mail_fitting_twin_invoices_to_a_person(ledger, home, sec
     _stored(ledger, monkeypatch, **twins)
     mail = _mail(NETOPIA, "Plata confirmata", "Lumen Ambient 240,00 RON") | {"domain": "netopia-payments.com"}
     res, _ = _judge(ledger, [mail], ("3001", 0, "high"))
-    assert res["settled"] == [] and [r["message_ids"] for r in res["review"]] == [["3001", "3002"]]
+    assert res == {"invoices": 2, "settled": [], "review": [{"mail_key": mail["key"], "message_ids": ["3001", "3002"]}]}
     assert {ledger.efactura(m)["status"] for m in twins} == {"open"}
     assert efactura.confirm_by_mail(ledger, "3002", mail["key"], "mail: ales de utilizator")
     assert efactura.reviews(ledger, "NORD") == []  # the mail proved one: nothing left to review

@@ -542,23 +542,43 @@ def _text(msg) -> str:
     return re.sub(r"\s+", " ", raw).strip()
 
 
-def authenticated_domain(msg) -> str:
-    """The From domain when the receiving server's own verdict, the topmost Authentication-Results header, says DMARC
-    passed for exactly that domain; else "". Display names and lower headers are the sender's to write, never trusted."""
+# The receiving services whose own Authentication-Results fiscalm reads, by the IMAP host of the account: each removes
+# a header claiming its id from incoming mail (RFC 8601 section 5), so the one carrying its id is its own verdict.
+RECEIVERS = {"imap.gmail.com": "mx.google.com", "imap.googlemail.com": "mx.google.com"}
+
+
+def authenticated_domain(msg, authserv: str) -> str:
+    """The From domain when the receiving service `authserv` says DMARC passed for exactly that domain; else "".
+    Any other Authentication-Results header is the sender's to write, as is the display name: never trusted."""
     addresses = email.utils.getaddresses([str(msg.get("From") or "")])
-    results = msg.get_all("Authentication-Results") or []
-    if len(addresses) != 1 or not results:
+    own = [r for r in msg.get_all("Authentication-Results") or [] if str(r).split(";")[0].strip().lower() == authserv]
+    if not authserv or len(addresses) != 1 or not own:
         return ""
     domain = addresses[0][1].rpartition("@")[2].lower()
-    verdict = re.search(r"\bdmarc=(\w+)\b[^;]*?\bheader\.from=([\w.-]+)", str(results[0]), re.I)
+    verdict = re.search(r"\bdmarc=(\w+)\b[^;]*?\bheader\.from=([\w.-]+)", str(own[0]), re.I)
     ok = verdict and verdict.group(1).lower() == "pass" and verdict.group(2).lower() == domain
     return domain if ok and domain else ""
 
 
+def _text_record(msg, mid: str, end: date, account: integrations.Instance) -> dict:
+    authserv = RECEIVERS.get(str(account.config.get("host") or "").lower(), "")
+    return {
+        "key": f"imap:{mid}",
+        "sender": _plain(msg.get("From")),
+        "subject": _plain(msg.get("Subject")),
+        "date": date.fromisoformat(_date(msg, end)),
+        "text": _text(msg),
+        "domain": authenticated_domain(msg, authserv),
+        "firms": account.firm_scope,
+    }
+
+
 def texts(L: Ledger, start: date, end: date, words: list[str], *, connect=None) -> list[dict]:
     """Messages of the reading folders dated start..end whose text holds one of `words`, newest SEARCH_MAX per account,
-    as {"key", "sender", "subject", "date", "text", "domain"} (domain: authenticated_domain; key: imap:<Message-ID>, the same in every account, so a mail
-    reserved as one invoice's proof can't prove another through a copy). Read-only, bounded like read();
+    as {"key", "sender", "subject", "date", "text", "domain", "firms"} (key: imap:<Message-ID>, the same in every
+    account, so a mail reserved as one invoice's proof can't prove another through a copy; domain: authenticated_domain;
+    firms: the firm scope of the account it was read in, of the first account when several hold it).
+    Read-only, bounded like read();
     an account that can't be read is skipped. Untrusted content: callers look only for fixed phrases and amounts."""
     words = [w for w in words if w.isascii() and w.strip()]
     if not words:
@@ -589,16 +609,7 @@ def texts(L: Ledger, start: date, end: date, words: list[str], *, connect=None) 
                 mid = _message_id(msg.get("Message-ID")) or "sha256:" + hashlib.sha256(rec[1]).hexdigest()
                 if any(m["key"] == f"imap:{mid}" for m in out):
                     continue  # the same mail in two accounts is one mail: one proof, ever
-                out.append(
-                    {
-                        "key": f"imap:{mid}",
-                        "sender": _plain(msg.get("From")),
-                        "subject": _plain(msg.get("Subject")),
-                        "date": date.fromisoformat(_date(msg, end)),
-                        "text": _text(msg),
-                        "domain": authenticated_domain(msg),
-                    }
-                )
+                out.append(_text_record(msg, mid, end, account))
         except (OSError, imaplib.IMAP4.error, ValueError, _OutOfTime, _TooLarge, ReadError):
             continue
         finally:

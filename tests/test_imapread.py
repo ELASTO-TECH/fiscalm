@@ -418,15 +418,17 @@ def test_texts_and_sent_are_read_only_searches(ledger, fake):
         ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass (p=reject) header.from=pay.example"], "pay.example"),
         ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=other.example"], ""),
         ("Pay <no@pay.example>", ["mx.own.example; dmarc=fail header.from=pay.example"], ""),
-        # the sender's own Authentication-Results below the receiving server's verdict proves nothing
+        # a verdict under another service's name is the sender's to write
+        ("Pay <no@pay.example>", ["mx.forged.example; dmarc=pass header.from=pay.example"], ""),
         ("Pay <no@pay.example>", ["mx.own.example; dmarc=none", "x; dmarc=pass header.from=pay.example"], ""),
         ("Pay <no@pay.example>", [], ""),
         ("a@pay.example, b@pay.example", ["mx.own.example; dmarc=pass header.from=pay.example"], ""),
     ],
 )
-def test_only_the_receiving_servers_dmarc_pass_authenticates_a_sender(sender, results, domain):
+def test_only_the_mailbox_providers_dmarc_pass_authenticates_a_sender(sender, results, domain):
     msg = EmailMessage()
     msg["From"] = sender
     for r in results:
         msg["Authentication-Results"] = r
-    assert imapread.authenticated_domain(msg) == domain
+    assert imapread.authenticated_domain(msg, "mx.own.example") == domain
+    assert imapread.authenticated_domain(msg, "") == ""  # a provider fiscalm doesn't know: never authenticated

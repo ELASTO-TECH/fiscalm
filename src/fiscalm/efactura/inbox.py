@@ -1104,6 +1104,19 @@ PROCESSORS = (
     "plationline",
     "emag",
 )
+# The domains those processors send from: only a mail one of them authenticated settles an invoice on its own.
+PROCESSOR_DOMAINS = (
+    "payu.ro",
+    "netopia-payments.com",
+    "mobilpay.ro",
+    "euplatesc.ro",
+    "stripe.com",
+    "librapay.ro",
+    "paypal.com",
+    "twispay.com",
+    "plationline.ro",
+    "emag.ro",
+)
 # Marketplace sellers can issue the invoice weeks after the order was paid (Mobilier Exemplu: 19 days).
 MAIL_DAYS_BEFORE, MAIL_DAYS_AFTER = 30, 30
 MAIL_TEXT = 2000  # characters of each mail shown to the thread
@@ -1135,8 +1148,8 @@ def evidence(L: Ledger, read=None) -> list[dict]:
         for m in found:
             if L.get_meta(_judged_key(r["message_id"], m["key"])):
                 continue
-            if imapread.is_own_sender(m["sender"], L):
-                continue
+            if imapread.is_own_sender(m["sender"], L) or not _covers(m.get("firms", "all"), r["company"]):
+                continue  # our own mail, or read in a mailbox kept for other firms
             by = _sent_by(words, m["sender"], m["subject"] + " " + m["text"])
             body = f" {_norm(m['subject'] + ' ' + m['text'])} "
             # Only mails about this purchase: its amount or invoice number, or a payment processor's.
@@ -1155,6 +1168,7 @@ def evidence(L: Ledger, read=None) -> list[dict]:
                     "subject": m["subject"],
                     "text": m["text"][:MAIL_TEXT],
                     "domain": m.get("domain", ""),
+                    "firms": m.get("firms", "all"),
                 }
             )
         mails.sort(key=lambda m: abs((date.fromisoformat(m["date"]) - issued).days))  # closest to the invoice first
@@ -1176,6 +1190,10 @@ def evidence(L: Ledger, read=None) -> list[dict]:
                 | {"mails": mails[:MAILS_PER_INVOICE]}
             )
     return out
+
+
+def _covers(firms: str | list[str], company: str) -> bool:
+    return firms == "all" or company in firms
 
 
 def _unpaid(L: Ledger) -> list:
@@ -1255,27 +1273,36 @@ confidence: "high" only when the mail plainly confirms this payment and supplier
 
 
 def judge(L: Ledger, ask: Callable | None = None, read: Callable | None = None) -> dict:
-    """One AI reading of the payment mails of unpaid invoices, then the engine's decision (`_act`). Every mail shown
-    is recorded as read for its invoice once the whole answer fits the schema, so it is never sent again."""
+    """One AI reading of the payment mails of unpaid invoices, then the engine's decision (`_act`). Once the whole
+    answer fits the schema, the mails of every invoice it answered are recorded as read for it: never sent again."""
     if ask is None and not ai.available(L):
         return {"invoices": 0, "settled": [], "review": [], "skipped": "no AI provider"}
     ev = evidence(L, read=read)
     if not ev:
         return {"invoices": 0, "settled": [], "review": []}
-    data = json.dumps(ev, ensure_ascii=False, default=str)
+    shown = [e | {"mails": [{k: v for k, v in m.items() if k != "firms"} for m in e["mails"]]} for e in ev]
+    data = json.dumps(shown, ensure_ascii=False, default=str)
     answer = ask(JUDGE_PROMPT + data) if ask else ai.ask_json(L, JUDGE_PROMPT, data, JUDGE_SCHEMA)
     ai.check(answer, JUDGE_SCHEMA)
-    acted = _act(L, ev, answer["decisions"])
-    for e in ev:  # after acting: a run stopped halfway reads the same mails again
-        judged(L, e["message_id"], [m["key"] for m in e["mails"]])
-    return {"invoices": len(ev)} | acted
+    with L.tx():  # every unpaid invoice read and every proof written in one view: no rival appears in between
+        settled, review = _act(L, ev, answer["decisions"])
+    answered = {d["message_id"] for d in answer["decisions"]}
+    for e in ev:  # after acting, and only what the AI answered: the rest is read again next time
+        if e["message_id"] in answered:
+            judged(L, e["message_id"], [m["key"] for m in e["mails"]])
+    # ids only: mail text and the AI's words stay in the ledger, never in the command's output
+    return {
+        "invoices": len(ev),
+        "settled": settled,
+        "review": [{k: r[k] for k in ("mail_key", "message_ids")} for r in review],
+    }
 
 
-def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> dict:
+def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], list[dict]]:
     """A paid decision names one of the mails shown for its invoice, else it is dropped. Its mail settles that invoice
     only when the AI is sure ("high"), names no other invoice with it, the engine finds that invoice alone fits the
-    mail (_fits_mail) and the receiving server authenticated a sender domain of the supplier or a payment processor;
-    otherwise the mail and every invoice it fits wait for a person (set_review)."""
+    mail (_fits_mail) and the mailbox's own provider authenticated a payment processor's domain (_trusted);
+    otherwise the mail and every invoice of its mailbox's firms it fits wait for a person (set_review)."""
     mails = {(e["message_id"], m["key"]): m for e in ev for m in e["mails"]}
     paid = [d for d in decisions if d["paid"] and d["confidence"] in ("high", "medium") and _key(d) in mails]
     unpaid = _unpaid(L)
@@ -1283,20 +1310,23 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> dict:
     for key in dict.fromkeys(d["mail_key"] for d in paid):
         named = [d for d in paid if d["mail_key"] == key]
         mail = mails[_key(named[0])]
-        fits = [r for r in unpaid if _fits_mail(r, mail)]
+        fits = [r for r in unpaid if _fits_mail(r, mail)]  # any firm's: a twin elsewhere is doubt too
         one = named[0]
         sure = (
             len(named) == 1 and one["confidence"] == "high" and [r["message_id"] for r in fits] == [one["message_id"]]
         )
-        if sure and _trusted(fits[0], mail) and _settle(L, one):
+        if sure and _trusted(mail) and _settle(L, one):
             settled.append(one["message_id"])
         elif not _mail_used(L, key):
-            ids = sorted({d["message_id"] for d in named} | {r["message_id"] for r in fits})
-            review.append(set_review(L, mail, ids, one["reason"]))
-    return {"settled": settled, "review": review}
+            ids = {d["message_id"] for d in named} | {
+                r["message_id"] for r in fits if _covers(mail["firms"], r["company"])
+            }
+            review.append(set_review(L, mail, sorted(ids), one["reason"]))
+    return settled, review
 
 
 def _settle(L: Ledger, d: dict) -> bool:
+    """The proof and its record in one transaction (_act's): a stop between them would hide the mail, settle nothing."""
     judged(L, d["message_id"], [d["mail_key"]])  # the proof's record (ledger _PROOFS)
     return confirm_by_mail(L, d["message_id"], d["mail_key"], f"mail: {d['reason']}")
 
@@ -1307,21 +1337,31 @@ def _key(d: dict) -> tuple[str, str]:
 
 def _fits_mail(r, mail: dict) -> bool:
     """The mail is about this invoice by fiscalm's own reading: sent by its supplier or a processor naming it, dated in
-    the invoice's window and showing its exact total."""
+    the invoice's window and showing its exact total in its currency (_shows_total)."""
     issued, sent = date.fromisoformat(r["issue_date"]), date.fromisoformat(mail["date"])
     text = mail["subject"] + " " + mail["text"]
     return (
         issued - timedelta(days=MAIL_DAYS_BEFORE) <= sent <= issued + timedelta(days=MAIL_DAYS_AFTER)
         and bool(_sent_by(name_words(r["supplier_name"]), mail["from"], text))
-        and any(a in _flat(text) for a in _amount_texts(r["total"]))
+        and _shows_total(_flat(text), r["total"], r["currency"] or "RON")
     )
 
 
-def _trusted(r, mail: dict) -> bool:
-    """The authenticated sender domain is the supplier's (a word of its name) or a payment processor's."""
-    labels = set(re.split(r"[.-]", mail["domain"]))
-    words = {w.lower() for w in name_words(r["supplier_name"])}
-    return bool(mail["domain"]) and bool(labels & (words | set(PROCESSORS)))
+def _shows_total(text: str, total: str, currency: str) -> bool:
+    """The whole amount (not a part of 1240,00) written next to the invoice's currency (lei for RON)."""
+    cur = "RON|LEI|LEU" if currency == "RON" else re.escape(currency)
+    for a in _amount_texts(total):
+        num = rf"(?<![\d.,]){re.escape(a)}(?![.,]?\d)"
+        if re.search(rf"\b(?:{cur})\b\s*{num}|{num}\s*(?:{cur})\b", text, re.I):
+            return True
+    return False
+
+
+def _trusted(mail: dict) -> bool:
+    """The mailbox's provider authenticated the sender as a payment processor (imap.authenticated_domain). A supplier's
+    own domain is not known to fiscalm, so its mails always wait for a person."""
+    domain = mail["domain"]
+    return any(domain == d or domain.endswith("." + d) for d in PROCESSOR_DOMAINS)
 
 
 def _review_key(mail_key: str) -> str:
