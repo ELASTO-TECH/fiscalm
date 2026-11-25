@@ -559,15 +559,39 @@ def authenticated_domain(msg, authserv: str) -> str:
     local, at, domain = addresses[0][1].rpartition("@")
     if not (local and at and re.fullmatch(r"[a-z0-9.-]+", domain := domain.lower())):
         return ""
-    plain, prev = re.sub(r'"(?:[^"\\]|\\.)*"', " ", str(own[0])), ""
-    while plain != prev:  # nested comments, innermost first
-        plain, prev = re.sub(r"\([^()]*\)", " ", plain), plain
-    clauses = [c.split() for c in plain.split(";")[1:]]
-    dmarc = [c for c in clauses if c and c[0].lower().startswith("dmarc=")]
-    if "(" in plain or ")" in plain or len(dmarc) != 1 or dmarc[0][0].lower() != "dmarc=pass":
+    clauses = _clauses(str(own[0]))
+    dmarc = [c for c in clauses or [] if c and c[0].startswith("dmarc=")]
+    if not dmarc or len(dmarc) != 1 or dmarc[0][0] != "dmarc=pass":
         return ""
-    senders = [w.lower().removeprefix("header.from=") for w in dmarc[0][1:] if w.lower().startswith("header.from=")]
+    senders = [w.removeprefix("header.from=") for w in dmarc[0][1:] if w.startswith("header.from=")]
     return domain if senders == [domain] else ""
+
+
+def _clauses(header: str) -> list[list[str]] | None:
+    """The results of an Authentication-Results header after its authserv-id, each as lowercase tokens: comments (nested,
+    with escapes) and quoted strings read in one pass and dropped, spaces around "=" and "." closed (RFC 8601 2.2).
+    None when the syntax doesn't close: nothing is read from it."""
+    out, depth, quoted, escaped = [], 0, False, False
+    for ch in header:
+        if escaped:
+            escaped = False
+        elif ch == "\\" and (depth or quoted):
+            escaped = True
+        elif quoted:
+            quoted = ch != '"'
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if not depth:
+                return None
+            depth -= 1
+        elif not depth:
+            quoted = ch == '"'
+            out.append(" " if quoted else ch)
+    if depth or quoted or escaped:
+        return None
+    text = re.sub(r"\s*([=.])\s*", r"\1", "".join(out).lower())
+    return [c.split() for c in text.split(";")[1:]]
 
 
 def _bodies(part) -> int:
