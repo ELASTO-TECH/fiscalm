@@ -11,9 +11,9 @@ Every attachment imapread hands over (a PDF or an XML by its bytes) is judged by
 - asked (Sarcini, one question with the answers to pick): no firm and no remembered sender, two firms, a sender tied to
   another firm than the document names, several totals or none.
 
-Nothing here guesses: a document in doubt waits for the user (AGENTS.md rules 2 and 3). The AI integration, when
-configured, only narrows several totals to one, and its answer counts only when it is one of the totals the rules
-found. Mail content is untrusted: no link is followed, no name becomes a path (files are named by their SHA-256), XML
+Nothing here guesses: a document in doubt waits for the user (AGENTS.md rules 2 and 3). When the rules can't settle a
+PDF, the AI integration, when configured, reads it once (ai_reading); its checked answer completes the rules' reading
+and never overrules it. Mail content is untrusted: no link is followed, no name becomes a path (files are named by their SHA-256), XML
 is parsed with DTDs refused, PDFs are read by pdftotext with a time and memory limit.
 """
 
@@ -30,17 +30,17 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Callable, Collection
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 
-from fiscalm import accountant, ai, companies, docs, integrations, recon
+from fiscalm import accountant, ai, ai_extract, companies, docs, integrations, recon
 from fiscalm.bank import catalogue as banks, statements
 from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import Ledger, finance_home, now
 from fiscalm.mail import imap as imapread, reader
-from fiscalm.pdftext import PDFTOTEXT, _preview_limits
+from fiscalm.pdftext import PDFTOTEXT, _preview_limits, first_page_png
 from fiscalm.storage import read_file
 
 PAGES = 10  # pages of a PDF read: an invoice's total is on its first pages
@@ -113,7 +113,6 @@ DELIVERY = re.compile(
 PARTY_END = re.compile(r"^\s*(?:description|quantity|qty|item|payment terms|thank you)\b", re.I)
 COLUMN_TEXT = re.compile(r"\S+(?:[ \t]\S+)*")
 ABOVE = 4
-_AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[ .,' ]\d{3})+|\d+)([.,]\d{2})(?![\d])")
 
 _SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP", "lei": "RON"}
 _CUR = re.compile(r"(?<![A-Za-z])(" + "|".join(docs.CURRENCIES) + r")(?![A-Za-z])|€|£|\$|\blei\b", re.I)
@@ -171,13 +170,6 @@ def document_type(data: bytes, text: str = "", *, accepted: bool = False) -> str
     return "invoice" if inv.doc_type == "invoice" else "receipt"
 
 
-def _money(whole: str, cents: str) -> Decimal | None:
-    try:
-        return Decimal(re.sub(r"[ .,' ]", "", whole) + "." + cents[1:])
-    except InvalidOperation:
-        return None
-
-
 def _currency(token: str) -> str:
     return _SYMBOLS.get(token.lower() if token.lower() == "lei" else token, token.upper())
 
@@ -210,8 +202,8 @@ def totals(text: str) -> list[tuple[str, str]]:
         curs = {_currency(c.group(0)) for c in _CUR.finditer(line)}
         if len(curs) > 1:
             continue
-        for m in _AMOUNT.finditer(line):
-            v = _money(m.group(1), m.group(2))
+        for m in ai_extract.AMOUNT.finditer(line):
+            v = ai_extract.money(m.group(1), m.group(2))
             if v:
                 out.add((-v if _negative(line, m) else v, next(iter(curs)) if curs else only))
     return [(f"{v:.2f}", c) for v, c in sorted(out, key=lambda x: (-x[0], x[1]))]
@@ -632,7 +624,7 @@ def buyer_firm(doc: Doc, firms: list[str]) -> str:
     return firms[0] if len(firms) == 1 and doc.roles.get(firms[0]) == "buyer" else ""
 
 
-def decide(L: Ledger, doc: Doc, address: str, *, ask=None) -> Outcome:
+def decide(L: Ledger, doc: Doc, address: str) -> Outcome:
     if doc.refused:
         return Outcome(doc.refused)
     known, remembered = sender_firm(L, address)
@@ -644,7 +636,7 @@ def decide(L: Ledger, doc: Doc, address: str, *, ask=None) -> Outcome:
             return Outcome("issued")  # the firm sold it: not a purchase
     if remembered and remembered not in companies.all(L):
         remembered = None
-    total = pdf_total(L, doc, ask=ask)
+    total = doc.totals[0] if len(doc.totals) == 1 else None
     if len(firms) == 1 and not buyer_firm(doc, firms) and remembered != firms[0]:
         # Named, but not clearly as the buyer, and no answer about its sender says it is: asked.
         return Outcome("asked", reason="buyer-unclear", total=total, choices=firms)
@@ -818,6 +810,78 @@ def ask_user(L: Ledger, msg: imapread.Message, att: imapread.Attachment, doc: Do
         return cur.rowcount > 0
 
 
+# ------------------------------------------------------------------ the AI reading
+
+UNSURE = ("no-firm", "buyer-unclear", "two-firms", "total")  # questions an AI reading may answer
+
+
+def _unsure(doc: Doc, out: Outcome) -> bool:
+    return doc.kind == "pdf" and (out.result == "unreadable" or out.result == "asked" and out.reason in UNSURE)
+
+
+def _ai_refusal(L: Ledger, x: ai_extract.Extraction, *, allow_ro_supplier: bool) -> str:
+    if x.doc_type in ("proforma", "other"):
+        return {"proforma": "proforma", "other": "not-invoice"}[x.doc_type]
+    if x.doc_type == "credit_note":
+        return "credit-note"
+    if x.seller:
+        return "issued"
+    return "efactura" if not allow_ro_supplier and ai_extract.ro_seller(x, companies.all(L).values()) else ""
+
+
+def _agreed_totals(doc: Doc, x: ai_extract.Extraction) -> list[tuple[str, str]] | None:
+    """The totals with the AI's reading: the rules' own when it read none; else its total when it is one of theirs or,
+    when they found none, printed in a currency the document shows (any, when it shows none). None: they disagree."""
+    if not x.total:
+        return doc.totals
+    if doc.totals:
+        picked = [t for t in doc.totals if t[0] == x.total and t[1] in (x.currency, "")]
+        return picked if len(picked) == 1 else None
+    shown = {_currency(m.group(0)) for m in _CUR.finditer(doc.text)}
+    return [(x.total, x.currency)] if x.currency and (not shown or x.currency in shown) else None
+
+
+def ai_reading(
+    L: Ledger, doc: Doc, data: bytes, *, ask: Callable | None = None, allow_ro_supplier: bool = False
+) -> Doc | None:
+    """The document as the rules read it, completed by one checked AI reading (fiscalm.ai_extract) of its text, or of
+    its first page's picture when it has no text. None without an AI integration or a usable answer.
+
+    The AI never overrules the rules: a firm the rules found must include its buyer, a total they found must include
+    its total. A confident reading adds the buyer's role, the total, and refusals (a proforma, a credit note, one of the
+    firms as seller, a Romanian seller); a low confidence fills only the number, the date and the supplier's name, so
+    the question shows them."""
+    image = None
+    if not doc.text.strip():
+        png = first_page_png(data) if data.startswith(b"%PDF-") else None
+        if png is None:
+            return None
+        image = ("image/png", png)
+    x = ai_extract.extract(L, list(companies.all(L)), text=doc.text, image=image, ask=ask)
+    if x is None:
+        return None
+    out = replace(
+        doc,
+        number=doc.number or x.number,
+        date=doc.date or x.issue_date,
+        supplier=doc.supplier or x.seller_name,
+        card_last4=doc.card_last4 or x.card_last4,
+    )
+    if not x.confident:
+        return out
+    out.refused = _ai_refusal(L, x, allow_ro_supplier=allow_ro_supplier)
+    totals = _agreed_totals(doc, x)
+    if out.refused or totals is None:  # a refusal stands; a total the rules contradict leaves the question open
+        return out
+    out.totals = totals
+    if x.buyer and (not doc.firms or x.buyer in doc.firms):
+        out.firms = doc.firms or [x.buyer]
+        out.roles = doc.roles | {x.buyer: "buyer"}
+    if not doc.text.strip():
+        out.fiscal_type = "invoice" if x.doc_type == "invoice" else "receipt"
+    return out
+
+
 # ------------------------------------------------------------------ one message, the tick
 
 
@@ -883,7 +947,10 @@ def handle(L: Ledger, msg: imapread.Message, *, ask=None) -> str:
         if pre is not None and pre.refused == "same-as-pdf":
             result = "same-as-pdf"
         else:
-            out = scoped_outcome(L, msg.account, doc, decide(L, doc, msg.address, ask=ask))
+            out = decide(L, doc, msg.address)
+            if _unsure(doc, out) and (read := ai_reading(L, doc, att.data, ask=ask)):
+                doc, out = read, decide(L, read, msg.address)
+            out = scoped_outcome(L, msg.account, doc, out)
             if out.result == "filed":
                 result = "filed" if file_document(L, msg, att, doc, out.company, out.total) else "duplicate"
             elif out.result == "asked":
