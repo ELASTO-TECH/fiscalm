@@ -53,6 +53,15 @@ USER = "user:"
 # An e-Factura row the user marked paid ("Marchează ca plătită", `efactura mark-paid` without a mail): paid in
 # their word, but not confirmed until a statement debit or a payment mail proves it.
 USER_MARKED = f"status='paid' AND paid_tx IS NULL AND paid_note LIKE '{USER}%'"
+# Proved paid by a payment mail, as _PROOFS reads it: `ef-proof:<mail key>` reserved for this invoice, and that mail
+# read for it (judged); its payment-file row, if any, not paid by a debit already. Its bank debit, when the statement
+# brings it, takes the mail's place as the proof; the mail stays reserved for this invoice, so it never proves another.
+MAIL_PROVED = (
+    "status='paid' AND substr(paid_tx,1,9)='ef-proof:' AND length(paid_tx)>9 AND NOT EXISTS (SELECT 1 FROM payments "
+    "p WHERE p.item_id=efactura.item_id AND p.status='paid') AND EXISTS (SELECT 1 FROM settled_tx s WHERE "
+    "s.tx_key=efactura.paid_tx AND s.what='efactura ' || efactura.message_id) AND EXISTS (SELECT 1 FROM meta m "
+    "WHERE m.key='ef-judged:' || efactura.message_id || ':' || substr(efactura.paid_tx, 10))"
+)
 
 
 # The display name of the account recorded as having done something (`by_name`), never its id; "" for none or the CLI.
@@ -1768,8 +1777,9 @@ class Ledger:
         how: tuple[str, str] | None = None,
     ) -> bool:
         """Open or skipped -> paid; a row the user marked paid (still unconfirmed) takes the proof (a debit or a mail),
-        never a second the user mark. `how`: the person's (paid_method, paid_detail), checked by efactura.paid_method;
-        a fact kept on the row, never proof. A proof closing a marked row keeps how the person said they paid."""
+        never a second the user mark; a row a mail proved (MAIL_PROVED) takes its statement debit. `how`: the person's
+        (paid_method, paid_detail), checked by efactura.paid_method; a fact kept on the row, never proof. A proof
+        closing a marked row keeps how the person said they paid."""
         note = audit.note(note)
         method, detail = how or (None, None)
         with self.tx() as db:
@@ -1780,9 +1790,11 @@ class Ledger:
             cur = db.execute(
                 "UPDATE efactura SET status='paid', paid_at=?, paid_note=?, paid_tx=?, "
                 "paid_method=COALESCE(?,paid_method), paid_detail=COALESCE(?,paid_detail) WHERE message_id=? "
-                f"AND (status IN ('open','skipped') OR ({USER_MARKED} AND ? NOT LIKE '{USER}%')) "
+                f"AND (status IN ('open','skipped') OR ({USER_MARKED} AND ? NOT LIKE '{USER}%') OR ({MAIL_PROVED} "
+                "AND EXISTS (SELECT 1 FROM statement_txs t WHERE t.tx_key=? AND t.company=efactura.company "
+                "AND t.direction='debit'))) "  # only this firm's recorded debit replaces a mail
                 f"AND (? IS NULL OR {unlinked('efactura')})",  # a proof never closes one paid in part
-                (now(), note, tx, method, detail, message_id, note, tx),
+                (now(), note, tx, method, detail, message_id, note, tx, tx),
             )
             if cur.rowcount and tx and not tx.startswith(("bon:", "ef-proof:")) and to_iban:
                 db.execute(

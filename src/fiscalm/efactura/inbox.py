@@ -36,7 +36,7 @@ from fiscalm.bank import catalogue as banks, statements
 from fiscalm.efactura import client as anaf, partners as partner_anaf
 from fiscalm.efactura.credits import blocking_issues, credited, net_invoices
 from fiscalm.identity import partner_id, tax_token
-from fiscalm.ledger import BON_PAID, USER_MARKED, Ledger, covered, finance_home, now, unlinked, user_note
+from fiscalm.ledger import BON_PAID, MAIL_PROVED, USER_MARKED, Ledger, covered, finance_home, now, unlinked, user_note
 from fiscalm.mail import imap as imapread
 from fiscalm.payments import engine as pay
 from fiscalm.payments.orders import PaymentItem
@@ -78,10 +78,24 @@ OPEN = "open"
 
 def awaiting(L: Ledger, company: str | None = None) -> list:
     """Invoices the user marked paid that no statement debit or mail has confirmed yet (ledger.USER_MARKED)."""
-    q, args = f"SELECT * FROM efactura WHERE {USER_MARKED}", []
+    return net_invoices(L, _marked(L, company))
+
+
+def _marked(L: Ledger, company: str | None = None, *, proved: bool = False) -> list:
+    """awaiting's rows whole, for a reader that nets the credits itself (once); `proved`: mail_proved's too, in the
+    same read."""
+    also = f" OR ({MAIL_PROVED} AND parse_error IS NULL)" if proved else ""
+    q, args = f"SELECT * FROM efactura WHERE ({USER_MARKED}{also})", []
     if company:
         q, args = q + " AND company=?", [company]
-    return net_invoices(L, L.db.execute(q + " ORDER BY paid_at DESC, message_id", args).fetchall())
+    return L.db.execute(q + " ORDER BY paid_at DESC, message_id", args).fetchall()
+
+
+def mail_proved(L: Ledger, company: str) -> list:
+    """Invoices a payment mail proved paid whose bank debit hasn't been seen yet (ledger.MAIL_PROVED): a debit
+    that fits one confirms it in the mail's place, so it is never left unexplained nor taken by another invoice."""
+    q = f"SELECT * FROM efactura WHERE {MAIL_PROVED} AND company=? AND parse_error IS NULL ORDER BY message_id"
+    return L.db.execute(q, (company,)).fetchall()  # whole rows: their readers net the credits once
 
 
 def bon_paid(L: Ledger, company: str) -> list:
@@ -700,7 +714,12 @@ def _named_only(L: Ledger, company: str) -> Callable[[statements.Tx, set], bool]
     supplier: it settles nothing and waits for the user (note_ambiguous), whose answer remembers the name."""
     rows = {
         r["message_id"]: r
-        for r in [*L.efactura_rows(status=OPEN, company=company), *awaiting(L, company), *bon_paid(L, company)]
+        for r in [
+            *L.efactura_rows(status=OPEN, company=company),
+            *awaiting(L, company),
+            *net_invoices(L, mail_proved(L, company)),
+            *bon_paid(L, company),
+        ]
     }  # a bon's card debit is found by name too
     known = statement_partner(L, company)
 
@@ -784,8 +803,8 @@ def payment_number(p) -> str:
 
 def rivals(L: Ledger, company: str):
     """The one ambiguity rule both statement matchers share (match_statement here, recon.auto_mark_paid):
-    rivals(t) is every candidate a debit fits, across the open and marked e-Factura invoices (withdrawn marks
-    too), the payment rows still to pay, and the invoices paid at the till for a card debit (bon_paid); a debit that
+    rivals(t) is every candidate a debit fits, across the open, marked (withdrawn marks too) and mail-proved
+    e-Factura invoices (mail_proved), the payment rows still to pay, and the invoices paid at the till for a card debit (bon_paid); a debit that
     names known invoice numbers keeps only those it names.
     A debit with more than one rival left settles nothing. Keys: ("efactura", message_id) / ("payment", item_id) /
     ("history", "history:<sha>"): an invoice from before the firm's start (fiscalm.history), a rival never settled;
@@ -840,9 +859,11 @@ def _reference(number: str | None) -> str:
 
 
 def _open_invoices(L: Ledger, company: str):
-    """The received invoices still to pay in full (open or marked), and what rivals needs to see the rest."""
+    """The received invoices whose debit is still to come (open, marked, or proved by a mail), and what rivals needs to
+    see the rest."""
     have = covered(L, company, "efactura")
-    rows = [r for r in [*L.efactura_rows(status=OPEN, company=company), *awaiting(L, company)] if not r["parse_error"]]
+    rows = [*L.efactura_rows(status=OPEN, company=company), *_marked(L, company, proved=True)]
+    rows = [r for r in rows if not r["parse_error"]]
     credits = credited(L, company)
     rows = net_invoices(L, rows)
     invoices = [r for r in rows if r["message_id"] not in have and r["message_id"] not in credits]
@@ -896,25 +917,27 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         status) settles only that invoice;
       - a debit to an IBAN and amount the payments path tracks (approved e-Factura, accountant's invoice) is left to it;
       - a debit that fits several open invoices settles none; one debit settles one invoice, ever.
-    Invoices the user marked paid are matched the same way, as candidates next to the open ones: the debit
-    confirms their mark (paid_tx), and one that fits an open invoice too settles neither.
+    Invoices the user marked paid, or a payment mail proved, are matched the same way, as candidates next to the open
+    ones: the debit confirms their mark or replaces the mail as proof (paid_tx), and one that fits an open invoice too
+    settles neither. Every candidate is read and settled under one write lock.
     Debits left fitting several candidates are recorded for the user to pick from (note_ambiguous). The statement's
     transactions are put on record first (Ledger.record_statement): the evidence behind every debit it settles."""
     L.record_statement(st)
-    done = _settle_debits(L, st)
+    with L.tx():  # one view of every candidate: a write between two of its reads could hide a rival
+        done = _settle_debits(L, st)
     note_ambiguous(L, st)
     return done
 
 
 def _settle_debits(L: Ledger, st: statements.Statement) -> list[str]:
-    marked = awaiting(L, st.company)
-    open_rows = [r for r in [*L.efactura_rows(status=OPEN, company=st.company), *marked] if not r["parse_error"]]
+    marked, proved = awaiting(L, st.company), net_invoices(L, mail_proved(L, st.company))
+    open_rows = [*L.efactura_rows(status=OPEN, company=st.company), *marked, *proved]
+    open_rows = [r for r in open_rows if not r["parse_error"]]
     if not open_rows and not bon_paid(L, st.company):
         return []
     used = L.used_txs()
-    withdrawn = {
-        r["item_id"] for r in marked if r["item_id"]
-    }  # their payment-file row was dropped: the debit is the invoice's
+    # their payment-file row was dropped (marked, then maybe proved by a mail): the debit is the invoice's
+    withdrawn = {r["item_id"] for r in [*marked, *proved] if r["item_id"]}
     tracked = {
         (p["payee_iban"], Decimal(p["amount"])) for p in L.payments(company=st.company) if p["item_id"] not in withdrawn
     }
