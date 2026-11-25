@@ -32,9 +32,9 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from fiscalm import ai, audit, companies, history_invoices, integrations
-from fiscalm.bank import statements
+from fiscalm.bank import catalogue as banks, statements
 from fiscalm.efactura import client as anaf, partners as partner_anaf
-from fiscalm.efactura.credits import credited, net_invoices
+from fiscalm.efactura.credits import blocking_issues, credited, net_invoices
 from fiscalm.identity import partner_id, tax_token
 from fiscalm.ledger import BON_PAID, USER_MARKED, Ledger, covered, finance_home, now, unlinked, user_note
 from fiscalm.mail import imap as imapread
@@ -1292,6 +1292,7 @@ class PaymentFacts:
     def __init__(self, L: Ledger, rows: Iterable = ()) -> None:
         self._L = L
         self._unfiled: set[tuple[str, str]] | None = None
+        self._payees: dict[tuple[str, str], str] | None = None
         self._credits: dict[str, dict[str, Decimal]] = {}
         self._status: dict[str, dict | None] = {}
         self._proved: dict[tuple[str, str], set[str]] = {}
@@ -1310,12 +1311,23 @@ class PaymentFacts:
 
     def unfiled(self, r) -> bool:
         if self._unfiled is None:
-            self._unfiled = {
-                (p["company"], p["item_id"])
-                for p in self._L.payments()
-                if p["status"] == "pending" and p["file_id"] is None
-            }
+            self._read_payments()
         return (r["company"], r["item_id"]) in self._unfiled
+
+    def queued_payee(self, r) -> str | None:
+        """The IBAN the invoice's payment row pays (a linked invoice), else None; only a linked one reads payments."""
+        if r["status"] != "linked":
+            return None
+        if self._payees is None:
+            self._read_payments()
+        return self._payees.get((r["company"], r["item_id"]))
+
+    def _read_payments(self) -> None:
+        rows = list(self._L.payments())
+        self._unfiled = {
+            (p["company"], p["item_id"]) for p in rows if p["status"] == "pending" and p["file_id"] is None
+        }
+        self._payees = {(p["company"], p["item_id"]): p["payee_iban"] for p in rows}
 
     def status(self, r) -> dict | None:
         """The last trusted cached ANAF status of an eligible Romanian supplier (`partner_anaf.supplier_cui`), or None."""
@@ -1343,9 +1355,12 @@ class PaymentFacts:
         return self._proved[(r["supplier_cui"], r["company"])]
 
 
-def check_payment(L: Ledger, r: dict, facts: PaymentFacts | None = None, *, unfiled: bool = False) -> None:
-    """Validate a stored invoice for bank-file preparation without building a payment row. `facts` only batches the
-    reads (PaymentFacts); without it they are read for this invoice."""
+def check_payment(
+    L: Ledger, r: dict, facts: PaymentFacts | None = None, *, unfiled: bool = False, account: str | None = None
+) -> str:
+    """Validate a stored invoice for bank-file preparation without building a payment row; returns the IBAN to pay
+    (payee_iban, held to `account` when given; an unfiled queued payment is held to the account it already pays).
+    `facts` only batches the reads (PaymentFacts); without it they are read for this invoice."""
     facts = facts or PaymentFacts(L)
     eligible = r["status"] == OPEN or (unfiled and r["status"] == "linked" and facts.unfiled(r))
     if not eligible or r["parse_error"]:
@@ -1361,30 +1376,59 @@ def check_payment(L: Ledger, r: dict, facts: PaymentFacts | None = None, *, unfi
             f"supplier inactive at ANAF; checked_at={status['checked_at']}",
             checked_at=status["checked_at"],
         )
-    if json.loads(r["issues"] or "[]"):
-        raise ApproveError("invoice_issues", "invoice has issues: " + "; ".join(json.loads(r["issues"])))
-    if len(json.loads(r["ibans"] or "[]")) > 1:
+    blocking = blocking_issues(r)
+    if blocking:
+        raise ApproveError("invoice_issues", "invoice has issues: " + "; ".join(blocking))
+    return payee_iban(r, facts, account or facts.queued_payee(r))
+
+
+def payee_iban(r, facts: PaymentFacts, account: str | None = None) -> str:
+    """`account` when given (the IBAN a payment already pays, or an item was built with), else the one account
+    payee_choices leaves; several left: refused, nothing is guessed. A given account must be one of the invoice's own
+    valid Romanian IBANs: every one is the supplier's, signed in this invoice; the choice rule only picks a default, so
+    proof arriving later never makes a queued account wrong."""
+    ibans = payee_choices(r, facts)
+    if account is not None and account not in _ro_ibans(r):
+        raise ApproveError("several_ibans", "the account is not one of the invoice's")
+    if account is None and len(ibans) > 1:
         raise ApproveError("several_ibans", "the invoice lists several IBANs; pay it by hand after checking which one")
-    iban = r["supplier_iban"]
-    if not iban or not iban.startswith("RO") or not iban_valid(iban):
-        raise ApproveError("no_valid_iban", "no valid Romanian IBAN in the invoice")
+    iban = account or ibans[0]
     if companies.company_by_iban(iban):
         raise ApproveError("own_iban", "payee IBAN is one of our own accounts")
+    return iban
 
 
-def payment_item(L: Ledger, message_id: str, *, unfiled: bool = False) -> PaymentItem:
+def _ro_ibans(r) -> list[str]:
+    return [i for i in json.loads(r["ibans"] or "[]") if i.startswith("RO") and iban_valid(i)]
+
+
+def payee_choices(r, facts: PaymentFacts) -> list[str]:
+    """Of the invoice's own valid Romanian IBANs: the only one; else those already proved for this supplier (a
+    statement or a settled payment-file payment); else the only commercial one beside Treasury (TREZ) accounts; else
+    all of them. Proof only breaks a tie between accounts the supplier itself signed in this invoice."""
+    ibans = _ro_ibans(r)
+    if not ibans:
+        raise ApproveError("no_valid_iban", "no valid Romanian IBAN in the invoice")
+    if len(ibans) > 1:
+        proved = [i for i in ibans if i in facts.proved(r)]
+        commercial = [i for i in ibans if i[4:8] != "TREZ"]
+        # Several proved: a person decides among them; the TREZ rule only applies when none is proved.
+        ibans = proved or (commercial if len(commercial) == 1 else ibans)
+    return ibans
+
+
+def payment_item(L: Ledger, message_id: str, *, unfiled: bool = False, account: str | None = None) -> PaymentItem:
     """A payment-file row built only from the parsed, ANAF-signed XML. Refused when anything is unsure."""
     r = L.efactura(message_id)
     if not r:
         raise ApproveError("unknown_invoice", "unknown e-Factura message")
-    check_payment(L, r, unfiled=unfiled)
-    iban = r["supplier_iban"]
+    iban = check_payment(L, r, unfiled=unfiled, account=account)
     return PaymentItem(
         company=r["company"],
         kind="efactura",
         payee_name=r["supplier_name"],
         payee_iban=iban,
-        payee_bic=r["bic"] or "",
+        payee_bic=_payee_bic(r, iban),
         payee_fiscal_code="",
         amount=Decimal(r["total"]),
         details=f"Plata factura {r['number']} din {date.fromisoformat(r['issue_date']):%d.%m.%Y}",
@@ -1393,6 +1437,14 @@ def payment_item(L: Ledger, message_id: str, *, unfiled: bool = False) -> Paymen
         source_path=r["raw_path"],
         source_sha=r["xml_sha"],
     )
+
+
+def _payee_bic(r, iban: str) -> str:
+    """Treasury accounts have one BIC; otherwise the XML's, only when it lists one account (parse_ubl keeps the first
+    BIC it meets, not tied to one of several accounts)."""
+    if iban[4:8] == "TREZ":
+        return banks.TREASURY_BIC
+    return (r["bic"] or "") if len(json.loads(r["ibans"] or "[]")) == 1 else ""
 
 
 def payment_refusal(L: Ledger, row, facts: PaymentFacts | None = None, *, unfiled: bool = False) -> ApproveError | None:
