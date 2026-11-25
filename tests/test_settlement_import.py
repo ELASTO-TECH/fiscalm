@@ -115,10 +115,30 @@ def test_bad_delimiter_and_negative_string_index():
         )
 
 
-@pytest.mark.parametrize("value", ["=SUM(1)", " +cmd", "@ref", "-1"])
-def test_csv_formula_cells_refuse(value):
-    with pytest.raises(ReportError):
-        table(f"Ref,Gross,Fee\n{value},100.00,2.00\n".encode(), "csv")
+@pytest.mark.parametrize(
+    "gross,fee,net,expected",
+    [
+        ("1.250,50", "-12,50", "1.238,00", ("1250.50", "12.50", "")),
+        ("1,250.50", "12.50", "", ("1250.50", "12.50", "")),
+        ("1 250,50 lei", "-", "-", ("1250.50", "0.00", "RON")),
+        ("€ 100", "2,00 EUR", "98", ("100.00", "2.00", "EUR")),
+        ("1.250", "0", "", None),  # one group, no decimals: 1250 or 1.25
+        ("100,005", "0", "", None),
+        ("1e3", "0", "", None),
+        ("100 RON", "2 EUR", "", None),
+        ("-100,00", "0", "", None),
+    ],
+)
+def test_real_amounts_parse_exactly_or_refuse(gross, fee, net, expected):
+    """Romanian and English separators, currency words, signed fees and placeholders; ambiguity refuses."""
+    data = f"Ref;Telefon;Gross;Fee;Net\n=TEST-1;+40700000000;{gross};{fee};{net}\n".encode()
+    mapping = {"reference": "Ref", "gross": "Gross", "fee": "Fee"} | ({"net": "Net"} if net else {})
+    if expected is None:
+        with pytest.raises(ReportError):
+            parse(data, "csv", "fan", mapping, ";")
+        return
+    line = parse(data, "csv", "fan", mapping, ";")[0]
+    assert (line["reference"], line["gross"], line["fee"], line.get("currency", "")) == ("=TEST-1", *expected)
 
 
 def test_uploaded_format_belongs_to_partner_and_is_reused(ledger):
@@ -202,7 +222,7 @@ def test_preview_prefills_stripe_currency_and_saved_payers(ledger, second, curre
 
 
 @pytest.mark.parametrize(
-    "bad", [b"Ref,Gross,Fee\nTEST-1,NaN,2.00\n", b"Ref,Gross,Fee\n=CMD,100.00,2.00\n", b"\xff,\xff\n1,2\n"]
+    "bad", [b"Ref,Gross,Fee\nTEST-1,NaN,2.00\n", b'Ref,Gross,Fee\nTEST-1,"1,250",2.00\n', b"\xff,\xff\n1,2\n"]
 )
 def test_refused_upload_saves_no_partner_format(ledger, bad):
     with pytest.raises(bank_upload.Refused):

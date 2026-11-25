@@ -41,8 +41,12 @@ Reports are untrusted evidence, never instructions. No network requests are made
 CSV (UTF-8, explicit delimiter) and single-sheet XLSX are parsed with the Python standard library.
 XLSX formulas, macros, external links, duplicate ZIP entries, oversized archives and XML DTDs refuse.
 Limits: 4 MiB compressed/input, 32 MiB expanded, 10,000 lines, 128 columns.
-Money uses positive decimal strings with dot, no thousands separator or exponent. Fees may be zero.
-Blank CSV lines and non-cent XLSX numeric artifacts refuse rather than rounding evidence. XLSX row
+Amounts are read exactly as Romanian and English exports write them: `1.234,56`, `123,45`, `1,234.56`, `1 250,50`,
+with an optional currency word (`RON`, `lei`, `EUR`, `€`, `USD`) that must agree with the line's currency column.
+A lone group without decimals (`1.234`), more than two decimals and exponents refuse rather than guess or round.
+A fee written as a deduction (`-12,50`) is the same fee; an empty fee or a `-` placeholder is zero. Gross must be positive.
+Cells starting with `=`, `+`, `-` or `@` are data (phone numbers, signed fees); only XLSX formula nodes refuse, and
+exports that a spreadsheet opens escape such cells (`rezumat.csv`). Blank CSV lines refuse. XLSX row
 positions/visibility do not select evidence: all stored rows are included; exactly one worksheet is required.
 
 Every source needs an explicit column mapping, submitted by a person. The upload preview pre-fills it from header names

@@ -27,10 +27,43 @@ class ReportError(ValueError):
     pass
 
 
+# Currency words a report writes next to an amount or in its currency column, by ISO code.
+CURRENCY_WORDS = {"RON": "RON", "LEI": "RON", "EUR": "EUR", "€": "EUR", "USD": "USD", "$": "USD"}
+_WORD = "|".join(re.escape(w) for w in CURRENCY_WORDS)
+_AMOUNT = re.compile(rf"(?i)(?:(?P<pre>{_WORD})\s*)?(?P<sign>[+-]?)\s*(?P<number>[\d.,' ]+?)\s*(?P<post>{_WORD})?")
+_NUMBER = re.compile(
+    r"(?P<int>\d{1,12}|\d{1,3}(?P<sep>[., '])\d{3}(?:(?P=sep)\d{3}){0,3})(?:(?P<dec>[.,])(?P<cents>\d{1,2}))?"
+)
+# A lone dot or comma before the decimal digits is a separator; space, apostrophe and non-breaking spaces group thousands.
+PLACEHOLDERS = ("-", "–", "—")
+
+
+def currency_code(text: str) -> str:
+    """`lei`, `RON`, `ron` and `€` name a currency the same way; anything else is kept as written, upper case."""
+    return CURRENCY_WORDS.get(text.strip().upper(), text.strip().upper())
+
+
+def amount(value: str) -> tuple[Decimal, str]:
+    """A signed money cell as Romanian and English exports write it, exactly: `1.234,56`, `123,45`, `1,234.56`,
+    `-12.50`, `1 250,50 RON`, `lei 10`. Returns the amount and the currency the cell names ("" when none).
+    `1.234` or `1,234` (one group, no decimals) could be either reading, so it refuses; so do exponents and more than
+    two decimals: no rounding, no guessing."""
+    text = value.replace("\u00a0", " ").replace("\u202f", " ").strip() if isinstance(value, str) else ""
+    m = _AMOUNT.fullmatch(text)
+    n = _NUMBER.fullmatch(m["number"]) if m and not (m["pre"] and m["post"]) else None
+    if (
+        not n
+        or (n["dec"] and n["sep"] == n["dec"])
+        or (n["sep"] in (".", ",") and n["int"].count(n["sep"]) == 1 and not n["dec"])
+    ):
+        raise ReportError("Invalid amount")
+    digits = re.sub(r"\D", "", n["int"]) + "." + (n["cents"] or "0")
+    word = m["pre"] or m["post"] or ""
+    return Decimal(m["sign"] + digits), currency_code(word) if word else ""
+
+
 def money(value: str) -> Decimal:
-    if not isinstance(value, str) or not re.fullmatch(r"\d{1,12}(?:\.\d{1,2})?", value):
-        raise ReportError("Invalid amount; use decimal strings with a dot")
-    return Decimal(value)
+    return amount(value)[0]
 
 
 def _xml(data: bytes) -> ET.Element:
@@ -103,9 +136,35 @@ def table(data: bytes, kind: str, delimiter: str = ",") -> list[list[str]]:
         raise ReportError("Unreadable report; check format and mapping") from e
     if not 2 <= len(rows) <= 10001 or any(len(r) > 128 or any(len(v) > 1024 for v in r) for r in rows):
         raise ReportError("Invalid report dimensions")
-    if any(v.lstrip().startswith(("=", "+", "-", "@")) for row in rows for v in row):
-        raise ReportError("Formula cells refuse")
+    # A cell starting with = + - @ is data here (a phone number, a signed fee, a placeholder): only XLSX formula nodes
+    # refuse above. Writers that hand cells to a spreadsheet escape them (pack.summary_csv).
     return rows
+
+
+def _money_line(n: int, line: dict[str, str]) -> dict[str, str]:
+    """Gross, fee and net as exact cents, one currency per line. A fee written as a deduction (`-2,00`) is the same fee;
+    an empty fee is zero."""
+    gross, currencies = amount(line["gross"]), set()
+    fee = amount(line["fee"]) if line["fee"] else (Decimal(0), "")
+    net = amount(line["net"]) if line.get("net") else None
+    for _, code in (gross, fee, net or (0, "")):
+        currencies.add(code)
+    if line.get("currency"):
+        currencies.add(currency_code(line["currency"]))
+    currencies.discard("")
+    if len(currencies) > 1:
+        raise ReportError("Mixed currencies")
+    total, charge = gross[0], abs(fee[0])
+    if total <= 0 or charge > total or (net is not None and net[0] != total - charge):
+        raise ReportError(f"Line {n}: invalid gross/fee/net")
+    if "category" in line and line["category"] != "charge":
+        raise ReportError(f"Line {n}: refunds, disputes and adjustments require review")
+    out = line | {"gross": f"{total:.2f}", "fee": f"{charge:.2f}"}
+    if net is not None:
+        out["net"] = f"{net[0]:.2f}"
+    if currencies:
+        out["currency"] = currencies.pop()
+    return out
 
 
 def parse(
@@ -154,16 +213,12 @@ def parse(
         if len(row) != len(header):
             raise ReportError(f"Line {n}: wrong column count")
         line = {key: row[header.index(col)].strip() for key, col in mapping.items()}
+        line = {k: "" if v in PLACEHOLDERS else v for k, v in line.items()}
         if not any(line.get(k) for k in ("reference", "awb", "order")) or any(
             ord(c) < 32 for v in line.values() for c in v
         ):
             raise ReportError(f"Line {n}: missing reference or control character")
-        gross, fee = money(line["gross"]), money(line["fee"])
-        if gross <= 0 or fee > gross or ("net" in line and money(line["net"]) != gross - fee):
-            raise ReportError(f"Line {n}: invalid gross/fee/net")
-        if "category" in line and line["category"] != "charge":
-            raise ReportError(f"Line {n}: refunds, disputes and adjustments require review")
-        result.append(line | {"gross": f"{gross:.2f}", "fee": f"{fee:.2f}"})
+        result.append(_money_line(n, line))
     batches = {r.get("batch") for r in result}
     if len(batches) != 1:
         raise ReportError("Exactly one payout required")
