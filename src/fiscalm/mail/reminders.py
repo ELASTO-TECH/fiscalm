@@ -156,11 +156,7 @@ class StatementView:
         differently. A payment is left out only when proved to be something else (`_explained`). A credit on record
         without its details refuses: it could be the client's."""
         self.coverage(since, today, max_age)
-        if self._lines is None or since < self._lines[0]:
-            start = min(since, self.since or since)
-            lo = start - timedelta(days=2 * BOUNDARY_DAYS)  # an explained copy just before, and the twins it could be
-            lines = self.L.credit_lines(self.co, lo.isoformat())
-            self._lines = (start, lines, _explained(lines))
+        self.load(since)
         explained = self._lines[2]
         out = []
         for r in self._lines[1]:
@@ -176,6 +172,14 @@ class StatementView:
                 if t.direction == "credit" and since <= t.date <= today and statements.tx_key(t) not in explained
             ]
         return out
+
+    def load(self, since: date) -> None:
+        """Read the firm's credit lines from `since` (or the request's earlier `self.since`) once."""
+        if self._lines is None or since < self._lines[0]:
+            start = min(since, self.since or since)
+            lo = start - timedelta(days=2 * BOUNDARY_DAYS)  # an explained copy just before, and the twins it could be
+            lines = self.L.credit_lines(self.co, lo.isoformat())
+            self._lines = (start, lines, _explained(lines))
 
     def coverage(self, since: date, today: date, max_age: int) -> None:
         """Refuse (STATEMENTS) unless stored statements cover every current account from `since` to `max_age` days
@@ -367,6 +371,8 @@ def tasks(L: Ledger, co: str, today: date, rows: list[dict], *, invoices: dict[s
                 starts.append(_lookback(row["issue_date"], row.get("due_date") or row["issue_date"]))
     since = min(starts, default=None)
     out, view = [], StatementView(L, co, since)
+    if since:  # one read per firm with an open invoice, however many of them reach the credit check
+        view.load(since)
     row_index: dict = {}
     for row in rows:
         for ident in (row["id"], row.get("local_id")):
