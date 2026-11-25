@@ -159,18 +159,23 @@ def test_shop_never_overwrites_saved_client(shop):
 
 
 @pytest.mark.parametrize(
-    "saved,typed,same",
+    "saved,typed,country,same",
     [
-        ("Firma Fictivă SRL", "S.C. FIRMA FICTIVA S.R.L.", True),
-        ("Spa SRL", "spa s.r.l.", True),
-        ("Atelier Spa Design SRL", "Atelier Design SRL", False),
-        ("Atelier Spa SRL", "Atelier SRL", False),
-        ("...", "!!!", False),
+        ("Firma Fictivă SRL", "S.C. FIRMA FICTIVA S.R.L.", "RO", True),
+        ("Firma Fictivă SRL", "Firma Fictivă", "RO", True),
+        ("Spa SRL", "spa s.r.l.", "RO", True),
+        ("Atelier Spa SRL", "Atelier Spa", "RO", True),
+        ("Atelier SRL", "Atelier Spa", "RO", False),
+        ("Atelier SRL", "Atelier SA", "RO", False),
+        ("Atelier Spa Design SRL", "Atelier Design SRL", "RO", False),
+        ("Atelier Spa SRL", "Atelier SRL", "RO", False),
+        ("Atelier Fittizio S.p.A.", "Atelier Fittizio", "IT", True),
+        ("...", "!!!", "RO", False),
     ],
 )
-def test_same_firm_names(saved, typed, same):
-    assert c.same_firm(dict(name=saved), dict(name=typed)) is same
-    assert not c.same_firm(dict(name=saved), dict(name=saved, private=True))
+def test_same_firm_names(saved, typed, country, same):
+    assert c.same_firm(dict(name=saved, country=country), dict(name=typed)) is same
+    assert not c.same_firm(dict(name=saved, country=country), dict(name=saved, private=True))
 
 
 @pytest.mark.parametrize("name", ["S.C. FIRMA FICTIVA S.R.L.", "firma fictivă"])

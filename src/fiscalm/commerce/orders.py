@@ -93,25 +93,28 @@ def validate(body: object) -> dict:
     return row
 
 
+# Legal forms by the saved firm's country: in Romania 'Spa' is a word of the name, in Italy it is S.p.A.
+RO_LEGAL_FORMS = frozenset({"srl", "srld", "sa", "pfa", "ii", "if", "snc", "scs", "sca"})
 LEGAL_FORMS = frozenset(
-    {"sc", "srl", "srld", "sa", "pfa", "ii", "if", "snc", "scs", "gmbh", "ag", "ug", "kg", "ltd", "llc", "inc"}
-    | {"sas", "sarl", "bv", "nv", "spa", "sl"}
+    {"gmbh", "ag", "ug", "kg", "ohg", "ltd", "llc", "inc", "plc", "sas", "sarl", "bv", "nv", "spa", "srl", "sl", "sa"}
 )
 
 
-def _name_words(name: str) -> list[str]:
+def _name_parts(name: str, country: str) -> tuple[list[str], str]:
+    """The words of a firm name and its trailing legal form ('' when it has none)."""
     words = [w for w in firm_name(name).split("-") if w]
-    # Only one trailing legal form: 'Atelier Spa SRL' keeps 'spa', 'Spa SRL' keeps its name.
-    return words[:-1] if len(words) > 1 and words[-1] in LEGAL_FORMS else words
+    forms = RO_LEGAL_FORMS if country == "RO" else LEGAL_FORMS
+    return (words[:-1], words[-1]) if len(words) > 1 and words[-1] in forms else (words, "")
 
 
 def same_firm(saved: dict, buyer: dict) -> bool:
-    """A company buyer is the saved company under its tax id when the names agree: case, accents, punctuation and
-    a trailing legal form don't count, the words do. A person or a saved private client never matches this way."""
+    """A company buyer is the saved company under its tax id when the names agree: case, accents and punctuation
+    don't count, a legal form counts only when both names write one. A person or a private client never matches."""
     if buyer.get("private") or saved.get("private"):
         return False
-    words = _name_words(saved["name"])
-    return bool(words) and words == _name_words(buyer["name"])
+    country = saved.get("country", "")
+    (words, form), (typed, typed_form) = _name_parts(saved["name"], country), _name_parts(buyer["name"], country)
+    return bool(words) and words == typed and (form == typed_form or not form or not typed_form)
 
 
 def channel(L: Ledger, co: str, iid: str) -> integrations.Instance:
