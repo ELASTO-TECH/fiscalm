@@ -590,6 +590,7 @@ def partner_money(
                 "source": d["source"],
                 "mapping": d["mapping"],
                 "courier": d.get("courier", ""),
+                "senders": d.get("senders", []),
             }
         )
     claims: dict[str, set[str]] = {}

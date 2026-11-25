@@ -11,7 +11,7 @@ import sqlite3
 import unicodedata
 from datetime import date, timedelta
 
-from fiscalm import ai, companies
+from fiscalm import accountant, ai, companies
 from fiscalm.bank import statements
 from fiscalm.identity import partner_id
 from fiscalm.ledger import Ledger
@@ -528,6 +528,85 @@ def _report_spec(data: bytes, kind: str, delimiter: str, described: dict, when: 
     one = next(iter(batches)) if len(batches) == 1 else ""
     spec["report_key"] = one or "u" + hashlib.sha256(data).hexdigest()[:24]
     return spec, lines
+
+
+MAIL_CONTENT = {"csv": "text/csv", "xlsx": XLSX}
+
+
+def set_senders(L: Ledger, company: str, partner: str, signature: str, senders: str) -> list[str]:
+    """The exact addresses whose mailed reports in this format are imported for this payer (one per line, at most
+    ten, none to stop). A person names them; a report's content never does."""
+    addresses = list(dict.fromkeys(a.strip().lower() for a in senders.splitlines() if a.strip()))
+    if len(addresses) > 10 or not all(accountant.EMAIL.fullmatch(a) for a in addresses):
+        raise ValueError("Scrie cel mult zece adrese de e-mail, câte una pe rând.")
+    with L.tx() as db:
+        row = db.execute(
+            "SELECT data FROM partner_settlement_formats WHERE company=? AND partner=? AND signature=?",
+            (company, partner, signature),
+        ).fetchone()
+        if not row:
+            raise ValueError("Formatul nu mai există.")
+        data = json.loads(row["data"]) | {"senders": addresses}
+        db.execute(
+            "UPDATE partner_settlement_formats SET data=? WHERE company=? AND partner=? AND signature=?",
+            (json.dumps(data, ensure_ascii=False), company, partner, signature),
+        )
+    return addresses
+
+
+def from_mail(L: Ledger, address: str, tables: tuple, firms: list[str], today: date | None = None) -> str | None:
+    """Settlement reports attached by a sender a person named on a saved format of one of `firms` (the mailbox's).
+    None when the sender names no format: the mail is read the invoice way. Each table goes through `accept_report`
+    with that payer; it must have that exact format, and its payment day comes from its own date column."""
+    formats = [
+        (co, r["partner"], r["signature"])
+        for co in firms
+        for r in L.db.execute("SELECT partner,signature,data FROM partner_settlement_formats WHERE company=?", (co,))
+        if address and address in json.loads(r["data"]).get("senders", [])
+    ]
+    if not formats:
+        return None
+    counts: dict[str, int] = {}
+    for attached in tables:
+        result = _mailed_table(L, attached, formats, today or date.today())
+        counts[result] = counts.get(result, 0) + 1
+    return ",".join(f"settlement:{k}:{v}" for k, v in sorted(counts.items())) or "settlement:none"
+
+
+def _mailed_table(L: Ledger, attached, formats: list[tuple[str, str, str]], today: date) -> str:
+    try:
+        kind, delimiter, rows = _format(attached.data, MAIL_CONTENT[attached.kind])
+    except Refused:
+        return "unreadable"
+    sig = _signature(kind, delimiter, rows[0])
+    found = [(co, partner) for co, partner, s in formats if s == sig]
+    if len(found) != 1:
+        return "unknown-format"
+    co, partner = found[0]
+    when = _mailed_date(L, co, partner, sig, rows)
+    if not when:
+        return "no-date"
+    try:
+        return accept_report(
+            L, co, attached.data, MAIL_CONTENT[attached.kind], report_date=when, partner=partner, today=today
+        )["status"]
+    except Refused:
+        return "refused"
+
+
+def _mailed_date(L: Ledger, company: str, partner: str, sig: str, rows: list[list[str]]) -> str:
+    """The report's payment day from the file: its mapped date column's earliest day (each payout keeps its own),
+    else one day a date column names on every line. "" when the file doesn't say."""
+    row = L.db.execute(
+        "SELECT data FROM partner_settlement_formats WHERE company=? AND partner=? AND signature=?",
+        (company, partner, sig),
+    ).fetchone()
+    column = json.loads(row["data"])["mapping"].get("date")
+    if column in rows[0]:
+        n = rows[0].index(column)
+        days = [day(r[n]) if len(r) > n else None for r in rows[1:]]
+        return "" if None in days or not days else min(d for d in days if d).isoformat()
+    return _guess_date(rows)
 
 
 def delete_format(L: Ledger, company: str, partner: str, signature: str) -> bool:

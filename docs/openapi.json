@@ -10102,6 +10102,7 @@
     "accountant-save": "local",
     "settlement-withdraw": "local",
     "settlement-format-delete": "local",
+    "settlement-format-senders": "local",
     "settlement-confirm": "local",
     "order-discard": "local",
     "emag-refund": "local",
@@ -10192,6 +10193,7 @@
     "accountant-save": "manage_firms",
     "settlement-withdraw": "member",
     "settlement-format-delete": "member",
+    "settlement-format-senders": "manage_firms",
     "settlement-confirm": "member",
     "order-discard": "member",
     "emag-refund": "member",
@@ -10305,6 +10307,7 @@
     "accountant-save": "cui (existing partner), senders (newline-separated addresses, at most ten), recipient, co. App admin configuration.",
     "settlement-withdraw": "Withdraw pending settlement evidence; never release a reserved credit.",
     "settlement-format-delete": "partner, signature: one of the partner's report_formats. Forgets the saved columns; uploaded reports are unchanged.",
+    "settlement-format-senders": "partner, signature: one of the partner's report_formats; senders: newline-separated exact addresses (at most ten, empty to stop). Mailed CSV/XLSX reports in that format from those addresses are imported, read-only.",
     "order-discard": "co, id: company-scoped order sheet ID. App-only local configuration.",
     "pack-unsent": "month, version: the sent ZIP SHA-256; mark: the report's mark as shown. Undoes pack-sent: the snapshot is prepared again and the documents only it covers are unsent. Local operation.",
     "document-correct": "Correct receipt/document metadata only. amount: exact two-decimal string; currency: engine currency code; date and number optional. Refuses settled proof and sent accountant packs; records actor, time and previous values. Never settles money.",
@@ -12384,13 +12387,20 @@
                       },
                       "courier": {
                         "type": "string"
+                      },
+                      "senders": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     },
                     "required": [
                       "signature",
                       "source",
                       "mapping",
-                      "courier"
+                      "courier",
+                      "senders"
                     ]
                   }
                 },
@@ -16708,13 +16718,20 @@
                           },
                           "courier": {
                             "type": "string"
+                          },
+                          "senders": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
                           }
                         },
                         "required": [
                           "signature",
                           "source",
                           "mapping",
-                          "courier"
+                          "courier",
+                          "senders"
                         ]
                       }
                     },

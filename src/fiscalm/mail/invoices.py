@@ -41,6 +41,7 @@ from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import Ledger, finance_home, now
 from fiscalm.mail import imap as imapread, reader
 from fiscalm.pdftext import PDFTOTEXT, _preview_limits, first_page_png
+from fiscalm.settlements import upload as settlement_upload
 from fiscalm.storage import read_file
 
 PAGES = 10  # pages of a PDF read: an invoice's total is on its first pages
@@ -939,6 +940,9 @@ def handle(L: Ledger, msg: imapread.Message, *, ask=None) -> str:
     other = known(L, msg)
     if other:
         return "elsewhere" if other[0] == "own" else _ingest_known(L, *other, account=msg.account, msg=msg)
+    reports = settlement_upload.from_mail(L, msg.address, msg.tables, account_firms(L, msg.account))
+    if reports is not None:
+        return reports
     if not msg.attachments:
         return "no-documents"
     counts: dict[str, int] = {}

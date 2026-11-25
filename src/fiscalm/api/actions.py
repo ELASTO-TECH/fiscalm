@@ -390,6 +390,19 @@ def _settlement_format_delete(L: Ledger, co: str, args: dict, ctx: Context) -> d
     return _res(ok, "Formatul a fost șters." if ok else "Formatul nu mai există.")
 
 
+def _settlement_format_senders(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    try:
+        with L.tx():
+            ctx.authorize()
+            done = settlement_upload.set_senders(
+                L, co, str(args.get("partner", "")), str(args.get("signature", "")), str(args.get("senders", ""))
+            )
+    except ValueError as e:
+        return _res(False, str(e))
+    ctx.log(f"web: {audit.actor.get() or 'app'} settlement-format-senders company={co} senders={len(done)}")
+    return _res(True, "Adresele au fost salvate." if done else "Rapoartele nu se mai iau din mail.")
+
+
 def check(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     # Same tick as the schedule (safe in shadow too: the tick itself respects the mode).
     try:
@@ -1208,6 +1221,7 @@ ACTIONS = {
     'accountant-save': Action(_accountant_save, 'cui senders recipient', role='manage_firms', public=False, strings=True, description='cui (existing partner), senders (newline-separated addresses, at most ten), recipient, co. App admin configuration.'),
     'settlement-withdraw': Action(_settlement_withdraw, 'id', strings=True, description='Withdraw pending settlement evidence; never release a reserved credit.'),
     'settlement-format-delete': Action(_settlement_format_delete, 'partner signature', strings=True, public=False, description="partner, signature: one of the partner's report_formats. Forgets the saved columns; uploaded reports are unchanged."),
+    'settlement-format-senders': Action(_settlement_format_senders, 'partner signature senders', role='manage_firms', strings=True, public=False, description="partner, signature: one of the partner's report_formats; senders: newline-separated exact addresses (at most ten, empty to stop). Mailed CSV/XLSX reports in that format from those addresses are imported, read-only."),
     'settlement-confirm': Action(_settlement_confirm, 'id tx confirmed', actor=True, public_description='id: 32-hex report ID; tx: 20-hex exact displayed credit ID; confirmed: yes. Local operation; v1 requires a write key owned by an active person (else 403 person_owned_key_required). Rechecks all evidence under lock.'),
     'order-discard': Action(_order_discard, 'id', public=False, actor=True, description='co, id: company-scoped order sheet ID. App-only local configuration.'),
     'emag-refund': Action(_emag_resolve, 'id', public_description='id: company-scoped order sheet ID; prepares a refund draft, never sends money.'),

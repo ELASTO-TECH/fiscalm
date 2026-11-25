@@ -5,14 +5,16 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+from email.message import EmailMessage
 
 import pytest
 from test_settlements import collect, setup, statement, store_bank
 
 from fiscalm import companies
 from fiscalm.api import actions
+from fiscalm.mail import imap, invoices
 from fiscalm.settlements import engine as settlements, upload as bank_upload
 from fiscalm.settlements.reports import SOURCES, STRIPE, ReportError, money, parse, table
 
@@ -651,3 +653,35 @@ def test_first_fan_borderou_settles_on_its_own(ledger):
     assert result["message"] == bank_upload.COLLECTED
     assert {r["message_id"]: r["status"] for r in ledger.issued_rows()} == {"fan-1": "collected", "fan-2": "collected"}
     assert ledger.db.execute("SELECT count(*) FROM settlement_confirmations").fetchone()[0] == 0
+
+
+def test_mailed_report_from_a_named_sender_is_imported(ledger, mail_account):
+    """Read-only intake: a CSV in the saved format from an address a person named is imported with that payer and
+    the day the file says; another format, or another sender, imports nothing."""
+    for n in (1, 2):
+        ledger.add_issued(dict(message_id=f"m{n}", company="NORD", number=f"TEST-{n}", status="open", raw_path=""))
+    day = date.today() - timedelta(days=5)
+    header = "Factura;Ramburs;Comision;Data plata\n"
+    described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+    first = (header + f"TEST-1;100,00;2,00;{day:%d.%m.%Y}\n").encode()
+    bank_upload.accept_report(ledger, "NORD", first, "text/csv", description=described, report_date=day.isoformat())
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    with pytest.raises(ValueError):
+        bank_upload.set_senders(ledger, "NORD", partner, sig, "not an address")
+    assert bank_upload.set_senders(ledger, "NORD", partner, sig, "Rapoarte@Curier.example\n") == [
+        "rapoarte@curier.example"
+    ]
+
+    def mailed(sender):
+        mail = EmailMessage()
+        mail["From"], mail["Subject"], mail["Message-ID"] = f"Curier <{sender}>", "Decont", f"<{sender}>"
+        mail.add_attachment((header + f"TEST-2;100,00;2,00;{day:%d.%m.%Y}\n").encode(), "text", "csv", filename="r.csv")
+        mail.add_attachment(b"Other,Columns\n1,2\n", "text", "csv", filename="other.csv")
+        return imap.parse(mail_account["id"], bytes(mail), date.today())
+
+    msg = mailed("rapoarte@curier.example")
+    assert (len(msg.tables), msg.attachments) == (2, ())
+    assert invoices.handle(ledger, msg) == "settlement:added:1,settlement:unknown-format:1"
+    assert invoices.handle(ledger, mailed("someone@curier.example")) == "no-documents"
+    rows = settlements.state(ledger, "NORD")
+    assert len(rows) == 2 and {r["date"] for r in rows} == {day.isoformat()}

@@ -194,7 +194,7 @@ describe("Parteneri", () => {
 
 it("deletes a payer's saved report format after a confirmation, posting its exact identity", async () => {
   const full = fixture(), p = full.partners[0];
-  p.report_formats = [{ signature: "f".repeat(64), source: "fan", mapping: { reference: "Factura", gross: "Ramburs", fee: "Comision" }, courier: "" }];
+  p.report_formats = [{ signature: "f".repeat(64), source: "fan", mapping: { reference: "Factura", gross: "Ramburs", fee: "Comision" }, courier: "", senders: [] }];
   at(`?co=NORD&tab=parteneri&p=${encodeURIComponent(p.id)}`);
   const api = renderApp({ state: () => json(summaryResult(full)),
     partnerPages: (url) => json(partnerResult(full, Object.fromEntries(new URL(url, "http://local").searchParams))) });
@@ -202,4 +202,17 @@ it("deletes a payer's saved report format after a confirmation, posting its exac
   await userEvent.click(within(await screen.findByRole("dialog", { name: "Ștergi formatul? La următorul raport alegi din nou coloanele." })).getByRole("button", { name: "Șterge formatul" }));
   await waitFor(() => expect(api.posts()).toHaveLength(1));
   expect(api.posts()[0].body).toEqual({ co: "NORD", partner: p.id, signature: "f".repeat(64) });
+});
+
+it("names the addresses whose mailed reports in a saved format are imported, posting them exactly", async () => {
+  const full = fixture(), p = full.partners[0];
+  p.report_formats = [{ signature: "f".repeat(64), source: "fan", mapping: { reference: "Factura", gross: "Ramburs", fee: "Comision" }, courier: "", senders: [] }];
+  at(`?co=NORD&tab=parteneri&p=${encodeURIComponent(p.id)}`);
+  const api = renderApp({ state: () => json(summaryResult(full)),
+    partnerPages: (url) => json(partnerResult(full, Object.fromEntries(new URL(url, "http://local").searchParams))) });
+  await userEvent.click(await screen.findByText("Rapoarte primite pe mail"));
+  await userEvent.type(screen.getByLabelText("Adresele de la care vine raportul"), "rapoarte@curier.example");
+  await userEvent.click(screen.getByRole("button", { name: "Salvează adresele" }));
+  await waitFor(() => expect(api.posts()).toHaveLength(1));
+  expect(api.posts()[0].body).toEqual({ co: "NORD", partner: p.id, signature: "f".repeat(64), senders: "rapoarte@curier.example" });
 });

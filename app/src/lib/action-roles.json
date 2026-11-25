@@ -20,6 +20,7 @@
   "accountant-save": "manage_firms",
   "settlement-withdraw": "member",
   "settlement-format-delete": "member",
+  "settlement-format-senders": "manage_firms",
   "settlement-confirm": "member",
   "order-discard": "member",
   "emag-refund": "member",
