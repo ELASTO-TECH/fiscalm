@@ -146,6 +146,8 @@ def test_real_amounts_parse_exactly_or_refuse(gross, fee, net, expected):
     line = parse(data, "csv", "fan", mapping, ";")[0]
     assert (line["reference"], line["gross"], line["fee"], line.get("currency", "")) == ("=TEST-1", *expected)
     assert money(line["gross"]) + 0 == Decimal(expected[0])  # what is stored reads back exactly
+    if net:  # a mapped net is stored as gross minus fee, never `-0.00`
+        assert line["net"] == f"{Decimal(expected[0]) - Decimal(expected[1]):.2f}"
 
 
 def test_uploaded_format_belongs_to_partner_and_is_reused(ledger):
