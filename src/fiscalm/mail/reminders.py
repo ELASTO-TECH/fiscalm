@@ -11,8 +11,9 @@ from decimal import Decimal
 from functools import cached_property
 from pathlib import Path
 
-from fiscalm import companies
+from fiscalm import companies, history_invoices
 from fiscalm.bank import statements
+from fiscalm.efactura import inbox as efactura
 from fiscalm.identity import firm_id, tax_token
 from fiscalm.invoicing import engine as invoicing, issued
 from fiscalm.ledger import BOUNDARY_DAYS, Ledger, finance_home, is_live
@@ -55,8 +56,9 @@ DEFAULTS = {"after_days": 7}
 LIMITS = {"after_days": 365}
 # A reminder needs a statement this recent: an older one could miss the payment that makes it wrong.
 STATEMENT_MAX_AGE_DAYS = 7
-# settled_tx reservations that keep a credit from settling, not because it paid something: twins and conflicts.
-UNEXPLAINED = ("twin ", "bank reference conflict")
+DAYS = (date(1900, 1, 1), date(9000, 1, 1))  # the invoice days a reminder works with
+# The settled_tx reservation that keeps a credit from settling though it paid nothing yet.
+UNEXPLAINED = "bank reference conflict"
 
 
 def _meta_key(co: str) -> str:
@@ -224,23 +226,24 @@ class StatementView:
 
 
 def _explained(rows: list) -> set[str]:
-    """The keys of credit lines proved to be something other than an unexplained payment: reserved in `settled_tx`
-    as collecting or explaining an item; a duplicate line whose original is; a twin (the other source's copy of a
-    payment) paired with an explained line it could be a copy of. Pairs are one to one, closest days first, like
-    Ledger.account_lines: one explained payment excuses one twin, never two. A conflict is never explained."""
+    """The keys of credit lines proved to be something other than an unexplained payment: an original line reserved
+    in `settled_tx` as collecting or explaining an item; a duplicate line whose original is; a twin (the other
+    source's copy of a payment) whose every possible copy among the original lines is explained, paired one to one
+    with them, closest days first: one explained payment excuses one twin, never two, and a duplicate is never
+    a copy of its own. A conflict is never explained."""
     what = {r["tx_key"]: r["what"] or "" for r in rows}
-    done = {k for k, w in what.items() if w and not w.startswith(UNEXPLAINED) and not w.startswith("duplicate:")}
-    done |= {k for k, w in what.items() if w.startswith("duplicate:") and w.removeprefix("duplicate:") in done}
-    pairs = sorted(
-        (abs((date.fromisoformat(t["day"]) - date.fromisoformat(e["day"])).days), t["tx_key"], e["tx_key"])
-        for t in rows
-        if what[t["tx_key"]].startswith("twin ")
-        for e in rows
-        if e["tx_key"] in done and _copy(t, e)
-    )
-    excused: set[str] = set()
+    copy_of = lambda w: w.startswith(("twin ", "duplicate:"))  # noqa: E731
+    originals = [r for r in rows if not copy_of(what[r["tx_key"]])]
+    done = {r["tx_key"] for r in originals if what[r["tx_key"]] and not what[r["tx_key"]].startswith(UNEXPLAINED)}
+    excused = {k for k, w in what.items() if w.startswith("duplicate:") and w.removeprefix("duplicate:") in done}
+    pairs = []
+    for t in (r for r in rows if what[r["tx_key"]].startswith("twin ")):
+        copies = [e for e in originals if _copy(t, e)]
+        if copies and all(e["tx_key"] in done for e in copies):
+            day = date.fromisoformat(t["day"])
+            pairs += [(abs((day - date.fromisoformat(e["day"])).days), t["tx_key"], e["tx_key"]) for e in copies]
     used: set[str] = set()
-    for _, twin, copy in pairs:
+    for _, twin, copy in sorted(pairs):
         if twin not in excused and copy not in used:
             excused.add(twin)
             used.add(copy)
@@ -255,12 +258,33 @@ def _copy(twin, line) -> bool:
     return twin["amount"] == line["amount"] and same_account and apart <= BOUNDARY_DAYS
 
 
-def _shift(day: str, days: int) -> date:
-    """`day` (ISO) moved by `days`; an impossible one refuses that invoice alone (CLOSED)."""
+def _ours(L: Ledger, co: str, stored: dict) -> bool:
+    """An invoice synced from SPV is the firm's only when its stored XML says so: the very document the row was
+    read from (xml_sha) names the firm as supplier (history_invoices.direction: country-aware tax ids, so neither a
+    missing supplier nor a foreign VAT id with the same digits passes). The path is rebuilt from the numeric message
+    id, and the opened file must stay inside the firm's own e-Factura directory."""
     try:
-        return date.fromisoformat(day) + timedelta(days=days)
+        path = issued.raw_path(co, stored["message_id"], stored["listed_at"] or "")
+        root = (finance_home() / "efactura" / co).resolve()
+        with path.open("rb") as stream:
+            if not Path(f"/proc/{os.getpid()}/fd/{stream.fileno()}").resolve().is_relative_to(root):
+                return False
+            inv, sha = efactura.invoice_from_zip(stream.read(efactura.MAX_XML + 1))
+    except efactura.UNREADABLE:  # UblError is a ValueError
+        return False
+    return sha == stored["xml_sha"] and history_invoices.direction(companies.get(co, L=L), inv) == "issued"
+
+
+def _shift(day: str, days: int) -> date:
+    """`day` (ISO) moved by `days`; one outside DAYS refuses that invoice alone (CLOSED), so the windows built on
+    it (a lookback, a twin's copy days before) never leave the calendar."""
+    try:
+        out = date.fromisoformat(day) + timedelta(days=days)
     except (TypeError, ValueError, OverflowError):
         raise Refused(CLOSED) from None
+    if not DAYS[0] <= out <= DAYS[1]:
+        raise Refused(CLOSED)
+    return out
 
 
 def eligible(
@@ -290,9 +314,6 @@ def eligible(
     if Decimal(row["owed"]) != Decimal(row["total"]) or Decimal(row["credited"]) or row.get("reversed_by"):
         raise Refused(PARTIAL)
     view = view or StatementView(L, co)
-    stored = None if row.get("local_id") else view.issued.get(row["id"])  # fiscalm's own: checked against its record
-    if stored and (stored["parse_error"] or invoicing.NOT_OURS in (stored["issues"] or "")):
-        raise Refused(CLOSED)  # synced from SPV with another supplier's CUI, or unreadable: not this firm's to claim
     if not firm_id(row["client_cui"]) and not (row["client"] or "").strip():
         raise Refused(CLOSED)  # no buyer to tell a payment from: in doubt, no text
     after, max_age = view.policy()
@@ -304,6 +325,10 @@ def eligible(
         due_date = due_date or inv["data"].get("due_date")
     if not due_date or today < _shift(due_date, after):
         raise Refused(CLOSED)
+    if not iid:  # synced from SPV: read its stored XML only once everything cheap passed
+        stored = view.issued.get(row["id"])
+        if not stored or stored["parse_error"] or not _ours(L, co, stored):
+            raise Refused(CLOSED)  # not proved this firm's to claim
     row = row | {"due_date": due_date}
     since = _shift(row["issue_date"], -issued.COLLECT_DAYS_BEFORE)
     for tx in view.credits(since, today, max_age):
