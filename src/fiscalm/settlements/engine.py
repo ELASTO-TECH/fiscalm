@@ -111,8 +111,18 @@ def _payer(report: dict, credit: statements.Tx, company: str) -> bool:
     if report["payer_iban"]:
         return credit.counterparty_iban == report["payer_iban"]
     if report["payer_cui"]:
-        return issued._cui_on(report["payer_cui"], credit.counterparty + " " + credit.description)
-    return issued.same_firm(report["payer_name"], credit.counterparty)
+        # On the counterparty, or labelled as a tax id in the memo: a bare number there can be another firm's order.
+        tax_id = rf"(?<![A-Z0-9])(?:RO|C\.?U\.?I\.?|C\.?I\.?F\.?)[ \t:.]*{report['payer_cui']}(?!\d)"
+        return issued._cui_on(report["payer_cui"], credit.counterparty) or bool(
+            re.search(tax_id, credit.description or "", re.I)
+        )
+    named, paid = _legal_forms(report["payer_name"]), _legal_forms(credit.counterparty)
+    return issued.same_firm(report["payer_name"], credit.counterparty) and not (named and paid and named != paid)
+
+
+def _legal_forms(name: str) -> set[str]:
+    """'Curier SRL' and 'Curier S.R.L.' are one firm; 'Curier SA' is another, though the names compare equal."""
+    return {w for w in companies.name_words(name or "") if w in companies.LEGAL_FORMS - {"SC"}}
 
 
 class Resolver:
@@ -262,6 +272,7 @@ def recheck_pending(L: Ledger, company: str) -> list[str]:
     """Re-evaluate pending reports against current stored evidence through guarded settlement writes."""
     done: list[str] = []
     evidence: dict[frozenset[str], statements.Statement | str] = {}
+    # `confirmation_required` (the retired payer gate, before 2026-11-25) is replaced like the other waiting reasons.
     for r in L.db.execute(
         "SELECT id,data FROM settlement_reports WHERE company=? AND status='pending' ORDER BY id", (company,)
     ).fetchall():
@@ -285,7 +296,7 @@ def recheck_pending(L: Ledger, company: str) -> list[str]:
                 )
                 db.execute(
                     "UPDATE settlement_reports SET error=? WHERE id=? AND status='pending' "
-                    "AND error IS NOT ? AND (? != 'credit_missing_or_ambiguous' OR error IS NULL OR error IN ('statement_confirmation_required','competing_reports'))",
+                    "AND error IS NOT ? AND (? != 'credit_missing_or_ambiguous' OR error IS NULL OR error IN ('confirmation_required','statement_confirmation_required','competing_reports'))",
                     (reason, r["id"], reason, reason),
                 )
     return done

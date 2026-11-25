@@ -274,6 +274,38 @@ def test_payer_iban_never_falls_back_to_name(ledger, identity, right):
     assert collect(ledger, rid, statement(**right))
 
 
+@pytest.mark.parametrize(
+    "identity,wrong,right",
+    [  # same words, another legal form: another firm
+        ({}, {"counterparty": "Synthetic Courier SA"}, "Synthetic Courier S.R.L."),
+        (
+            {"payer_cui": "12345678"},
+            {"counterparty": "Other SRL", "description": "Order 12345678"},
+            "Other CIF 12345678",
+        ),
+    ],
+    ids=["legal_form", "bare_number"],
+)
+def test_first_report_needs_its_own_payer(ledger, identity, wrong, right):
+    """With no confirmation gate, only the payer itself can bring a batch's credit."""
+    rid = setup(ledger)
+    edit_report(ledger, **identity)
+    with pytest.raises(settlements.SettlementError, match="^credit_missing_or_ambiguous$"):
+        collect(ledger, rid, statement(**wrong))
+    assert collect(ledger, rid, statement(counterparty=right))
+
+
+def test_retired_gate_reason_is_replaced(ledger):
+    """A report waiting under the retired payer gate gets today's reason when its credit becomes ambiguous."""
+    setup(ledger)
+    with ledger.tx() as db:
+        db.execute("UPDATE settlement_reports SET error='confirmation_required'")
+    store_bank(ledger, statement())
+    store_bank(ledger, statement(ref="second"))
+    settlements.match_statement(ledger, statement())
+    assert settlements.state(ledger, "NORD")[0]["error"] == "credit_missing_or_ambiguous"
+
+
 def test_single_writer_cannot_take_batch_credit(ledger):
     rid = setup(ledger)
     collect(ledger, rid, statement())
