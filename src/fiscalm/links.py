@@ -308,11 +308,12 @@ def _advance(L: Ledger, company: str, key: str, who: str) -> Callable[[], dict]:
     return build
 
 
-def other_end(L: Ledger, company: str, key: str, t: statements.Tx) -> str | None:
+def other_end(L: Ledger, company: str, key: str, t: statements.Tx, *, but: str = "") -> str | None:
     """The other end of a transfer between the firm's accounts, when exactly one is on record and free: the opposite
     direction, the same amount and currency, on another of its accounts (the one the transfer names, when it names one
     of the firm's), naming this account or none, not a credit a Decontare waits on, at most BOUNDARY_DAYS apart. A
-    transfer to an account that isn't the firm's has none. Read under the write lock (Ledger.link_tx runs the build)."""
+    transfer to an account that isn't the firm's has none. `but`: a transaction whose reservation doesn't count (the
+    one being explained, asking from the other end). Read under the write lock (Ledger.link_tx runs the build)."""
     own = companies.get(company, L=L).own_ibans
     to = companies.normalize_iban(t.counterparty_iban)
     if to and to not in own:
@@ -320,7 +321,8 @@ def other_end(L: Ledger, company: str, key: str, t: statements.Tx) -> str | None
     lo, hi = (t.date - timedelta(days=BOUNDARY_DAYS)).isoformat(), (t.date + timedelta(days=BOUNDARY_DAYS)).isoformat()
     rows = L.db.execute(
         "SELECT tx_key, tx FROM statement_txs WHERE company=? AND direction=? AND amount=? AND tx_key!=? AND day BETWEEN ? "
-        "AND ? AND iban IS NOT NULL AND iban!=? AND (?='' OR iban=?) AND tx_key NOT IN (SELECT tx_key FROM settled_tx)",
+        "AND ? AND iban IS NOT NULL AND iban!=? AND (?='' OR iban=?) "
+        "AND tx_key NOT IN (SELECT tx_key FROM settled_tx WHERE tx_key!=?)",
         (
             company,
             "credit" if t.direction == "debit" else "debit",
@@ -331,6 +333,7 @@ def other_end(L: Ledger, company: str, key: str, t: statements.Tx) -> str | None
             companies.normalize_iban(t.iban),
             to or "",
             to or "",
+            but,
         ),
     ).fetchall()
     mine = companies.normalize_iban(t.iban)
@@ -537,17 +540,24 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
 
 
 def _free_other_end(L: Ledger, company: str, key: str, free: set[str]) -> str | None:
-    """The other end (other_end) of debit `key` when a rule may explain both as a Transfer între conturi: it is one of
-    the rows left free, nobody decided otherwise for it since (_decided), and one of the two names the other's
-    account. Two lines that only share an amount and a few days, naming no account, may be a payment and an unrelated
-    collection: left to people."""
-    t, _ = _transaction(L, company, key)
-    other = other_end(L, company, key, t)
-    if other not in free or _decided(L, other):
+    """The other end (other_end) of debit `key` when a rule may explain both as a Transfer între conturi: each is the
+    other's only candidate, it is one of the rows left free, nobody decided otherwise for it since (_decided), neither
+    is the bank's own fee or interest, the credit is no pending report's (settlements.claimed_credit), and one of the
+    two names the other's account. Two lines that only share an amount and a few days, naming no account, may be a
+    payment and an unrelated collection: left to people. A line refused as a person's would be has none."""
+    try:
+        t, _ = _transaction(L, company, key)
+        other = other_end(L, company, key, t)
+        if other not in free or _decided(L, other):
+            return None
+        o, _ = _transaction(L, company, other)
+    except LinkRefused:
         return None
-    o, _ = _transaction(L, company, other)
+    bank = {statements.BANK_FEE, statements.INTEREST} & {t.category, o.category}
     named = companies.normalize_iban(t.counterparty_iban) or companies.normalize_iban(o.counterparty_iban)
-    return other if named else None
+    if bank or not named or settlements.claimed_credit(L, company, o):
+        return None
+    return other if other_end(L, company, other, o, but=key) == key else None
 
 
 def _own_transfer(L: Ledger, company: str, key: str, free: set[str]) -> Callable[[], dict]:

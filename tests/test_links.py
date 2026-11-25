@@ -762,13 +762,52 @@ def test_a_transfer_between_the_firms_accounts_explains_itself_when_one_end_name
     assert _apply(ledger) == [] and _rows(ledger)[into]["explanation"] is None
 
 
+EUR_ACCOUNT = "RO71BTRLEURCRT0000000001"
+
+
+@pytest.mark.parametrize(
+    "extra,claimed",
+    [
+        ([_tx(66, "debit", "800.00", counterparty_iban=EUR_ACCOUNT, day=TODAY - timedelta(days=4))], False),
+        ([], True),  # a pending report's payer claims the credit after the rows were read
+    ],
+    ids=["two debits, one credit", "a report claims the credit"],
+)
+def test_a_transfer_rule_leaves_a_credit_two_debits_or_a_report_could_claim(ledger, live, monkeypatch, extra, claimed):
+    out, into, *_ = _record(
+        ledger,
+        "NORD",
+        _tx(67, "debit", "800.00", counterparty_iban=EUR_ACCOUNT),
+        _tx(68, "credit", "800.00", iban=EUR_ACCOUNT),
+        *extra,
+    )
+    rows = _rows(ledger)
+    monkeypatch.setattr(settlements, "claimed_credit", lambda L, co, t: claimed and t.direction == "credit")
+    assert _apply(ledger, rows) == [] and ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 0
+
+
+def test_a_transfer_rule_skips_bank_interest_and_an_unassigned_card(ledger, live):
+    """The bank's interest is never a transfer's other end; a card debit nobody assigned is skipped, not a stop."""
+    card, interest_out, interest, out, into = _record(
+        ledger,
+        "NORD",
+        _tx(69, "debit", "30.00", card_last4="0009", counterparty="SHOP EXEMPLU"),
+        _tx(70, "debit", "12.00", counterparty_iban=EUR_ACCOUNT),
+        _tx(71, "credit", "12.00", iban=EUR_ACCOUNT, category=statements.INTEREST, day=TODAY - timedelta(days=5)),
+        _tx(72, "debit", "410.00", counterparty_iban=EUR_ACCOUNT),
+        _tx(73, "credit", "410.00", iban=EUR_ACCOUNT),
+    )
+    assert _apply(ledger) == sorted([interest, out])  # the interest as Fără document, by the bank's own words
+    assert _rows(ledger)[interest_out]["explanation"] is None and _rows(ledger)[card]["explanation"] is None
+
+
 def test_two_connections_explaining_the_same_transfer_explain_it_once(ledger, live, monkeypatch):
-    """Both read the same rows and race to explain the transfer: the second finds both ends taken."""
+    """Both read the same rows and race to explain the transfer: one explains it, the other finds both ends taken."""
     out, _ = _record(
         ledger,
         "NORD",
-        _tx(64, "debit", "900.00", counterparty_iban="RO71BTRLEURCRT0000000001"),
-        _tx(65, "credit", "900.00", iban="RO71BTRLEURCRT0000000001"),
+        _tx(64, "debit", "900.00", counterparty_iban=EUR_ACCOUNT),
+        _tx(65, "credit", "900.00", iban=EUR_ACCOUNT),
     )
     stale, slow, gate, done = list(_rows(ledger).values()), links.other_end, threading.Barrier(2), []
 
@@ -780,7 +819,9 @@ def test_two_connections_explaining_the_same_transfer_explain_it_once(ledger, li
         L = Ledger(timeout=10)
         gate.wait()
         try:
-            done.extend(links.apply_rules(L, "NORD", stale))
+            done.append(links.apply_rules(L, "NORD", stale))
+        except Exception as e:  # noqa: BLE001 - a worker's failure is the test's
+            done.append(e)
         finally:
             L.close()
 
@@ -790,4 +831,4 @@ def test_two_connections_explaining_the_same_transfer_explain_it_once(ledger, li
         t.start()
     for t in threads:
         t.join()
-    assert done == [out] and ledger.db.execute("SELECT count(*) FROM tx_links").fetchone()[0] == 1
+    assert sorted(done) == [[], [out]] and ledger.db.execute("SELECT count(*) FROM tx_links").fetchone()[0] == 1
