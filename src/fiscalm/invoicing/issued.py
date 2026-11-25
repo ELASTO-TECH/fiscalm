@@ -549,7 +549,7 @@ def _full_tax_id(r) -> str:
     return (full[2:] if re.fullmatch(r"RO\d+", full) else full) or tax_token(r["client_cui"]) or ""
 
 
-_SEP = r"[\s./:-]*"
+_SEP = r"[\s./:;,-]*"
 
 
 def _bare_cui_on(cui: str, text: str) -> bool:

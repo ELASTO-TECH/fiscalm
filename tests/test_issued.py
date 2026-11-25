@@ -556,6 +556,7 @@ def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec,
         ("BETA SOFTWARE SRL|RO66666666", ("NRD 0050", "NRD 0051"), "DE-66666666"),
         ("BETA SOFTWARE SRL|RO66666666", ("NRD 0050", "NRD 0051"), "US 66666666"),
         ("GERMAN FIRMA GMBH|DE123456789", ("NRD 0050", "NRD 0051"), "ORDER CODE 123456789"),
+        ("BETA SOFTWARE SRL|RO66666666", ("NRD 0050", "NRD 0051"), "Incasare;DE;66666666"),
         ("BETA SOFTWARE SRL|RO66666666", ("NRD 50", "NRD 50-2026"), "Plata factura NRD 50/2026"),
     ],
 )
