@@ -801,9 +801,7 @@ def rivals(L: Ledger, company: str):
         if r["message_id"] in have or r["message_id"] in credits
     ]
     items = L.payments(status=("pending", "exported"), company=company)
-    known = {n for r in L.efactura_rows(company=company) if (n := number_of(r["number"]))}
-    known |= {n for p in L.payments(company=company) if (n := payment_number(p))}
-    known |= {n for r in old if (n := number_of(r["number"]))}
+    known = _known_numbers(L, company, old)
     cands = [(("efactura", r["message_id"]), number_of(r["number"]), lambda t, r=r: _fits(r, t)) for r in invoices]
     cands += [(("payment", p["item_id"]), payment_number(p), lambda t, p=p: payment_fits(p, t)) for p in items]
     cands += [
@@ -816,10 +814,23 @@ def rivals(L: Ledger, company: str):
     def of(t: statements.Tx) -> set[tuple[str, str]]:
         if not L.card_allows(company, t.card_last4):
             return set()
-        names = {n for n in known if re.search(rf"(?<!\d){n}(?!\d)", t.description)}
+        names = _named(known, t)
         return {key for key, no, fits in cands if (not names or no in names) and fits(t)}
 
+    of.known = known  # the invoice numbers a debit may name (candidates applies the same restriction)
     return of
+
+
+def _known_numbers(L: Ledger, company: str, old: list) -> set[str]:
+    """Every invoice number the firm knows (any supplier invoice, accountant's or OP item, history), whatever its
+    status: a debit naming one is that invoice's."""
+    known = {n for r in L.efactura_rows(company=company) if (n := number_of(r["number"]))}
+    known |= {n for p in L.payments(company=company) if (n := payment_number(p))}
+    return known | {n for r in old if (n := number_of(r["number"]))}
+
+
+def _named(known: set[str], t: statements.Tx) -> set[str]:
+    return {n for n in known if re.search(rf"(?<!\d){n}(?!\d)", t.description)}
 
 
 def _open_invoices(L: Ledger, company: str):
@@ -835,27 +846,33 @@ def _open_invoices(L: Ledger, company: str):
 AMOUNT_DAYS = 45  # a debit that fits an invoice by its amount alone is suggested only this close after it
 
 
-def candidates(L: Ledger, company: str) -> Callable[[statements.Tx], set[tuple[str, str]]]:
+def candidates(L: Ledger, company: str, fit=None) -> Callable[[statements.Tx], set[tuple[str, str]]]:
     """What a person may pick for a debit (Plată de lămurit): its rivals, or, when it fits none, the invoices still
     to pay whose exact amount it has, dated from 5 days after to AMOUNT_DAYS before it. An amount alone proves
-    nothing: no matcher settles by it (they use rivals); a person confirms the one or chooses among several."""
-    fit = rivals(L, company)
+    nothing: no matcher settles by it (they use rivals); a person confirms the one or chooses among several. Never
+    offered: a transfer to the firm's own account, a debit the payments path tracks (its IBAN and amount), one that
+    names another known invoice number."""
+    fit = fit or rivals(L, company)
 
     @cache
     def known() -> tuple:  # read only once a debit fits no rival
-        return remembered_advance(L, company), _open_invoices(L, company)[0]
+        tracked = {(p["payee_iban"], Decimal(p["amount"])) for p in L.payments(company=company)}
+        own = companies.get(company, L=L).own_ibans
+        return remembered_advance(L, company), _open_invoices(L, company)[0], tracked, fit.known, own
 
     def alone(t: statements.Tx) -> set[tuple[str, str]]:
         statements.classify_tx(t)
         if t.category in (statements.TAX, statements.OWNER_ADVANCE) or not L.card_allows(company, t.card_last4):
             return set()
-        advance, invoices = known()
-        if advance(t):
+        advance, invoices, tracked, numbers, own = known()
+        if advance(t) or t.counterparty_iban in own or (t.counterparty_iban, t.amount) in tracked:
             return set()
+        names = _named(numbers, t)
         return {
             ("efactura", r["message_id"])
             for r in invoices
-            if _amount_matches(t, Decimal(r["total"]), r["currency"])
+            if (not names or number_of(r["number"]) in names)
+            and _amount_matches(t, Decimal(r["total"]), r["currency"])
             and -5 <= (t.date - date.fromisoformat(r["issue_date"])).days <= AMOUNT_DAYS
         }
 
@@ -934,7 +951,8 @@ def note_ambiguous(L: Ledger, st: statements.Statement) -> None:
     still fits several candidates, one invoice by the supplier's name alone (_named_only), or, fitting none, invoices
     by their amount alone (candidates), is recorded, with them; one that settled something since, or fits nothing, is
     dropped. The user sees it as "Plată de lămurit" and picks the invoice (resolve_debit)."""
-    fit, cands, used = rivals(L, st.company), candidates(L, st.company), L.used_txs()
+    fit, used = rivals(L, st.company), L.used_txs()
+    cands = candidates(L, st.company, fit)
     unconfirmed = _named_only(L, st.company)
     L.drop_ambiguous()
     for t in st.settlement_txs:
@@ -964,7 +982,8 @@ def resolve_debit(L: Ledger, co: str, key: str, target: str) -> tuple[str, str]:
     if not pick or pick[0] in ("history", "partial"):  # before the firm's start, or paid in part: never settled here
         raise ResolveError("not one of the debit's candidates")
     t = statements.Tx.from_dict(json.loads(rec["tx"]))
-    fits = [] if key in L.used_txs() or statements.pays_nothing(t) else candidates(L, co)(t)
+    proven = rivals(L, co)
+    fits = [] if key in L.used_txs() or statements.pays_nothing(t) else candidates(L, co, proven)(t)
     if pick not in fits:
         if not any(tuple(c) in fits for c in json.loads(rec["candidates"])):
             L.drop_ambiguous(key)  # nothing left to choose; the next match records it again if it fits several
@@ -981,7 +1000,8 @@ def resolve_debit(L: Ledger, co: str, key: str, target: str) -> tuple[str, str]:
     L.drop_ambiguous(key)
     if pick[0] == "payment":
         pay.refresh_to_pay(L)  # a paid row leaves the payment file
-    elif (r := L.efactura(pick[1])) and (keys := line_keys(t, companies.get(co, L=L).own_ibans)):
+    elif pick in proven(t) and (r := L.efactura(pick[1])) and (keys := line_keys(t, companies.get(co, L=L).own_ibans)):
+        # an amount alone proves no name or account is the supplier's: only a rival's is remembered
         how = "iban" if "iban" in keys else "name" if "name" in keys else None
         if how and (partner := supplier_partner(co, r)):
             L.remember(
