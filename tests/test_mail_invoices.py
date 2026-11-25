@@ -78,7 +78,7 @@ def reading(*, fail=False, **fields):
         "doc_type": "invoice",
         "buyer_name": "Atelier Nord SRL",
         "buyer_tax_id": "RO11111111",
-        "seller_name": "Example Cloud Inc",
+        "seller_name": "",
         "seller_tax_id": "",
         "number": "INV-2026-0042",
         "issue_date": "2026-10-28",
@@ -385,6 +385,9 @@ def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
     got = ai_extract.check(reading(**{field: value})("", "", {}), companies.all(ledger))
     assert (getattr(got, field), got.rejected) == (kept, () if kept else (field,))
     assert ai_extract.check(reading(card_last4="2026")("", "", {}), {}, "Date 2026-10-28\nTotal 1.00").card_last4 == ""
+    assert not mi._unsure(
+        mi.Doc("pdf", ubl=True), mi.Outcome("asked", reason="buyer-unclear")
+    )  # the UBL's fields stand
 
 
 @pytest.mark.parametrize(
@@ -394,6 +397,8 @@ def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
         (invoice("Total paid 15.00 EUR"), {"total": "15.00", "buyer_tax_id": "RO44444444"}),  # an id none of ours
         (invoice("Order ABC-1984", buyer="Atelier Nord SRL", number=""), {"number": "ABC-1984"}),  # our own number
         (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {}),  # a currency the document never shows
+        (invoice("Ship to: Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),  # only its delivery address
+        (invoice(buyer="Atelier Nord SRL"), {"seller_name": "Invented Vendor"}),  # a supplier it doesn't print
         (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {"total": "", "currency": ""}),
         (invoice(buyer="Atelier Nord SRL"), {"total": "", "currency": "USD"}),  # another currency than the rules'
         (

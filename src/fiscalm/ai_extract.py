@@ -162,15 +162,17 @@ def check(raw: dict, firms: dict[str, companies.Company], text: str = "") -> Ext
         "currency": currency if currency in docs.CURRENCIES else "",
         "card_last4": card if re.fullmatch(r"\d{4}", card) and (not text or docs._card(text) == card) else "",
     }
+    compact = re.sub(r"\W", "", text.casefold())
+    names = {k: s[k].strip()[:200] for k in ("buyer_name", "seller_name")}
+    names = {k: v if not text or re.sub(r"\W", "", v.casefold()) in compact else "" for k, v in names.items()}
+    checked |= names  # a name the document doesn't print is never kept, nor matched to a bank line
     rejected = [k for k, v in checked.items() if s[k].strip() and not v]
     rejected += [k for k, v in (("buyer", buyer), ("seller", seller)) if v is None]
     return Extraction(
         doc_type=s["doc_type"] if s["doc_type"] in DOC_TYPES else "other",
         buyer=buyer or "",
         seller=seller or "",
-        buyer_name=s["buyer_name"].strip()[:200],
         buyer_tax_id=re.sub(r"\s+", "", s["buyer_tax_id"]).upper()[:20],
-        seller_name=s["seller_name"].strip()[:200],
         seller_tax_id=re.sub(r"\s+", "", s["seller_tax_id"]).upper()[:20],
         **checked,
         confident=s["confidence"] == "high",

@@ -135,6 +135,7 @@ class Doc:
     refused: str = ""  # why it is never filed ("" when it may be)
     evidence: docs.Evidence | None = None
     fiscal_type: str = ""  # A verified UBL also establishes the type of its PDF copy.
+    ubl: bool = False  # the fields come from the message's UBL: the AI never reads over them
     text: str = field(default="", repr=False)  # the PDF's text, for the AI helper only
     number_read: str = ""  # the number the AI read: shown in the question, never used to refuse or match a document
 
@@ -286,6 +287,16 @@ def _label(lines: list[str], i: int, col: int, co: companies.Company, *, tax_id:
 
 def roles(text: str, firms: list[str]) -> dict[str, str]:
     """Agreeing labelled mentions determine the role; unlabelled mentions add no evidence."""
+    return {key: next(iter(seen)) if len(seen) == 1 else "" for key, seen in role_labels(text, firms).items()}
+
+
+def disputed(text: str, firms: list[str]) -> list[str]:
+    """Firms whose labelled mentions disagree or only stand under a delivery label: never the buyer by an AI's word."""
+    return [key for key, seen in role_labels(text, firms).items() if seen and (len(seen) > 1 or seen == {""})]
+
+
+def role_labels(text: str, firms: list[str]) -> dict[str, set[str]]:
+    """Each firm's labels: the role of every labelled mention ("" for a delivery address or a conflict)."""
     lines = text.splitlines()
     out = {}
     for key in firms:
@@ -299,7 +310,7 @@ def roles(text: str, firms: list[str]) -> dict[str, str]:
                 label = _label(lines, i, col, co, tax_id=tax_id)
                 if label is not None:
                     seen.add(label)
-        out[key] = next(iter(seen)) if len(seen) == 1 else ""
+        out[key] = seen
     return out
 
 
@@ -820,7 +831,11 @@ UNSURE = ("no-firm", "buyer-unclear", "two-firms", "total")  # questions an AI r
 
 
 def _unsure(doc: Doc, out: Outcome) -> bool:
-    return doc.kind == "pdf" and (out.result == "unreadable" or out.result == "asked" and out.reason in UNSURE)
+    return (
+        doc.kind == "pdf"
+        and not doc.ubl
+        and (out.result == "unreadable" or out.result == "asked" and out.reason in UNSURE)
+    )
 
 
 def _ai_would_refuse(L: Ledger, x: ai_extract.Extraction) -> bool:
@@ -888,6 +903,8 @@ def ai_reading(L: Ledger, doc: Doc, data: bytes, *, ask: Callable | None = None)
     if not x.confident or x.rejected or own or _ai_would_refuse(L, x) or totals is None:
         return out  # in doubt: the question stays, with the fields read
     out.date, out.totals, out.card_last4 = doc.date or x.issue_date, totals, doc.card_last4 or x.card_last4
+    if x.buyer in disputed(doc.text, doc.firms):
+        return out  # the rules saw its name under a delivery label, or under conflicting ones
     if x.buyer and (not doc.firms or x.buyer in doc.firms):
         out.firms = doc.firms or [x.buyer]
         out.roles = doc.roles | {x.buyer: "buyer"}
@@ -956,6 +973,7 @@ def handle(L: Ledger, msg: imapread.Message, *, ask=None) -> str:
                 evidence=doc.evidence,
                 text=doc.text,
                 fiscal_type="invoice",
+                ubl=True,
             )
             ubl[0].refused = "same-as-pdf"
         if pre is not None and pre.refused == "same-as-pdf":
