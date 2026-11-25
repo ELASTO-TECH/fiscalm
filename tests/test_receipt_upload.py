@@ -710,7 +710,14 @@ def test_uploads_excluded_from_news_and_unsent(ledger, home):
     intake.accept(ledger, token, [("jpg", JPEG)])
     assert not api._news(ledger, "NORD", datetime.now() - timedelta(days=1), [])
     month = upload_links.timestamp()[:7]
-    ledger.add_document("a" * 64, "NORD", month, "statement", str(home / "statement.pdf"))
+    ledger.add_document(
+        "a" * 64,
+        "NORD",
+        month,
+        "statement",
+        str(home / "statement.pdf"),
+        accounts=["RO24BTRLRONCRT0000000001", "RO71BTRLEURCRT0000000001"],
+    )
     assert [d["sha"] for d in pack.pending_docs(ledger, "NORD", month)] == ["a" * 64]  # the statement, not the upload
 
 

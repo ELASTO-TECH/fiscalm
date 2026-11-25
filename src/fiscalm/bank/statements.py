@@ -41,20 +41,6 @@ class PartialMonth(StatementError):
         self.month = month
 
 
-class MissingAccounts(StatementError):
-    """A statement that leaves out accounts the company held at its bank in that month; `accounts` names each
-    one by currency and last four characters, e.g. "EUR 0001"."""
-
-    def __init__(self, accounts: list[str]):
-        super().__init__(
-            "Statement missing configured accounts: "
-            + ", ".join(accounts)
-            + "; download a full company statement from the bank, or set the month an account opened"
-            + " (fiscalm company opened)"
-        )
-        self.accounts = accounts
-
-
 # ------------------------------------------------------------------- decrypt
 
 

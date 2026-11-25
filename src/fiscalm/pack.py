@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from fiscalm import companies
 from fiscalm.bank import catalogue as banks, statements
+from fiscalm.bank.intake import month_missing
 from fiscalm.identity import partner_id
 from fiscalm.ledger import Ledger, finance_home, now
 from fiscalm.payments.engine import pay_lock
@@ -78,10 +79,15 @@ def pending_docs(ledger: Ledger, company: str, month: str, *, left_out: bool = F
     contabilului" stay out (`left_out=True` lists those instead)."""
     held, docs = not_mailed(ledger, company), ledger.documents(company=company, up_to_month=month, unsent_only=True)
     named = ledger.linked_receipts(company, docs)
+    # an earlier month's statements ride along only once every account of their banks is known to be there
+    months = {d["month"] for d in docs if d["kind"] == "statement"}
+    waiting = {m for m in months if month_missing(ledger, company, m) != []}
     return [
         d
         for d in docs
-        if not held_upload(d, named) and (d["kind"] == "receipt" and partner_of(company, d) in held) == left_out
+        if not held_upload(d, named)
+        and (d["kind"] == "receipt" and partner_of(company, d) in held) == left_out
+        and not (d["kind"] == "statement" and d["month"] in waiting)
     ]
 
 
@@ -92,12 +98,13 @@ def held_upload(d, named: set[str]) -> bool:
 
 
 def ready(ledger: Ledger, company: str, month: str) -> bool:
-    """A pack is ready once that month's statement is in and something is unsent."""
+    """A pack is ready once that month's statement is in, with every account of its banks, and something is unsent."""
     # a CSV is partial (its own days): it never stands for the month's statement
     has_statement = any(
         not str(d["path"]).endswith(".csv") for d in ledger.documents(company=company, month=month, kind="statement")
     )
-    return has_statement and bool(pending_docs(ledger, company, month))
+    complete = has_statement and month_missing(ledger, company, month) == []
+    return complete and bool(pending_docs(ledger, company, month))
 
 
 _NOT_NAME = re.compile(r"[^A-Za-z0-9]+")

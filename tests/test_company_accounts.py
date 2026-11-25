@@ -122,15 +122,15 @@ def test_a_legacy_statement_is_read_once_to_learn_its_accounts(config, ledger, t
     actions.act("company-account", "ALL", {"key": "NORD", "iban": ING_EUR, "currency": "EUR"})
     path = tmp_path / "old.xml"
     path.write_bytes(xml())  # NORD's BT RON account only
-    ledger.add_document("old", "NORD", "2026-09", "statement", str(path))
+    ledger.add_document("old", "NORD", "2026-10", "statement", str(path))  # stored under its own month
     assert [(a["currency"], a["bank"], a["last_statement"]) for a in nord_accounts(ledger)] == [
-        ("RON", "bt", "2026-09"),
+        ("RON", "bt", "2026-10"),
         ("EUR", "bt", None),
         ("EUR", "ing", None),
     ]  # never the ING account added since
     assert json.loads(ledger.document("old")["accounts"]) == ["RO24BTRLRONCRT0000000001"]  # kept: read once
     path.unlink()
-    assert nord_accounts(ledger)[0]["last_statement"] == "2026-09"
+    assert nord_accounts(ledger)[0]["last_statement"] == "2026-10"
 
 
 @pytest.mark.parametrize(

@@ -20,6 +20,8 @@ from fiscalm.api import actions, state as api, tokens
 from fiscalm.bank import statements
 from fiscalm.ledger import Ledger, now
 
+NORD_ACCOUNTS = ["RO24BTRLRONCRT0000000001", "RO71BTRLEURCRT0000000001"]  # the statement holds every account
+
 
 @pytest.fixture
 def documents(ledger, home):
@@ -28,7 +30,7 @@ def documents(ledger, home):
     for name, kind in [("statement", "statement"), ("receipt", "receipt")]:
         path = folder / (name + ".pdf")
         path.write_bytes(("synthetic " + name).encode())
-        ledger.add_document(name, "NORD", "2026-10", kind, str(path))
+        ledger.add_document(name, "NORD", "2026-10", kind, str(path), accounts=NORD_ACCOUNTS)
     return ledger
 
 
@@ -43,7 +45,11 @@ def test_pack_download_and_confirmation_freeze_only_its_documents(token_owner, d
     assert code == 200 and headers["content-type"] == "application/zip"
     assert headers["content-disposition"] == 'attachment; filename="NORD-2026-10.zip"'
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        assert archive.namelist() == ["rezumat.csv", "2026-10_cheltuiala_fara-nume.pdf", "2026-10_extras.pdf"]
+        assert archive.namelist() == [
+            "rezumat.csv",
+            "2026-10_cheltuiala_fara-nume.pdf",
+            "2026-10_extras_BT_EUR_RON.pdf",
+        ]
         assert archive.read("rezumat.csv").decode("utf-8-sig").startswith("Data;Tip;Suma;Moneda;Partener;Detalii;")
     assert hashlib.sha256(data).hexdigest() == version
     reader = tokens.create(L, "Reader", "read", user_id=token_owner)["token"]
@@ -64,7 +70,7 @@ def _month_pack(L, home, month: str) -> str:
     path = home / "NORD" / month / "statement.pdf"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"synthetic statement " + month.encode())
-    L.add_document("statement" + month, "NORD", month, "statement", str(path))
+    L.add_document("statement" + month, "NORD", month, "statement", str(path), accounts=NORD_ACCOUNTS)
     pack.build(L, "NORD", month)
     return L.get_meta(f"pack_version:NORD:{month}")
 
@@ -212,7 +218,7 @@ def test_reports_pack_warning_and_transactions_share_explanations(ledger, home, 
     path = home / "NORD" / "statement.pdf"
     path.parent.mkdir()
     path.write_bytes(b"synthetic statement")
-    ledger.add_document("statement", "NORD", "2026-10", "statement", str(path))
+    ledger.add_document("statement", "NORD", "2026-10", "statement", str(path), accounts=NORD_ACCOUNTS)
     monkeypatch.setattr(api, "_statement", lambda *a: st)
     links.link(ledger, "NORD", transfer, kind="transfer")
     links.link(ledger, "NORD", fee, kind="label", reason="bank_fee")
@@ -261,7 +267,7 @@ def test_a_changed_month_is_prepared_again_as_a_new_version_and_a_sent_one_never
     path = home / "NORD" / "statement.pdf"
     path.parent.mkdir()
     path.write_bytes(b"synthetic statement")
-    ledger.add_document("statement", "NORD", "2026-10", "statement", str(path))
+    ledger.add_document("statement", "NORD", "2026-10", "statement", str(path), accounts=NORD_ACCOUNTS)
     monkeypatch.setattr(api, "_statement", lambda *a: statements.Statement("NORD", None, None, []))
     when = datetime(2026, 11, 11)
 

@@ -20,7 +20,7 @@ import pytest
 from firms import seed
 from test_invoicing import DATA, LINE, PARTY
 
-from fiscalm import __version__, backup, bnr, cli, migrations as m, pack
+from fiscalm import __version__, backup, bnr, cli, migrations as m
 from fiscalm.api import state as api
 from fiscalm.invoicing import engine as invoicing, issued, ubl
 from fiscalm.ledger import Ledger
@@ -731,7 +731,8 @@ def test_app_statements_join_packs_on_upgrade_but_never_after_a_sent_pack(tmp_pa
                 (sha, month, kind, source),
             )
     with closing(Ledger(path)) as ledger:
-        assert [d["sha"] for d in pack.pending_docs(ledger, "EXAMPLE", "2026-11")] == ["oct"]
+        unsent = ledger.documents(company="EXAMPLE", up_to_month="2026-11", unsent_only=True)
+        assert [d["sha"] for d in unsent if d["kind"] == "statement"] == ["oct"]
         assert sorted(json.loads(ledger.get_meta("app-statements-counted-sent"))) == ["aug", "sep"]
         assert dict(ledger.db.execute("SELECT sha, source FROM documents")) == {
             "aug": "statement-import",

@@ -21,9 +21,10 @@ from fiscalm.bank.intake import (
     combine,
     hold_csv_days,
     import_lock,
-    refuse_incomplete,
+    month_missing,
     refuse_overlap,
     refuse_unchained,
+    refuse_unsound_accounts,
     statement_ibans,
 )
 from fiscalm.efactura import inbox as efactura
@@ -354,6 +355,7 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
         "unprotected": ", ".join(str(dest) for dest, _ in stored),
         "transactions": len(st.txs),
         "balanced": all(a.balanced for a in st.accounts),
+        "missing": month_missing(ledger, parts[0].company, parts[0].month) or [],
         "payments_marked_paid": paid,
         "efactura_marked_paid": ef_paid,
     }
@@ -366,13 +368,11 @@ def _set_checks(st: statements.Statement, parts: list[_Opened], check) -> None:
         raise statements.StatementError("PDF account does not belong to the selected company")
     if check:
         check(st)
-    refuse_incomplete(st)  # every caller: a statement, in one file or several, holds every account at its bank
+    refuse_unsound_accounts(st)  # also before a month stands as its neighbour's evidence (_checked)
 
 
 def _refusal(parts: list[_Opened], exc: statements.StatementError) -> dict:
-    """A refused set, with the engine's own facts for the person: the missing accounts, or the month left partial."""
-    if isinstance(exc, statements.MissingAccounts):
-        return _refused(parts, str(exc), missing=exc.accounts)
+    """A refused set, with the engine's own facts for the person: the month left partial."""
     if isinstance(exc, statements.PartialMonth):
         return _refused(parts, str(exc), partial=exc.month.isoformat())
     return _refused(parts, str(exc))
