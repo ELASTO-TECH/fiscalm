@@ -53,7 +53,7 @@ it.each([false, true])("keeps transaction detail and choice fixtures equal to co
   const full = manyInvoices(explained), q = { kind: "transaction", id: POPESCU };
   const actual = fixtureDetailData(full, "transaction", POPESCU), expected = detailResult(full, q);
   expect(actual.transaction).toEqual(expected.transaction); expect(actual.related).toEqual(expected.related);
-  for (const collection of ["partners", "invoices", "payments", "selected"] as const) {
+  for (const collection of ["partners", "invoices", "payments", "selected", "receipts"] as const) {
     const cursor = expected.transaction.choices[collection].total > 50 ? "50" : "";
     expect(fixtureTransactionChoicesData(full, { id: POPESCU, collection, cursor })).toEqual(choicesResult(full, { id: POPESCU, collection, cursor }));
   }

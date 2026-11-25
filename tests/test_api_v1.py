@@ -154,14 +154,14 @@ def test_transaction_choice_pages_search_selected_money_scope_and_public_payment
     monkeypatch.setattr(api, "state", read)
     monkeypatch.setattr(api, "prepared_payments", lambda *args: full["prepared_payments"])
     initial = lists.detail(ledger, "ALL", {"kind": "transaction", "id": tx["id"]})["transaction"]["choices"]
-    assert calls == ["NORD"] and initial.pop("proposed")["total"] == 0
+    assert calls == ["NORD"] and initial.pop("proposed")["total"] == initial.pop("receipts")["total"] == 0
     assert all(p["total"] == 151 and len(p["data"]) == 50 for p in initial.values())
     secret = tokens.create(ledger, "Choice reader", "read", user_id=token_owner)["token"]
     path = f"transaction-choices?id={tx['id']}&collection=payments&cursor=150"
     request(server, secret, "/companies/NORD/" + path)
     _req(server, "GET", "/web/api/" + path + "&co=ALL")
     before = ledger.db.execute("PRAGMA data_version").fetchone()[0], ledger.db.total_changes
-    for name in transaction_choices.COLLECTIONS:
+    for name in set(transaction_choices.COLLECTIONS) - {"receipts"}:  # the world has no unread upload
         seen, cursor = [], ""
         while True:
             page = lists.transaction_choices(ledger, "NORD", dict(id=tx["id"], collection=name, cursor=cursor))[
