@@ -5,6 +5,7 @@ import json
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from firms import iban, set_firm
@@ -52,6 +53,21 @@ def test_an_account_in_another_currency_than_the_firms_is_refused(ledger, tmp_pa
     ron = companies.get("NORD").ibans["RON"]
     r = recon.ingest_file(ledger, write(tmp_path, xml(iban=ron, currency="EUR")), operator=True)
     assert r["status"] == "refused" and "currency differs" in r["errors"][0] and not ledger.documents()
+    # nor does it stand as a neighbouring month's evidence
+    wrong = SimpleNamespace(st=parse(tmp_path, xml(iban=ron, currency="EUR")))
+    assert recon._checked({("NORD", "2026-10"): [wrong]}, None) == []
+
+
+def test_a_statement_learned_from_its_file_names_accounts_only_for_its_own_month(ledger, tmp_path):
+    """A row stored before accounts were recorded whose file reads as another month proves no account for its own."""
+    october = str(write(tmp_path, complete()))
+    ledger.add_document("sep", "NORD", "2026-09", "statement", october)
+    assert statement_intake.learn_accounts(ledger, ledger.document("sep")) == []
+    assert (
+        ledger.document("sep")["accounts"] is None and statement_intake.month_missing(ledger, "NORD", "2026-09") is None
+    )
+    ledger.add_document("oct", "NORD", "2026-10", "statement", october)
+    assert len(statement_intake.learn_accounts(ledger, ledger.document("oct"))) == 2
 
 
 def test_the_pack_takes_a_months_statements_only_with_every_account_of_their_banks(ledger, tmp_path):

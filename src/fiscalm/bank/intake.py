@@ -73,7 +73,7 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
     before accounts were recorded is read to learn its accounts; if it can't be read, nothing is imported."""
     if not st.period_start or not st.period_end:
         raise statements.StatementError("Cannot verify statement period")
-    _refuse_twice(st)
+    refuse_unsound_accounts(st)
     lo, hi = span(st)
     mine = set(statement_ibans(st))
     if not mine:
@@ -116,7 +116,7 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
             raise statements.StatementError("Overlapping statement already imported")
 
 
-def _refuse_twice(st: statements.Statement) -> None:
+def refuse_unsound_accounts(st: statements.Statement) -> None:
     """One statement holds an account's days once, in the currency the firm keeps it in: two sections of one account
     for the same days, or an account in another currency, settle nothing."""
     co = companies.get(st.company)
@@ -156,13 +156,17 @@ def _csv_docs(L: Ledger, company: str) -> list:
 
 def learn_accounts(L: Ledger, doc) -> list[str]:
     """The accounts a stored statement covers. One stored before accounts were recorded is read from its file and
-    the answer is kept on the document, so it is read once; a file that can't be read proves no account."""
+    the answer is kept on the document, so it is read once; a file that can't be read, or that reads as another
+    firm's or another month's statement, proves no account."""
     if doc["accounts"]:
         return json.loads(doc["accounts"])
     try:
-        found = statement_ibans(statements.parse(Path(doc["path"]), doc["company"]))
+        st = statements.parse(Path(doc["path"]), doc["company"])
     except (OSError, RuntimeError, ValueError):
         return []
+    if st.company != doc["company"] or st.month != doc["month"]:
+        return []
+    found = statement_ibans(st)
     if found:
         with L.tx() as db:
             db.execute(

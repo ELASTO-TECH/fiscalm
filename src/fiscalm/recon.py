@@ -24,6 +24,7 @@ from fiscalm.bank.intake import (
     month_missing,
     refuse_overlap,
     refuse_unchained,
+    refuse_unsound_accounts,
     statement_ibans,
 )
 from fiscalm.efactura import inbox as efactura
@@ -367,6 +368,7 @@ def _set_checks(st: statements.Statement, parts: list[_Opened], check) -> None:
         raise statements.StatementError("PDF account does not belong to the selected company")
     if check:
         check(st)
+    refuse_unsound_accounts(st)  # also before a month stands as its neighbour's evidence (_checked)
 
 
 def _refusal(parts: list[_Opened], exc: statements.StatementError) -> dict:
