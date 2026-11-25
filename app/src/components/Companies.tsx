@@ -413,6 +413,11 @@ function StatementPassword({ co, bank, name, set, reload }: { co: string; bank: 
  * connected so its accounts can be chosen at the bank. Balances and statements are in Tranzacții. */
 export function BanksAndAccounts({ c, reload, titled = false }: { c: CompanyEntry; reload: () => void; titled?: boolean }) {
   const [chosen, setChosen] = useState("");
+  // each account's Date cont, kept here: closing or reopening moves its row to the other list, and what was typed (and
+  // whether the editor was open) goes with it
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  const row = (a: CompanyAccount) => <AccountRow key={a.id} c={c} a={a} reload={reload} draft={drafts[a.id] ?? NO_DRAFT}
+    setDraft={(change) => setDrafts((all) => ({ ...all, [a.id]: change(all[a.id] ?? NO_DRAFT) }))} />;
   const inboxes = useIntegrations().data?.items ?? null;
   const banks = c.banks ?? [];
   const accounts = (c.accounts ?? []).filter((a) => !a.retired);
@@ -430,7 +435,7 @@ export function BanksAndAccounts({ c, reload, titled = false }: { c: CompanyEntr
           <h4 className="m-0 text-[15px] font-semibold leading-6">{b.name || "Altă bancă"}</h4>
           <p id={`acc-${c.key}-${b.bank}`} className={groupStyle}>Conturi</p>
           <ul className="m-0 mb-4 list-none p-0" aria-labelledby={`acc-${c.key}-${b.bank}`}>
-            {accounts.filter((a) => a.bank === b.bank).map((a) => <AccountRow key={a.id} c={c} a={a} reload={reload} />)}
+            {accounts.filter((a) => a.bank === b.bank).map(row)}
             {!active.has(b.bank) ? <li className="py-2 text-sm text-muted">Niciun cont încă.</li> : null}
           </ul>
           <p className={groupStyle}>Cum ajung tranzacțiile</p>
@@ -443,7 +448,7 @@ export function BanksAndAccounts({ c, reload, titled = false }: { c: CompanyEntr
         {/* every closed account, whatever its bank: one whose bank has no current account keeps its dates to correct */}
         <p id={`closed-${c.key}`} className={groupStyle}>Conturi închise</p>
         <ul className="m-0 list-none p-0" aria-labelledby={`closed-${c.key}`}>
-          {closed.map((a) => <AccountRow key={a.id} c={c} a={a} reload={reload} />)}
+          {closed.map(row)}
         </ul>
       </> : null}
       <AddAccount c={c} accounts={accounts} reload={reload} />
@@ -466,7 +471,12 @@ function datesLine(a: CompanyAccount): string {
 }
 
 /** One account in Bănci și conturi: its currency and last digits, its dates, whether payments leave from it, Date cont. */
-function AccountRow({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; reload: () => void }) {
+/** What a person typed in an account's Date cont (null: untouched, the engine's date shows) and whether it is open. */
+type Draft = { opened: string | null; retired: string | null; open: boolean };
+const NO_DRAFT: Draft = { opened: null, retired: null, open: false };
+type DraftProps = { draft: Draft; setDraft: (change: (d: Draft) => Draft) => void };
+
+function AccountRow({ c, a, reload, ...draft }: { c: CompanyEntry; a: CompanyAccount; reload: () => void } & DraftProps) {
   // a closed account is listed with the others closed, whatever its bank: the bank tells two alike apart
   const line = [a.retired ? a.bank_name || "Altă bancă" : "", datesLine(a)].filter(Boolean).join(", ");
   return (
@@ -475,7 +485,7 @@ function AccountRow({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; relo
         {a.currency} ••••{a.iban_last4}{line ? <small className="block text-xs text-muted">{line}</small> : null}
       </span>
       {a.pays ? <span className={`rounded-badge px-1.5 py-0.5 text-xs font-medium ${statePillStyle.ok}`}>Plățile pleacă de aici</span> : null}
-      <AccountDates c={c} a={a} reload={reload} />
+      <AccountDates c={c} a={a} reload={reload} {...draft} />
     </li>
   );
 }
@@ -486,11 +496,10 @@ function AccountRow({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; relo
  * The engine checks both: an account can't open after it closed, closes only on a day already past or today, and the
  * one payment files debit closes only once another takes its place. A statement of a month the account wasn't open
  * doesn't owe it. */
-function AccountDates({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; reload: () => void }) {
+function AccountDates({ c, a, reload, draft, setDraft }: { c: CompanyEntry; a: CompanyAccount; reload: () => void } & DraftProps) {
   const { busy } = useApp();
   const send = useSend(reload);
-  const [opened, setOpened] = useState<string | null>(null); // null: untouched, show the engine's
-  const [retired, setRetired] = useState<string | null>(null);
+  const { opened, retired } = draft; // null: untouched, show the engine's
   const id = `dates-${c.key}-${a.id}`;
   const changed: Record<string, string> = {
     ...(opened !== null && opened.trim() !== (a.opened ?? "") ? { opened: opened.trim() } : {}),
@@ -502,18 +511,24 @@ function AccountDates({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; re
     if (busy || !Object.keys(sent).length) return;
     const r = await send("company-account-dates", { key: c.key, account: a.id, ...sent });
     if (!r?.ok) return;
-    setOpened((v) => (v !== null && v.trim() === sent.opened ? null : v)); // typed in since: kept
-    setRetired((v) => (v !== null && v === sent.retired ? null : v));
+    setDraft((d) => ({ // typed in since: kept
+      ...d,
+      opened: d.opened !== null && d.opened.trim() === sent.opened ? null : d.opened,
+      retired: d.retired !== null && d.retired === sent.retired ? null : d.retired,
+    }));
   };
   return (
-    <details className="basis-full">
+    <details className="basis-full" open={draft.open} onToggle={(e) => {
+      const open = e.currentTarget.open;
+      setDraft((d) => (d.open === open ? d : { ...d, open }));
+    }}>
       <Summary>Date cont</Summary>
       <Form className="mt-2" onSubmit={save} aria-label={`Datele contului ${a.currency} ••••${a.iban_last4}`}>
         <Label htmlFor={`${id}-opened`}>Deschis din (luna AAAA-LL sau ziua AAAA-LL-ZZ)</Label>
-        <Input id={`${id}-opened`} value={opened ?? a.opened ?? ""} onChange={(e) => setOpened(e.target.value)} autoComplete="off"
+        <Input id={`${id}-opened`} value={opened ?? a.opened ?? ""} onChange={(e) => { const v = e.target.value; setDraft((d) => ({ ...d, opened: v })); }} autoComplete="off"
           maxLength={10} placeholder="2024-03" />
         <Label htmlFor={`${id}-retired`}>Închis pe</Label>
-        <Input id={`${id}-retired`} type="date" value={retired ?? a.retired ?? ""} onChange={(e) => setRetired(e.target.value)} />
+        <Input id={`${id}-retired`} type="date" value={retired ?? a.retired ?? ""} onChange={(e) => { const v = e.target.value; setDraft((d) => ({ ...d, retired: v })); }} />
         <Actions>
           <Button type="submit" className="btn g" disabled={busy || !Object.keys(changed).length}>Salvează datele</Button>
         </Actions>

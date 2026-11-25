@@ -355,6 +355,35 @@ describe("Firme", () => {
     expect(form.getByRole("button", { name: "Salvează datele" })).toBeEnabled();
   });
 
+  it("an account closed by its save moves to Conturi închise with what was typed meanwhile, its editor still open", async () => {
+    at("?co=NORD&tab=setari&sec=firme");
+    const eur = { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null as string | null, opened: null, statement_senders: [], last_statement: null };
+    const firm = (account: typeof eur) => {
+      const cfg = config();
+      cfg.companies[0] = { ...cfg.companies[0], has_ron_account: true, iban_last4: "0001", banks: [
+        { bank: "bt", name: "Banca Transilvania", connect: "ready", connection: null }], accounts: [
+        { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null }, account] };
+      return cfg;
+    };
+    let current = firm(eur);
+    const pending = deferred<Response>();
+    const { p } = await page({ companies: () => json(current), onPost: (c: Call) => (c.url.endsWith("company-account-dates")
+      ? pending.promise : json({ ok: true, message: "", state: null, done: { offers: [] } })) });
+    await userEvent.click(p.getByRole("button", { name: "Modifică NORD" }));
+    await userEvent.click(within(p.getByRole("list", { name: "Conturi" })).getAllByText("Date cont")[1]);
+    const before = within(p.getByRole("form", { name: "Datele contului EUR ••••0002" }));
+    await userEvent.type(before.getByLabelText("Închis pe"), "2026-10-31");
+    await userEvent.click(before.getByRole("button", { name: "Salvează datele" }));
+    await userEvent.type(before.getByLabelText(/Deschis din/), "2024-03"); // while the answer is on its way
+    current = firm({ ...eur, retired: "2026-10-31" });
+    await act(async () => pending.resolve(await answer({ key: "NORD", iban_last4: "0002", opened: null, retired: "2026-10-31" }, "Datele contului au fost salvate.")));
+    const closed = await p.findByRole("list", { name: "Conturi închise" });
+    const after = within(within(closed).getByRole("form", { name: "Datele contului EUR ••••0002" }));
+    expect(after.getByLabelText(/Deschis din/)).toHaveValue("2024-03");
+    expect(after.getByLabelText("Închis pe")).toHaveValue("2026-10-31");
+    expect(after.getByLabelText(/Deschis din/)).toBeVisible(); // the editor is still open
+  });
+
   it("lists a firm in one row with one button, and sets a bank's statement password write-only in its Bănci", async () => {
     at("?co=NORD&tab=setari&sec=firme");
     const cfg = config();
