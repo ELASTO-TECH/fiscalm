@@ -1773,13 +1773,15 @@ class Ledger:
         """Keep another reading of a stored credit beside it (statement_tx_readings), the stored line unchanged: a
         later read may name the payer, name it differently or correct its date, and who paid is what a client
         reminder checks. Only a reading that differs in that evidence from the stored one and every kept one."""
-        if t.direction != "credit":
-            return
+        if (
+            t.direction != "credit"
+            or not db.execute("SELECT 1 FROM statement_txs WHERE tx_key=? AND company=?", (key, company)).fetchone()
+        ):
+            return  # another firm's line under the same key never gets this firm's reading
         known = db.execute(
-            "SELECT tx FROM statement_txs WHERE tx_key=:k AND company=:co AND tx IS NOT NULL "
-            "UNION ALL SELECT r.tx FROM statement_tx_readings r JOIN statement_txs s USING(tx_key) "
-            "WHERE r.tx_key=:k AND s.company=:co",
-            {"k": key, "co": company},
+            "SELECT tx FROM statement_txs WHERE tx_key=:k AND tx IS NOT NULL "
+            "UNION ALL SELECT tx FROM statement_tx_readings WHERE tx_key=:k",
+            {"k": key},
         ).fetchall()
         new = t.to_dict()
         evidence = lambda d: tuple(d.get(f) for f in cls.READING_EVIDENCE)  # noqa: E731

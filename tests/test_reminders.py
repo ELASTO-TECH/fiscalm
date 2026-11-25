@@ -268,6 +268,15 @@ def test_a_reading_that_adds_no_evidence_is_not_kept(reminder, direction):
     assert L.db.execute("SELECT count(*) FROM statement_tx_readings").fetchone()[0] == 0
 
 
+def test_another_firms_reading_never_joins_a_line(reminder):
+    L, iid = reminder
+    line = _client_credit(L, iid, counterparty="", iban="")
+    L.record_statement(_st(line))
+    line.counterparty = "Client"
+    L.record_statement(_st(line, company="STUDIO9"))
+    assert L.db.execute("SELECT count(*) FROM statement_tx_readings").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize(
     "invoice, change, reminded",
     [
