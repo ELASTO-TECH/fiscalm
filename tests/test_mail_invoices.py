@@ -391,15 +391,25 @@ def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
     [
         (invoice(buyer="Atelier Nord SRL"), {"total": "999.00"}),  # a total it doesn't print: its buyer counts neither
         (invoice("Total paid 15.00 EUR"), {"total": "15.00", "buyer_tax_id": "RO44444444"}),  # an id none of ours
-        (invoice(buyer="Atelier Nord SRL", number=""), {"confidence": "low", "number": "NRD-7"}),  # our own number
+        (invoice("Order ABC-1984", buyer="Atelier Nord SRL", number=""), {"number": "ABC-1984"}),  # our own number
+        (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {}),  # a currency the document never shows
     ],
 )
 def test_a_contradicted_or_unsure_ai_reading_keeps_the_question(ledger, doc, fields):
     ledger.db.execute(
-        "INSERT INTO issued(message_id,company,number,raw_path,status,created_at) VALUES('x','NORD','NRD-7','x','open','t')"
+        "INSERT INTO issued(message_id,company,number,raw_path,status,created_at) VALUES('x','NORD','ABC-1984','x','open','t')"
     )
     ledger.db.commit()
     assert mi.handle(ledger, message(("pdf", doc)), ask=reading(**fields)) == "asked:1"
+
+
+def test_a_number_the_ai_read_never_matches_another_document(ledger):
+    assert mi.handle(ledger, message(("pdf", invoice()))) == "filed:1"
+    other = invoice(buyer="Atelier Nord SRL", number="", title="INVOICE Ref INV-2026-0042")
+    asked = mi.handle(ledger, message(("pdf", other), address="a@b.example"), ask=reading(confidence="low"))
+    (q,) = mi.questions(ledger)
+    assert asked == "asked:1" and api._to_check(ledger, "NORD")[-1]["number"] == "INV-2026-0042"
+    assert mi.answer(ledger, q["sha"], "NORD")["status"] == "filed"
 
 
 def test_a_scanned_invoice_is_read_from_its_picture(ledger):
@@ -413,7 +423,7 @@ def test_a_scanned_invoice_is_read_from_its_picture(ledger):
     low = text_pdf([" "])  # a low-confidence reading of a scan waits as a question, with what it read
     assert mi.handle(ledger, message(("pdf", low), mid="m2"), ask=reading(confidence="low")) == "asked:1"
     (q,) = mi.questions(ledger)
-    assert (q["data"]["reason"], q["data"]["number"], q["data"]["totals"]) == ("no-firm", "INV-2026-0042", [])
+    assert (q["data"]["reason"], q["data"]["number_read"], q["data"]["totals"]) == ("no-firm", "INV-2026-0042", [])
 
 
 @pytest.mark.parametrize(
@@ -426,6 +436,8 @@ def test_a_scanned_invoice_is_read_from_its_picture(ledger):
         ("Paid 12.00\nFee USD 1.00\nEUR", "12.00", "EUR", False),  # no currency on its line, two on the document
         ("Charged 12.10", "12.10", "EUR", False),  # no currency anywhere: the AI's alone counts for nothing
         ("Subtotal 10.00 EUR\nCharged EUR 12.10", "10.00", "EUR", False),
+        ("VAT 2.10 EUR\nCharged 12.10 EUR", "2.10", "EUR", False),
+        ("VAT 2.10 EUR\nTotal incl. VAT 12.10 EUR", "12.10", "EUR", True),
     ],
 )
 def test_an_ai_total_needs_its_amount_printed_with_its_currency(text, total, currency, ok):
