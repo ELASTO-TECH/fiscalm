@@ -209,6 +209,8 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
         (dict(supplier_cui="DE11111111"), None, False),  # this firm's digits, another country's VAT id
         (dict(client="", client_cui=""), None, False),  # no buyer to tell a payment from
         (dict(client="ABC SRL", client_cui=""), None, False),  # a name too short for the payer matcher
+        (dict(client="ABC SRL", client_cui="RO12345"), None, False),  # and a CUI too short for it
+        (dict(), "foreign", False),  # this firm's CUI digits from a supplier in another country
     ],
 )
 def test_spv_synced_invoice_gets_reminder_text(reminder, home, sec, monkeypatch, invoice, change, reminded):
@@ -216,6 +218,19 @@ def test_spv_synced_invoice_gets_reminder_text(reminder, home, sec, monkeypatch,
     L.db.execute("DELETE FROM issued WHERE company='NORD'")  # only the invoice synced from SPV is left
     L.db.commit()
     blobs = {"9001": ubl(**dict(number="EXT 7", issue="2026-11-01", due="2026-11-08") | invoice)}
+    if change == "foreign":  # the supplier's address in Germany, its id the firm's bare digits
+        blobs["9001"] = (
+            blobs["9001"]
+            .replace(
+                b"<cbc:CompanyID>RO11111111</cbc:CompanyID>",
+                b"<cbc:CompanyID>11111111</cbc:CompanyID>",
+            )
+            .replace(
+                b"<cac:AccountingSupplierParty><cac:Party>",
+                b"<cac:AccountingSupplierParty><cac:Party><cac:PostalAddress><cac:Country><cbc:IdentificationCode>DE"
+                b"</cbc:IdentificationCode></cac:Country></cac:PostalAddress>",
+            )
+        )
     if change == "storno":
         blobs["9002"] = ubl(root="CreditNote", number="EXT 9", total="190.00", ref="EXT 7", issue="2026-11-05")
     blobs["9003"] = ubl(number="EXT 8", issue="0001-01-08", due="")  # an impossible window refuses only itself

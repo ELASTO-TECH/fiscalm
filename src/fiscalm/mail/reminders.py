@@ -278,7 +278,11 @@ def _ours(L: Ledger, co: str, stored: dict) -> bool:
         inv, sha = efactura.invoice_from_zip(read[1])
     except efactura.UNREADABLE:  # UblError is a ValueError
         return False
-    return sha == stored["xml_sha"] and history_invoices.direction(companies.get(co, L=L), inv) == "issued"
+    # A digits-only id is a Romanian CUI: from a supplier in another country it is someone else's number.
+    foreign = inv.supplier_tax_id.isdigit() and (inv.supplier_address or {}).get("country", "") not in ("", "RO")
+    return (
+        sha == stored["xml_sha"] and not foreign and history_invoices.direction(companies.get(co, L=L), inv) == "issued"
+    )
 
 
 def _shift(day: str, days: int) -> date:
@@ -320,9 +324,9 @@ def eligible(
     if Decimal(row["owed"]) != Decimal(row["total"]) or Decimal(row["credited"]) or row.get("reversed_by"):
         raise Refused(PARTIAL)
     view = view or StatementView(L, co)
-    name = row["client"] or ""
-    if not firm_id(row["client_cui"]) and not efactura.same_firm(name, name):
-        raise Refused(CLOSED)  # no buyer a payment could be told from (the payer matcher's own rule): no text
+    name, cui = row["client"] or "", row["client_cui"] or ""
+    if not (firm_id(cui) and len(cui) >= 6) and not efactura.same_firm(name, name):
+        raise Refused(CLOSED)  # no buyer a payment could be told from by the payer matcher's rules: no text
     after, max_age = view.policy()
     due_date = row.get("due_date")
     if iid := row.get("local_id"):  # authored in fiscalm: its own record must still agree with the row
@@ -339,9 +343,7 @@ def eligible(
     row = row | {"due_date": due_date}
     since = _shift(row["issue_date"], -issued.COLLECT_DAYS_BEFORE)
     for tx in view.credits(since, today, max_age):
-        if issued.credit_from_client(
-            L, co, row["client"] or "", row["client_cui"] or "", tx, accounts=view.client_accounts
-        ):
+        if issued.credit_from_client(L, co, name, cui, tx, accounts=view.client_accounts):
             raise Refused(PARTIAL)
     return row
 
