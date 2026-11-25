@@ -5,6 +5,7 @@ import json
 import sys
 import threading
 import zipfile
+from contextlib import closing
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -15,11 +16,11 @@ from firms import iban as synthetic_iban
 from payment_cases import download_batch
 from synthetic_world import ubl_lines, ubl_totals
 
-from fiscalm import companies, invoice_lines, recon
-from fiscalm.api import lists, state as api, tasks
+from fiscalm import companies, invoice_lines, links, recon
+from fiscalm.api import actions, lists, state as api, tasks
 from fiscalm.bank import statements
 from fiscalm.efactura import client as anaf, credits, inbox as efactura
-from fiscalm.ledger import Ledger
+from fiscalm.ledger import Ledger, LinkRefused
 from fiscalm.payments import engine as pay
 from fiscalm.payments.orders import PaymentFileError
 
@@ -1008,7 +1009,6 @@ def test_autopay_supplier_invoices_go_into_bt_go_by_themselves(ledger, home, sec
 
 def test_only_automatic_payments_wait_for_last_months_statement(ledger, home, sec, live, monkeypatch):
     """A person who adds an invoice knows whether they paid it; the autopay rule waits for last month's statement."""
-    from fiscalm.api import tasks
 
     ledger.db.execute(
         "INSERT INTO bank_connections(id,company,bank,provider,accounts,valid_until,created_at) "
@@ -1485,9 +1485,12 @@ def test_received_credit_groups_only_one_matching_invoice(ledger, home, monkeypa
         assert ("3002" not in rows) is grouped
         if not grouped:
             assert rows["3002"]["credit_note"] and not rows["3002"]["can_mark_paid"]
-    if grouped:
-        with pytest.raises(efactura.ApproveError, match="credit note"):
+    if grouped and case == "partial":  # the net remaining is payable (#51)
+        assert efactura.payment_item(ledger, "3001").amount == Decimal(left)
+    elif grouped:
+        with pytest.raises(efactura.ApproveError, match="credited"):
             efactura.payment_item(ledger, "3001")
+    if grouped:
         assert (
             efactura.match_statement(
                 ledger, _debit_st(_tx("250.00", date(2026, 10, 21), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN))
@@ -1514,6 +1517,101 @@ def test_product_credit_reference_reads_only_own_company_archive(ledger, home, m
     (home / "outside.zip").write_bytes(anaf_zip(credit))
     efactura.fill_credit_references(ledger)
     assert efactura.credited(ledger, "NORD") == {}
+
+
+def _credit_note(number="COR 2", total="-50.00") -> bytes:
+    return ubl(number=number, total=total).replace(
+        b"</Invoice>",
+        b"<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>TEST 1</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference></Invoice>",
+    )
+
+
+def test_a_partly_credited_invoice_is_downloaded_for_its_net_and_a_credit_since_reading_writes_nothing(
+    ledger, home, monkeypatch
+):
+    (home / "state" / "LIVE").touch()
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    stale = efactura.payment_item(ledger, "3001")  # read before a second credit note arrives
+    with closing(Ledger(ledger.path)) as other:  # another connection commits it before this one writes
+        _stored(other, monkeypatch, **{"3003": _credit_note("COR 3", "-20.00")})
+    assert ledger.queue_efactura(stale, "3001", "person") is None and ledger.efactura("3001")["status"] == "open"
+    assert not ledger.db.execute("SELECT 1 FROM payments").fetchone()
+    with pytest.raises(efactura.ApproveError, match="credited"):  # only a person pays a credited invoice
+        efactura.approve(ledger, "3001", origin="auto")
+    ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    item = ledger.efactura("3001")["item_id"]
+    assert ledger.payment(item)["amount"] == "180.00"
+    shown = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]
+    assert not shown["amount_changed"] and not tasks.credit_holds(
+        api.state(ledger, "NORD")
+    )  # a right net warns nothing
+    pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
+    assert (
+        ledger.payment(item)["status"] == "exported"
+        and b"180.00" in pay.named_path(ledger.payment_file(ident)).read_bytes()
+    )
+
+
+def test_a_net_payment_whose_credit_no_longer_links_is_withdrawn_before_download(ledger, home, monkeypatch):
+    (home / "state" / "LIVE").touch()
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    item = ledger.efactura("3001")["item_id"]
+    _stored(ledger, monkeypatch, **{"3003": ubl(number="TEST 1", issue="2026-10-19")})  # the credit fits two now
+    assert efactura.credited(ledger, "NORD") == {}
+    assert {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]["amount_changed"]
+    with pytest.raises(PaymentFileError):
+        pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
+    assert ledger.payment(item)["status"] == "pending"  # nothing exported: the 200.00 never reaches a bank file
+    assert not pay.named_path(ledger.payment_file(ident)).exists()
+    debit = _tx("200.00", date(2026, 10, 30), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN, desc="plata factura TEST 1")
+    assert recon.auto_mark_paid(ledger, _debit_st(debit)) == []  # a 200.00 debit never hides the 50.00 left
+    assert ledger.payment(item)["status"] == "pending"
+
+
+def test_an_exported_net_payment_whose_credit_stops_linking_is_never_settled(ledger, home, monkeypatch):
+    (home / "state" / "LIVE").touch()
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    item = ledger.efactura("3001")["item_id"]
+    pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
+    assert ledger.payment(item)["status"] == "exported"
+    _stored(ledger, monkeypatch, **{"3003": ubl(number="TEST 1", issue="2026-10-19")})  # the credit fits two now
+    debit = _tx("200.00", date(2026, 10, 30), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN, desc="plata factura TEST 1")
+    assert recon.auto_mark_paid(ledger, _debit_st(debit)) == []  # the debit stays to explain, the 50.00 stays owed
+    assert not ledger.mark_paid(item, "user: settled by hand", None)  # no writer settles it
+    with pytest.raises(LinkRefused) as refused:  # nor a person linking the debit to it in Tranzacții
+        links.link(ledger, "NORD", statements.tx_key(debit), invoices=[], payment=item)
+    assert refused.value.code == "item_changed"
+    assert ledger.payment(item)["status"] == "exported" and ledger.efactura("3001")["status"] == "linked"
+    assert [r["id"] for r in tasks.credit_holds(api.state(ledger, "NORD"))] == ["3001"]  # the 50.00 stays to check
+    assert pay.import_file(
+        ledger, ident, "NORD", ledger.db.execute("SELECT max(id) FROM payment_downloads").fetchone()[0], date.today()
+    )
+    assert [r["id"] for r in tasks.credit_holds(api.state(ledger, "NORD"))] == ["3001"]  # imported in the bank too
+
+
+def test_a_queued_net_payment_stays_to_check_when_a_second_credit_leaves_nothing_to_pay(ledger, home, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    _stored(ledger, monkeypatch, **{"3003": _credit_note("COR 3", "-200.00")})  # fully credited now
+    invoice = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]
+    assert invoice["status"] == "linked" and invoice["amount_changed"]  # never shown paid without proof
+    assert [r["id"] for r in tasks.credit_holds(api.state(ledger, "NORD"))] == ["3001"]
+
+
+def test_autopay_never_queues_a_credited_invoice_even_past_its_first_check(ledger, home, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    assert ledger.queue_efactura(efactura.payment_item(ledger, "3001"), "3001", "auto") is None
+    assert ledger.efactura("3001")["status"] == "open"
+
+
+@pytest.mark.parametrize(("shown", "ok"), [("200.00", True), ("250.00", False), ("200", None)])
+def test_a_credited_invoice_is_added_only_for_the_amount_the_person_saw(ledger, home, monkeypatch, shown, ok):
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    body = {"name": "Net", "invoice_ids": ["3001"], "amounts": {"3001": shown}}
+    assert actions.act("payment_file_create", "NORD", body)["ok"] is bool(ok)
+    assert (ledger.efactura("3001")["status"] == "linked") is bool(ok)
 
 
 @pytest.mark.parametrize("exported", [False, True])

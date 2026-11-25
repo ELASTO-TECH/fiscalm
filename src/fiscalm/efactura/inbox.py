@@ -1428,8 +1428,11 @@ def check_payment(
         raise ApproveError("not_open", f"not an open, parsed invoice (status {r['status']})")
     if r["doc_type"] != "invoice" or r["currency"] != "RON":
         raise ApproveError("not_ron", "only RON invoices can go into the payment file")
-    if facts.credit(r):
-        raise ApproveError("credited", "invoice has a credit note; verify the remaining amount before paying by hand")
+    gross = Decimal(
+        dict(r).get("gross_total") or r["total"] or 0
+    )  # a state row (net_invoices) carries the net in total
+    if (credit := facts.credit(r)) and credit >= gross:  # a linked credit note leaves its net remaining to pay
+        raise ApproveError("credited", "invoice is fully credited; nothing remains to pay")
     status = facts.inactive(r)
     if status:
         raise ApproveError(
@@ -1499,7 +1502,7 @@ def payment_item(L: Ledger, message_id: str, *, unfiled: bool = False, account: 
         payee_iban=iban,
         payee_bic=_payee_bic(r, iban),
         payee_fiscal_code="",
-        amount=Decimal(r["total"]),
+        amount=Decimal(r["total"]) - PaymentFacts(L).credit(r),  # net of its linked credit notes
         details=f"Plata factura {r['number']} din {date.fromisoformat(r['issue_date']):%d.%m.%Y}",
         issue_date=date.fromisoformat(r["issue_date"]),
         doc_ref=r["number"],
@@ -1546,6 +1549,10 @@ def approve(L: Ledger, message_id: str, *, origin: str, unfiled: bool = False, a
     so a pick made before proof narrowed the choice is refused, never paid in place of the proved one."""
     if account is not None and (row := L.efactura(message_id)) and account not in payee_choices(row, PaymentFacts(L)):
         raise ApproveError("several_ibans", "the picked account is no longer one of those offered; check again")
+    if origin == "auto" and (row := L.efactura(message_id)) and PaymentFacts(L).credit(row):
+        # Only a person pays a partly credited invoice: a debit made before the credit (gross or net) may already
+        # cover it, and the matchers leave such an invoice open.
+        raise ApproveError("credited", "a credited invoice waits for a person to add it to a payment file")
     item = payment_item(L, message_id, unfiled=unfiled, account=account)
     row = L.efactura(message_id)
     if unfiled and row["status"] == "linked" and row["item_id"] == item.item_id:

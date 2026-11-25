@@ -2,6 +2,7 @@
 
 import json
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from conftest import go_live
@@ -28,8 +29,8 @@ def _inactive(ledger, monkeypatch, mid="3001"):
     anaf_public.store_status(ledger, INACTIVE_CUI, {"checked_at": "2026-10-21", "inactive": True})
 
 
-def _credited(ledger, monkeypatch, due="2026-11-20"):
-    xml = ubl(root="CreditNote", number="COR 2", total="50.00", due=due).replace(
+def _credited(ledger, monkeypatch, total="250.00", due="2026-11-20"):
+    xml = ubl(root="CreditNote", number="COR 2", total=total, due=due).replace(
         b"</CreditNote>",
         b"<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>RMBU 2222602</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference></CreditNote>",
     )
@@ -204,12 +205,20 @@ def test_only_blocking_invoice_issues_refuse_payment(ledger, home, monkeypatch, 
     assert (refusal.code if refusal else None) == ("invoice_issues" if blocks else None)
 
 
-@pytest.mark.parametrize("note_due", ["2026-11-20", "2026-13-01"])  # either may carry an unreadable due date
-def test_a_credit_note_still_refuses_an_original_whose_due_date_is_unreadable(ledger, home, monkeypatch, note_due):
-    _stored(ledger, monkeypatch, **{"3001": ubl(due="2026-13-01")})
-    _credited(ledger, monkeypatch, note_due)
-    assert json.loads(ledger.efactura("3001")["issues"])
-    assert efactura.payment_refusal(ledger, ledger.efactura("3001")).code == "credited"
+@pytest.mark.parametrize(
+    ("due", "note_due", "credit"),
+    [
+        ("2026-11-20", "2026-11-20", "50.00"),
+        ("2026-13-01", "2026-13-01", "50.00"),  # either may carry an unreadable due date
+        ("2026-11-20", "2026-11-20", "150.00"),  # more than half: state compares the credit to the gross total
+    ],
+)
+def test_a_partly_credited_invoice_pays_its_net_remaining(ledger, home, monkeypatch, due, note_due, credit):
+    _stored(ledger, monkeypatch, **{"3001": ubl(due=due)})
+    _credited(ledger, monkeypatch, credit, note_due)
+    assert efactura.payment_refusal(ledger, ledger.efactura("3001")) is None
+    assert _can_approve(ledger) == (True, True)
+    assert efactura.payment_item(ledger, "3001").amount == Decimal("250.00") - Decimal(credit)
 
 
 def test_a_person_picks_one_of_several_unproved_accounts_and_fiscalm_remembers_it_once_paid(ledger, home, monkeypatch):

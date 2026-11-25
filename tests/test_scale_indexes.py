@@ -205,7 +205,9 @@ def test_tasks_page_keeps_every_key_count_and_bounded_card_inputs(ledger):
     assert all(len(r["patch"].get("invoices", [])) <= 1 for r in rows)
     assert sum("late" in r["key"] for r in rows) == 300
     part = original["parts"][0]
-    part["invoices"][0].update(status="linked", payment_state="in_file", credits=[{"id": "credit"}])
+    part["invoices"][0].update(
+        status="linked", payment_state="in_file", credits=[{"id": "credit"}], amount_changed=True
+    )
     part["live"] = True
     part["files"] = [
         {"id": 123, "status": "open", "question": None, "payment_count": 250, "confirmed_count": 0, "skipped_count": 0}

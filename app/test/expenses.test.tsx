@@ -489,7 +489,7 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
     expect(dialog).toHaveTextContent("Fișierul a fost descărcat. După ce adaugi facturile, descarcă-l din nou.");
     await userEvent.click(within(dialog).getByRole("button", { name: "Pune în fișier" }));
     await waitFor(() => expect(api.posts().map((c) => [c.url, c.body])).toEqual([
-      ["/web/api/payment-files", { action: "payment_file_add", file_id: 9, invoice_ids: ["102", "101"] }]]));
+      ["/web/api/payment-files", { action: "payment_file_add", file_id: 9, invoice_ids: ["102", "101"], amounts: { 102: "120.00", 101: "386.40" } }]]));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Facturi alese" })).toBeNull());
   });
 
@@ -506,7 +506,7 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
     await userEvent.type(name, "Furnizori noiembrie");
     await userEvent.click(within(dialog).getByRole("button", { name: "Pune în fișier" }));
     await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
-      { action: "payment_file_create", co: "NORD", name: "Furnizori noiembrie", invoice_ids: ["102"] }]));
+      { action: "payment_file_create", co: "NORD", name: "Furnizori noiembrie", invoice_ids: ["102"], amounts: { 102: "120.00" } }]));
   });
 
   it("asks which account to pay for an invoice listing several, and sends the pick with the invoice", async () => {
@@ -522,7 +522,20 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
     await userEvent.click(within(dialog).getByRole("radio", { name: "INGB •••• 1111" }));
     await userEvent.click(send);
     await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
-      { action: "payment_file_add", file_id: 9, invoice_ids: [telecom.id], accounts: { [telecom.id]: 2 } }]));
+      { action: "payment_file_add", file_id: 9, invoice_ids: [telecom.id], accounts: { [telecom.id]: 2 }, amounts: { [telecom.id]: telecom.left } }]));
+  });
+
+  it("sends the net amount shown for a credited invoice, so a changed amount is refused", async () => {
+    const s = withFiles();
+    const telecom = s.invoices.find((r) => r.supplier === "Telecom Rapid SRL")!;
+    telecom.credits = [{ id: "302", number: "COR 2", amount: "-50.00" }];
+    telecom.left = "200.00";
+    const api = await choose("open", { state: () => json(s), onPost: ok(s) });
+    await userEvent.click(box("Telecom Rapid SRL"));
+    await put();
+    await userEvent.click(within(await chooser()).getByRole("button", { name: "Pune în fișier" }));
+    await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
+      { action: "payment_file_add", file_id: 9, invoice_ids: [telecom.id], amounts: { [telecom.id]: "200.00" } }]));
   });
 
   it("asks again when the chosen file is imported elsewhere meanwhile, and sends nothing until then", async () => {
@@ -552,7 +565,7 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
     expect(within(dialog).queryAllByRole("radio")).toEqual([]);
     await userEvent.click(within(dialog).getByRole("button", { name: "Pune în fișier" }));
     await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
-      { action: "payment_file_create", co: "NORD", name: "NORD plăți 27 oct 2026", invoice_ids: ["102"] }]));
+      { action: "payment_file_create", co: "NORD", name: "NORD plăți 27 oct 2026", invoice_ids: ["102"], amounts: { 102: "120.00" } }]));
   });
 
   it("marks the chosen invoices paid through Cum ai plătit?, each with its own POST", async () => {
@@ -588,7 +601,7 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
     expect(screen.getByRole("region", { name: "Facturi alese" })).toHaveTextContent("O factură386,40 lei");
     await put();
     await userEvent.click(within(await chooser()).getByRole("button", { name: "Pune în fișier" }));
-    await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([{ action: "payment_file_add", file_id: 9, invoice_ids: ["101"] }]));
+    await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([{ action: "payment_file_add", file_id: 9, invoice_ids: ["101"], amounts: { 101: "386.40" } }]));
   });
 });
 

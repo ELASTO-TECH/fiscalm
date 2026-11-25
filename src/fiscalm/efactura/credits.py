@@ -7,8 +7,10 @@ import re
 from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
-from fiscalm.ledger import Ledger
+if TYPE_CHECKING:  # the ledger reads credited() in its settling writes; this module only names its type
+    from fiscalm.ledger import Ledger
 
 # A note without a reference cancels an invoice issued at most this long before it: e-Factura reaches the buyer within
 # 5 working days of issue, and a full storno of a wrong invoice follows within days of it being seen.

@@ -37,10 +37,9 @@ def references(s: dict) -> Iterator[tuple[str, bool, dict]]:
 
 
 def credit_holds(s: dict) -> list[dict]:
-    """Existing display warnings for credited linked invoices outside the imported payment state."""
-    return [
-        r for r in s["invoices"] if r.get("credits") and r["status"] == "linked" and r["payment_state"] != "imported"
-    ]
+    """Linked invoices whose payment is no longer their net (a credit since, or one that stopped linking), imported
+    in the bank or not: the difference stays to check until a person resolves it."""
+    return [r for r in s["invoices"] if r.get("amount_changed")]
 
 
 def _invoice_references(s: dict) -> Iterator[tuple[str, bool, dict]]:

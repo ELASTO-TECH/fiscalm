@@ -122,11 +122,16 @@ def version(item_ids) -> str:
 
 
 def _without_credits(ledger: Ledger, rows: list) -> list:
-    """Under pay_lock: no unimported payment retains its original amount after a linked credit."""
+    """Under pay_lock: no unimported invoice payment keeps an amount that is not its invoice's total minus its linked
+    credits now (efactura.payment_item): one built before a credit, or for a credit that no longer links, is withdrawn."""
     with ledger.tx():
-        credits = {key for co in {r["company"] for r in rows} for key in credited(ledger, co)}
+        credits = {k: v for co in {r["company"] for r in rows} for k, v in credited(ledger, co).items()}
+        amounts = {r["item_id"]: Decimal(r["amount"]) for r in rows}
         by_item = {
-            r["item_id"]: r["message_id"] for r in ledger.efactura_rows(status="linked") if r["message_id"] in credits
+            r["item_id"]: r["message_id"]
+            for r in ledger.efactura_rows(status="linked")
+            if r["item_id"] in amounts
+            and amounts[r["item_id"]] != Decimal(r["total"]) - credits.get(r["message_id"], Decimal(0))
         }
         for row in rows:
             if row["item_id"] in by_item and not ledger.withdraw_credited_payment(
@@ -302,8 +307,10 @@ def add_invoices(
     name: str | None = None,
     approve_invoice: Callable,
     accounts: dict[str, str] | None = None,
+    amounts: dict[str, str] | None = None,
 ) -> int:
-    """`accounts`: the IBAN a person picked for an invoice listing several (efactura.approve's `account`)."""
+    """`accounts`: the IBAN a person picked for an invoice listing several (efactura.approve's `account`). `amounts`:
+    the amount the person saw for an invoice; its payment must be that amount, or nothing is added."""
     with pay_lock(), ledger.tx():
         if file_id is None:
             file_id = ledger.create_payment_file(company, name or "")
@@ -318,6 +325,8 @@ def add_invoices(
                 raise FileRefusal("Factura nu aparține firmei.")
             account = (accounts or {}).get(mid)
             item = approve_invoice(ledger, mid, origin="person", unfiled=True, account=account)["item_id"]
+            if mid in (amounts or {}) and Decimal(ledger.payment(item)["amount"]) != Decimal(amounts[mid]):
+                raise FileRefusal("Suma de plată s-a schimbat. Verifică factura din nou.")
             if not ledger.attach_payment_file(file_id, company, item, origin="person"):
                 raise FileRefusal("Factura este deja într-un fișier sau s-a schimbat.")
         return file_id

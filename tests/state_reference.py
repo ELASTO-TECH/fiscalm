@@ -66,6 +66,7 @@ def state__invoices(
                 "payment_state": ps,
                 "item_id": r["item_id"],
                 "payment_file": None,  # Scale fixtures contain no named-file membership.
+                "amount_changed": False,
                 "covered": money(part),
                 "left": money(Decimal(r["total"]) - part if status in ("open", "marked", "linked") else 0),
                 "paid_at": iso_dt(r["paid_at"]) if status in ("marked", "paid", "skipped") else None,

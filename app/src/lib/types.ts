@@ -79,6 +79,8 @@ export type Invoice = {
   payment_state: "held" | "in_file" | "lost" | "imported" | null;
   /** The payment file its payment is in, if any. */
   payment_file?: { id: number; name: string } | null;
+  /** In a payment file whose row is no longer the invoice's net (a credit note since): check it in the bank. */
+  amount_changed?: boolean;
   item_id: string | null;
   paid_at: string | null;
   /** How the person who marked it said they paid (`mark-paid`), null when unsaid: a fact, never proof. */

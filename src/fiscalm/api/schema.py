@@ -515,7 +515,13 @@ def schemas() -> dict:
         "payable": OBJECT,
         "receivable": OBJECT,
         "invoices": array(
-            obj(received | {"payment_file": {"anyOf": [obj({"id": INTEGER, "name": STRING}), {"type": "null"}]}})
+            obj(
+                received
+                | {
+                    "payment_file": {"anyOf": [obj({"id": INTEGER, "name": STRING}), {"type": "null"}]},
+                    "amount_changed": BOOL,
+                }
+            )
         ),
         "firm_cards": STRINGS,
         "issued": array(obj(issued)),

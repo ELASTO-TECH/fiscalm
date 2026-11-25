@@ -364,7 +364,7 @@ function ReceivedSheet({ id, onClose }: { id: string; onClose: () => void }) {
         <dl className={`${detailListStyle} py-2`}><dt>Sursă</dt><dd>{expenseSource(s, "invoice", r.id)}</dd></dl>
       </Panel>
       <InvoiceLines />
-      {r.credits?.length && r.status === "linked" ? <p className={noteLeftStyle}>Factura are o factură de stornare. Verifică în bancă plata din fișier înainte să plătești din nou.</p> : null}
+      {r.amount_changed ? <p className={noteLeftStyle}>Factura are o factură de stornare. Verifică în bancă plata din fișier înainte să plătești din nou.</p> : null}
       {r.credits?.length ? <Panel className="my-4">
         {r.credits.map((credit) => <dl className={`${detailListStyle} py-2`} key={credit.id}><dt>Storno {credit.number}</dt><dd>{lei(credit.amount)} {cur}</dd></dl>)}
         {(!r.covered || r.covered === "0.00") ? <dl className={`${detailListStyle} py-2`}><dt>Rest de plată</dt><dd>{lei(r.left)} {cur}</dd></dl> : null}

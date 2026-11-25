@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from fiscalm import companies
 
 from fiscalm import audit, backup
+from fiscalm.efactura import credits
 from fiscalm.migrations import check_version, migrate
 from fiscalm.paths import finance_home
 
@@ -1423,7 +1424,7 @@ class Ledger:
                 ).fetchone()
             ):
                 return False
-            if not self._reserve(db, tx, f"payment {item_id}"):
+            if self._net_changed(db, item_id) or not self._reserve(db, tx, f"payment {item_id}"):
                 return False
             cur = db.execute(
                 "UPDATE payments SET status='paid', paid_at=?, paid_note=? WHERE item_id=? AND status!='paid'",
@@ -1431,6 +1432,31 @@ class Ledger:
             )
             self._release_unless(db, tx, cur.rowcount)
         return cur.rowcount > 0
+
+    def _net_changed(self, db, item_id: str) -> bool:
+        """An invoice payment for a net (below its invoice's total, and a credit note of its supplier names the
+        invoice) that is no longer the total minus the invoice's linked credits: a debit settling it would hide the
+        difference, so no writer settles it. Rows no credit note names keep settling as they always did."""
+        row = db.execute(
+            "SELECT p.amount,p.company,e.message_id,e.total,e.number,coalesce(nullif(e.supplier_tax_id,''),"
+            "e.supplier_cui) AS supplier FROM payments p JOIN efactura e ON e.item_id=p.item_id WHERE p.item_id=?",
+            (item_id,),
+        ).fetchone()
+        if not row or not row["total"] or Decimal(row["amount"]) >= Decimal(row["total"]):
+            return False
+        named = credits.credit_number(row["number"] or "")
+        if not named or not any(
+            credits.credit_number(c["billing_ref"] or "") == named
+            for c in db.execute(
+                "SELECT billing_ref FROM efactura WHERE company=? AND doc_type='credit_note' "
+                "AND coalesce(nullif(supplier_tax_id,''),supplier_cui)=?",
+                (row["company"], row["supplier"]),
+            )
+        ):
+            return False
+        credited = credits.credited(self, row["company"])
+        net = Decimal(row["total"]) - credited.get(row["message_id"], Decimal(0))
+        return Decimal(row["amount"]) != net
 
     def sent_invoice_links(self, company: str, environment: str) -> dict[str, str]:
         return dict(
@@ -1908,15 +1934,19 @@ class Ledger:
 
             if origin == "auto" and self.get_meta(f"payment_file_removed:{message_id}"):
                 return None
-            row = db.execute("SELECT status FROM efactura WHERE message_id=?", (message_id,)).fetchone()
+            row = db.execute("SELECT status,total FROM efactura WHERE message_id=?", (message_id,)).fetchone()
+            if row and origin == "auto" and Decimal(item.amount) != Decimal(row["total"]):
+                return None  # autopay never queues a credited invoice's net (efactura.approve), re-checked here
             if (
                 not row
                 or row["status"] != "open"
                 or db.execute("SELECT 1 FROM tx_link_items WHERE item=?", ("efactura " + message_id,)).fetchone()
             ):
                 return None
-            # Re-check account trust while holding the write lock (including revocations), for the account it pays.
-            payment_item(self, message_id, account=item.payee_iban)
+            # Re-check under the write lock (account trust, revocations, a credit note since): the row it would build
+            # now must be the item, its account and net amount included; otherwise nothing is written.
+            if payment_item(self, message_id, account=item.payee_iban).item_id != item.item_id:
+                return None
             if not db.execute(
                 "UPDATE efactura SET status='linked', item_id=?, paid_note=? WHERE message_id=? AND status='open'",
                 (item.item_id, f"added to the payment file by {AUTHORS[origin]}", message_id),
@@ -2503,6 +2533,8 @@ class Ledger:
                 ),
             )
         else:
+            if self._net_changed(db, ident):
+                raise LinkRefused("item_changed")
             cur = db.execute(
                 "UPDATE payments SET status='paid', paid_at=?, paid_note=? WHERE item_id=? AND company=? "
                 "AND status IN ('pending','exported') AND (source_iban IS NULL OR source_iban="
