@@ -594,6 +594,8 @@ def build(L, home: Path, patch, now: datetime | None = None, *, integrations_con
             doc_date=f"{mo}-{day:02d}",
             amount=amount,
             currency="EUR",
+            # a statement holds every account of the firm's banks, so its month's pack is complete
+            accounts=[a.iban for a in companies.get(co, L=L).current_accounts] if kind == "statement" else None,
         )
         L.db.execute(
             "UPDATE documents SET created_at=? WHERE sha=?",
@@ -902,7 +904,14 @@ def _chart_document(L, home, co, account, first, xml):
     path = home / co / "chart-statements" / f"{first:%Y-%m}-{account.currency}.xml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(xml)
-    L.add_document(f"chart-{co}-{account.currency}-{first:%Y-%m}", co, first.strftime("%Y-%m"), "statement", str(path))
+    L.add_document(
+        f"chart-{co}-{account.currency}-{first:%Y-%m}",
+        co,
+        first.strftime("%Y-%m"),
+        "statement",
+        str(path),
+        accounts=[account.iban],
+    )
 
 
 def bank_history(L, patch, today: date) -> None:
