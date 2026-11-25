@@ -392,9 +392,17 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
     pool = _Pool(L, st.company, {statements.tx_key(t) for t in st.settlement_txs})
     if not pool.open:
         return batch_done
+    return batch_done + _collect_singles(L, pool, st, _open_credits(L, st))
+
+
+def _open_credits(L: Ledger, st: statements.Statement) -> list[statements.Tx]:
+    """Credits no matcher took, not the firm's own transfers or the owner's remembered advances, not claimed by a
+    pending settlement report."""
+    from fiscalm.settlements import engine as settlements
+
     used, own = L.used_txs(), companies.get(st.company, L=L).own_ibans
     advance = efactura.remembered_advance(L, st.company)
-    credits = [
+    return [
         t
         for t in st.settlement_txs
         if t.direction == "credit"
@@ -403,10 +411,13 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         and not settlements.claimed_credit(L, st.company, t)
         and not advance(t)
     ]
+
+
+def _collect_singles(L: Ledger, pool: _Pool, st: statements.Statement, credits: list) -> list[str]:
     first = {statements.tx_key(t): pool.candidates(t, ()) for t in credits}
     # every statement line counts, even two that share a key (same day, amount and text, no bank reference)
     claims = Counter(r["message_id"] for t in credits for r, _ in first[statements.tx_key(t)])
-    # accounts that show a client on a credit of this statement are nobody's anonymous payment
+    # accounts that show a client on a line of this statement are nobody's anonymous payment
     shown = {t.counterparty_iban for t in st.settlement_txs if t.counterparty_iban and pool.from_client(t)}
     done: list[str] = []
     # Unambiguous credits first, those showing their client, then those naming their invoice, then the rest: once
@@ -419,18 +430,26 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         (r, how) = cands[0]
         if how == "amount" and (len(was) > 1 or claims[r["message_id"]] > 1 or t.counterparty_iban in shown):
             continue  # it fit others at first, another credit fits it too, or its account showed a client
-        learned = how in CLIENT_PROOF and firm_id(tax_token(r["client_cui"])) and t.counterparty_iban
-        if L.mark_issued_collected(
-            r["message_id"],
-            f"statement {t.date} {how} REF {t.ref}",
-            statements.tx_key(t),
-            t.counterparty_iban if learned else "",
-            companies.normalize_iban(t.iban),
-        ):
+        if _collect(L, pool, t, (r,), how, f"{how} REF {t.ref}"):
             done.append(r["message_id"])
-            if learned:  # the next credit of the statement from this account sees it known
-                pool.accounts.setdefault(t.counterparty_iban, set()).add(r["client_cui"] or "")
-    return batch_done + done
+    return done
+
+
+def _collect(L: Ledger, pool: _Pool, t: statements.Tx, rows: tuple, how: str, note: str) -> bool:
+    """Collect these invoices with the credit. Its account is remembered only when it showed a firm client, and
+    the next credit of the statement from it sees it known."""
+    learned = how in CLIENT_PROOF and firm_id(tax_token(rows[0]["client_cui"])) and t.counterparty_iban
+    if not L.mark_issued_collected(
+        rows[0]["message_id"],
+        f"statement {t.date} {note}",
+        statements.tx_key(t),
+        t.counterparty_iban if learned else "",
+        companies.normalize_iban(t.iban),
+    ):
+        return False
+    if learned:
+        pool.accounts.setdefault(t.counterparty_iban, set()).add(rows[0]["client_cui"] or "")
+    return True
 
 
 def _not_a_payment(t: statements.Tx) -> bool:
