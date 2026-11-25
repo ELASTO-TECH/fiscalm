@@ -6,14 +6,15 @@ import io
 import json
 import zipfile
 from datetime import date
+from decimal import Decimal
 
 import pytest
-from test_settlements import collect, setup, statement
+from test_settlements import collect, setup, statement, store_bank
 
 from fiscalm import companies
 from fiscalm.api import actions
 from fiscalm.settlements import engine as settlements, upload as bank_upload
-from fiscalm.settlements.reports import SOURCES, STRIPE, ReportError, parse, table
+from fiscalm.settlements.reports import SOURCES, STRIPE, ReportError, money, parse, table
 
 UPLOAD = dict(report_date="2026-10-10", today=date(2026, 10, 12))
 NETOPIA = dict(
@@ -115,10 +116,39 @@ def test_bad_delimiter_and_negative_string_index():
         )
 
 
-@pytest.mark.parametrize("value", ["=SUM(1)", " +cmd", "@ref", "-1"])
-def test_csv_formula_cells_refuse(value):
-    with pytest.raises(ReportError):
-        table(f"Ref,Gross,Fee\n{value},100.00,2.00\n".encode(), "csv")
+@pytest.mark.parametrize(
+    "gross,fee,net,expected",
+    [
+        ("1.250,50", "-12,50", "1.238,00", ("1250.50", "12.50", "")),
+        ("1,250.50", "12.50", "", ("1250.50", "12.50", "")),
+        ("1 250,50 lei", "-", "1.250,50", ("1250.50", "0.00", "RON")),
+        ("€ 100", "2,00 EUR", "98", ("100.00", "2.00", "EUR")),
+        ("100", "2", "-", None),  # a mapped net must say the amount
+        ("$ 100", "0", "", None),  # USD, CAD or AUD
+        ("1,000,000,000,000.00", "0", "", None),  # past the stored amount's 12 digits
+        ("1 " * 300 + "x", "0", "", None),  # a long odd cell refuses at once
+        ("0.250,50", "0", "", None),  # a grouped amount never starts with 0
+        ("100lei", "100,00", "-0,00", ("100.00", "100.00", "RON")),  # a net of -0 is stored as 0.00
+        ("1.250", "0", "", None),  # one group, no decimals: 1250 or 1.25
+        ("100,005", "0", "", None),
+        ("1e3", "0", "", None),
+        ("100 RON", "2 EUR", "", None),
+        ("-100,00", "0", "", None),
+    ],
+)
+def test_real_amounts_parse_exactly_or_refuse(gross, fee, net, expected):
+    """Romanian and English separators, currency words, signed fees and placeholders; ambiguity refuses."""
+    data = f"Ref;Telefon;Gross;Fee;Net\n=TEST-1;+40700000000;{gross};{fee};{net}\n".encode()
+    mapping = {"reference": "Ref", "gross": "Gross", "fee": "Fee"} | ({"net": "Net"} if net else {})
+    if expected is None:
+        with pytest.raises(ReportError):
+            parse(data, "csv", "fan", mapping, ";")
+        return
+    line = parse(data, "csv", "fan", mapping, ";")[0]
+    assert (line["reference"], line["gross"], line["fee"], line.get("currency", "")) == ("=TEST-1", *expected)
+    assert money(line["gross"]) + 0 == Decimal(expected[0])  # what is stored reads back exactly
+    if net:  # a mapped net is stored as gross minus fee, never `-0.00`
+        assert line["net"] == f"{Decimal(expected[0]) - Decimal(expected[1]):.2f}"
 
 
 def test_uploaded_format_belongs_to_partner_and_is_reused(ledger):
@@ -202,7 +232,7 @@ def test_preview_prefills_stripe_currency_and_saved_payers(ledger, second, curre
 
 
 @pytest.mark.parametrize(
-    "bad", [b"Ref,Gross,Fee\nTEST-1,NaN,2.00\n", b"Ref,Gross,Fee\n=CMD,100.00,2.00\n", b"\xff,\xff\n1,2\n"]
+    "bad", [b"Ref,Gross,Fee\nTEST-1,NaN,2.00\n", b'Ref,Gross,Fee\nTEST-1,"1,250",2.00\n', b"\xff,\xff\n1,2\n"]
 )
 def test_refused_upload_saves_no_partner_format(ledger, bad):
     with pytest.raises(bank_upload.Refused):
@@ -286,3 +316,43 @@ def test_uploaded_company_cui_refuses_whole_report(ledger, kind, value):
     assert all(r["status"] == "open" for r in ledger.db.execute("SELECT status FROM issued WHERE company='STUDIO9'"))
     if value in ("foreign", "unknown", "invalid"):
         assert all(r["status"] == "open" for r in ledger.db.execute("SELECT status FROM issued"))
+
+
+def test_one_report_writes_its_fees_one_way():
+    """A fee written `-5` beside one written `5` could be a rebate or a deduction: the report refuses."""
+    data = b"Ref;Gross;Fee\nTEST-1;100,00;5,00\nTEST-2;100,00;-5,00\n"
+    mapping = {"reference": "Ref", "gross": "Gross", "fee": "Fee"}
+    with pytest.raises(ReportError):
+        parse(data, "csv", "fan", mapping, ";")
+    assert [x["fee"] for x in parse(data.replace(b";5,00", b";-5,00"), "csv", "fan", mapping, ";")] == ["5.00", "5.00"]
+
+
+def test_first_fan_borderou_settles_on_its_own(ledger):
+    """Issue #49: a first FAN borderou with a phone column, `-` cells and Romanian amounts, matching open invoices
+    and the bank credit to the cent, settles without a person's confirmation."""
+    for n, total in ((1, "1250.50"), (2, "300.00")):
+        ledger.add_issued(
+            dict(
+                message_id=f"fan-{n}",
+                company="NORD",
+                number=f"FAN-{n}",
+                issue_date="2026-10-01",
+                currency="RON",
+                total=total,
+                doc_type="invoice",
+                status="open",
+                raw_path="",
+            )
+        )
+    store_bank(ledger, statement(amount=Decimal("1538.00")))  # 1550.50 collected minus 12.50 fee
+    data = (
+        b"AWB;Telefon destinatar;Numar factura;Ramburs;Comision ramburs;Observatii\n"
+        b"1000000001;+40700000000;FAN-1;1.250,50;-12,50;-\n"
+        b"1000000002;+40700000001;FAN-2;300,00;-;-\n"
+    )
+    mapping = dict(reference="Numar factura", gross="Ramburs", fee="Comision ramburs")
+    described = dict(source="fan", name="Synthetic Courier SRL", currency="RON", mapping=mapping)
+    result = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    assert result["message"] == bank_upload.COLLECTED
+    assert {r["message_id"]: r["status"] for r in ledger.issued_rows()} == {"fan-1": "collected", "fan-2": "collected"}
+    assert ledger.db.execute("SELECT count(*) FROM settlement_confirmations").fetchone()[0] == 0

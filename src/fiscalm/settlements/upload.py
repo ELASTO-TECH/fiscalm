@@ -16,7 +16,7 @@ from fiscalm.bank import statements
 from fiscalm.identity import partner_id
 from fiscalm.ledger import Ledger
 from fiscalm.settlements import engine as settlements
-from fiscalm.settlements.reports import LIMIT, SOURCES, STRIPE, ReportError, parse, table
+from fiscalm.settlements.reports import LIMIT, SOURCES, STRIPE, ReportError, currency_code, parse, table
 from fiscalm.validate import iban_valid
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -70,7 +70,7 @@ WHY = (
     ("refunds, disputes", "are rambursări sau ajustări, care se verifică manual"),
     ("Exactly one payout", "trebuie să cuprindă o singură plată"),
     ("Mixed currencies", "are mai multe monede"),
-    ("Invalid amount", "o sumă nu este scrisă ca 123.45"),
+    ("Invalid amount", "o sumă nu poate fi citită exact; scrie-o ca 1.234,56 sau 1234.56"),
     ("invalid gross/fee/net", "o linie are suma, comisionul sau suma netă greșite"),
     ("missing reference", "o linie nu are factura, comanda sau AWB-ul"),
     ("wrong column count", "o linie are alt număr de coloane decât antetul"),
@@ -224,7 +224,7 @@ def _guess_currency(rows: list[list[str]], column: str | None) -> str:
     if column is None:
         return ""
     n = rows[0].index(column)
-    codes = {r[n].strip().upper() if len(r) > n else "" for r in rows[1:]}
+    codes = {currency_code(r[n]) if len(r) > n else "" for r in rows[1:]}
     code = next(iter(codes)) if len(codes) == 1 else ""
     return code if re.fullmatch(r"[A-Z]{3}", code) else ""
 
