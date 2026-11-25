@@ -359,6 +359,12 @@ def test_a_mail_proof_is_confirmed_by_its_later_debit_once(ledger, home, sec, mo
     assert ledger.efactura("3001")["paid_tx"] == "ef-proof:imap:proof" and ledger.ambiguous("NORD")
     assert ledger.mark_efactura_skipped("3002", "nu e de plata")
     assert not ledger.mark_efactura_paid("3001", "statement", "0" * 20)  # a debit on no record never replaces a mail
+    credit, other = (_tx("250.00", date(2026, 10, d), "X", SUPPLIER_IBAN, desc="d") for d in (28, 29))
+    credit.direction = "credit"  # this firm's credit, another firm's debit: neither pays this invoice
+    ledger.record_statement(_debit_st(credit))
+    ledger.record_statement(statements.Statement("STUDIO9", None, None, [statements.Account("x", "RON", [other])]))
+    for t in (credit, other):
+        assert not ledger.mark_efactura_paid("3001", "statement", statements.tx_key(t))
     twins = [plain, _tx("250.00", date(2026, 10, 31), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata 2")]
     ledger.record_statement(_debit_st(*twins))
     gate, won = threading.Barrier(2), []
@@ -394,7 +400,13 @@ def test_a_reopen_during_matching_never_hides_a_rival(ledger, home, sec, monkeyp
     efactura.judged(ledger, "3001", ["imap:proof"])
     assert efactura.confirm_by_mail(ledger, "3001", "imap:proof", "mail: plata confirmata")
     assert ledger.mark_efactura_paid("3002", "user: already paid (page)")
-    other = threading.Thread(target=lambda: efactura.reopen(Ledger(), "3002"))
+
+    def reopen():
+        L = Ledger()
+        efactura.reopen(L, "3002")
+        L.close()
+
+    other = threading.Thread(target=reopen)
     marked = efactura._marked
 
     def reopen_then_read(L, company=None):  # between rivals' read of the open rows and of the marked ones

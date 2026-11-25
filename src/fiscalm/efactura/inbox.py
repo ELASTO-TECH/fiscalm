@@ -801,8 +801,8 @@ def payment_number(p) -> str:
 
 def rivals(L: Ledger, company: str):
     """The one ambiguity rule both statement matchers share (match_statement here, recon.auto_mark_paid):
-    rivals(t) is every candidate a debit fits, across the open and marked e-Factura invoices (withdrawn marks
-    too), the payment rows still to pay, and the invoices paid at the till for a card debit (bon_paid); a debit that
+    rivals(t) is every candidate a debit fits, across the open, marked (withdrawn marks too) and mail-proved
+    e-Factura invoices (mail_proved), the payment rows still to pay, and the invoices paid at the till for a card debit (bon_paid); a debit that
     names known invoice numbers keeps only those it names.
     A debit with more than one rival left settles nothing. Keys: ("efactura", message_id) / ("payment", item_id) /
     ("history", "history:<sha>"): an invoice from before the firm's start (fiscalm.history), a rival never settled;
@@ -915,8 +915,9 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         status) settles only that invoice;
       - a debit to an IBAN and amount the payments path tracks (approved e-Factura, accountant's invoice) is left to it;
       - a debit that fits several open invoices settles none; one debit settles one invoice, ever.
-    Invoices the user marked paid are matched the same way, as candidates next to the open ones: the debit
-    confirms their mark (paid_tx), and one that fits an open invoice too settles neither.
+    Invoices the user marked paid, or a payment mail proved, are matched the same way, as candidates next to the open
+    ones: the debit confirms their mark or replaces the mail as proof (paid_tx), and one that fits an open invoice too
+    settles neither. Every candidate is read and settled under one write lock.
     Debits left fitting several candidates are recorded for the user to pick from (note_ambiguous). The statement's
     transactions are put on record first (Ledger.record_statement): the evidence behind every debit it settles."""
     L.record_statement(st)
