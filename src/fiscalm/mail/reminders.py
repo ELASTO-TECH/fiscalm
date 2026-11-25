@@ -12,9 +12,9 @@ from pathlib import Path
 
 from fiscalm import companies
 from fiscalm.bank import statements
-from fiscalm.identity import tax_token
+from fiscalm.identity import firm_id, tax_token
 from fiscalm.invoicing import engine as invoicing, issued
-from fiscalm.ledger import Ledger, finance_home, is_live
+from fiscalm.ledger import BOUNDARY_DAYS, Ledger, finance_home, is_live
 
 LABEL = "Text pentru reamintire"
 PARTIAL = "Factura are o încasare parțială sau o corecție. Verifică soldul înainte să pregătești textul de reamintire."
@@ -54,6 +54,8 @@ DEFAULTS = {"after_days": 7}
 LIMITS = {"after_days": 365}
 # A reminder needs a statement this recent: an older one could miss the payment that makes it wrong.
 STATEMENT_MAX_AGE_DAYS = 7
+# settled_tx reservations that keep a credit from settling, not because it paid something: twins and conflicts.
+UNEXPLAINED = ("twin ", "bank reference conflict")
 
 
 def _meta_key(co: str) -> str:
@@ -118,9 +120,14 @@ class StatementView:
         return self._policy
 
     @cached_property
+    def issued(self) -> dict[str, dict]:
+        """The firm's `issued` rows by message id, read once."""
+        return {r["message_id"]: r for r in self.L.issued_rows(company=self.co)}
+
+    @cached_property
     def client_accounts(self) -> dict[str, set[str]]:
         accounts: dict[str, set[str]] = {}
-        for row in self.L.issued_rows(company=self.co):
+        for row in self.issued.values():
             if row["collected_from_iban"]:  # the CUI as the reminder rows carry it (api.state.tax_id)
                 cui = tax_token(row["client_tax_id"] or row["client_cui"])
                 accounts.setdefault(row["collected_from_iban"], set()).add(cui)
@@ -139,22 +146,40 @@ class StatementView:
         return tuple(sorted(doc.items())), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
     def credits(self, since: date, today: date, max_age: int) -> list[statements.Tx]:
-        """The firm's unexplained credits from `since` to `today`, once its statements cover every current account.
-        The credits come from the ledger's account lines (statements, CSV and the bank feed alike); a credit already
-        in `settled_tx` collected or explains something else, so it says nothing about this invoice. A twin line
-        (the other source's copy of a payment) is left out by `account_lines` when its copy is there."""
+        """Every credit from `since` to `today` that may still be this firm's client paying, once its statements
+        cover every current account. From the ledger (statements, CSV and the bank feed alike) and from the stored
+        statements just parsed, whose lines may not be on record yet. Left out only what is proved to be something
+        else: a credit reserved in `settled_tx` as collecting or explaining an item, a duplicate line, and a twin (the
+        other source's copy of a payment) when a line it could be a copy of is explained. A conflict or a twin without
+        an explained copy stays, and a credit on record without its details refuses: it could be the client's."""
         self.coverage(since, today, max_age)
         if self._lines is None or since < self._lines[0]:
             start = min(since, self.since or since)
-            self._lines = (start, self.L.account_lines(self.co, start.isoformat()))
-        return [
-            statements.Tx.from_dict(json.loads(r["tx"]))
-            for r in self._lines[1]
-            if r["direction"] == "credit"
-            and r["tx"]
-            and since.isoformat() <= r["day"] <= today.isoformat()
-            and (r["what"] is None or r["what"].startswith("twin "))
-        ]
+            lo = start - timedelta(days=BOUNDARY_DAYS)  # an explained copy can sit just before
+            self._lines = (start, self.L.credit_lines(self.co, lo.isoformat()))
+        rows = [r for r in self._lines[1] if not (r["what"] or "").startswith("duplicate:")]
+        explained = [r for r in rows if r["what"] and not r["what"].startswith(UNEXPLAINED)]
+        explained_keys = {r["tx_key"] for r in explained}
+        out = {}
+        for r in rows:
+            if (
+                r["tx_key"] in explained_keys
+                or (r["what"] or "").startswith("twin ")
+                and any(_copy(r, e) for e in explained)
+            ):
+                continue
+            if not since.isoformat() <= r["day"] <= today.isoformat():
+                continue
+            if not r["tx"]:
+                raise Refused(STATEMENTS)
+            out[r["tx_key"]] = statements.Tx.from_dict(json.loads(r["tx"]))
+        on_record = {r["tx_key"] for r in self._lines[1]}
+        for st in self.parsed.values():
+            for t in st.settlement_txs:
+                key = statements.tx_key(t)
+                if t.direction == "credit" and since <= t.date <= today and key not in on_record:
+                    out[key] = t
+        return list(out.values())
 
     def coverage(self, since: date, today: date, max_age: int) -> None:
         """Refuse (STATEMENTS) unless stored statements cover every current account from `since` to `max_age` days
@@ -206,6 +231,14 @@ class StatementView:
                 raise Refused(STATEMENTS)
 
 
+def _copy(twin, line) -> bool:
+    """`line` could be the other source's copy of `twin`: same amount, same account (or one unknown), days apart at
+    most BOUNDARY_DAYS (Ledger.account_lines pairs twins the same way)."""
+    apart = abs((date.fromisoformat(twin["day"]) - date.fromisoformat(line["day"])).days)
+    same_account = not twin["iban"] or not line["iban"] or twin["iban"] == line["iban"]
+    return twin["amount"] == line["amount"] and same_account and apart <= BOUNDARY_DAYS
+
+
 def eligible(
     L: Ledger,
     co: str,
@@ -232,7 +265,13 @@ def eligible(
         raise Refused(CLOSED)
     if Decimal(row["owed"]) != Decimal(row["total"]) or Decimal(row["credited"]) or row.get("reversed_by"):
         raise Refused(PARTIAL)
-    after, max_age = view.policy() if view else policy(L, co)
+    view = view or StatementView(L, co)
+    stored = None if row.get("local_id") else view.issued.get(row["id"])  # fiscalm's own: checked against its record
+    if stored and (stored["parse_error"] or invoicing.NOT_OURS in (stored["issues"] or "")):
+        raise Refused(CLOSED)  # synced from SPV with another supplier's CUI, or unreadable: not this firm's to claim
+    if not firm_id(row["client_cui"]) and not (row["client"] or "").strip():
+        raise Refused(CLOSED)  # no buyer to tell a payment from: in doubt, no text
+    after, max_age = view.policy()
     due_date = row.get("due_date")
     if iid := row.get("local_id"):  # authored in fiscalm: its own record must still agree with the row
         inv = invoices.get(iid) if invoices is not None else invoicing.invoice(L, iid, company=co)
@@ -243,7 +282,6 @@ def eligible(
         raise Refused(CLOSED)
     row = row | {"due_date": due_date}
     since = date.fromisoformat(row["issue_date"]) - timedelta(days=issued.COLLECT_DAYS_BEFORE)
-    view = view or StatementView(L, co)
     for tx in view.credits(since, today, max_age):
         if issued.credit_from_client(
             L, co, row["client"] or "", row["client_cui"] or "", tx, accounts=view.client_accounts

@@ -2,7 +2,8 @@ from datetime import date
 
 import pytest
 from test_invoicing import draft, setup_invoice as setup_invoice
-from test_issued import _credit, _st
+from test_issued import _credit, _st, _stored, sec as sec
+from ubl_fake import ubl
 
 from fiscalm import companies
 from fiscalm.api import state as api
@@ -106,38 +107,72 @@ def test_reminder_bank_reads_do_not_scale_with_invoices(reminder, monkeypatch, k
     assert counts[0] == counts[1] <= 4
 
 
-@pytest.mark.parametrize("explained", [False, True])
-def test_only_an_unexplained_client_credit_refuses_text(reminder, explained):
-    # A repeat client's credit already settled to another invoice says nothing about this one.
-    L, iid = reminder
+def _client_credit(L, iid, day=date(2026, 11, 10), **kw):
     client = i.invoice(L, iid, company="NORD")["data"]["client"]["name"]
-    credit = _credit("50.00", date(2026, 11, 10), counterparty=client)
-    L.record_statement(_st(credit))
-    if explained:
-        L.db.execute("INSERT INTO settled_tx VALUES(?,?,?)", (statements.tx_key(credit), "issued other", "x"))
+    return _credit("50.00", day, **{"counterparty": client} | kw)
+
+
+def _reserve(L, tx, what):
+    L.db.execute("INSERT INTO settled_tx VALUES(?,?,?)", (statements.tx_key(tx), what, "x"))
+    L.db.commit()
+
+
+# A repeat client's credit already settled to another invoice says nothing about this one; a conflict, a twin
+# whose copy explains nothing, a credit not on record yet or one without its details may still be this payment.
+@pytest.mark.parametrize(
+    "case, reminded",
+    [("unexplained", False), ("explained", True), ("conflict", False), ("not_recorded", False), ("no_details", False)],
+)
+def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, case, reminded):
+    L, iid = reminder
+    credit = _client_credit(L, iid)
+    if case == "not_recorded":  # the statement is stored, its lines not on record yet
+        st = _st(credit)
+        cover_accounts(st)
+        st.period_end = TODAY
+        monkeypatch.setattr(statements, "parse", lambda *args: st)
+    else:
+        L.record_statement(_st(credit))
+    if case in ("explained", "conflict"):
+        _reserve(L, credit, "issued other" if case == "explained" else "bank reference conflict")
+    if case == "no_details":
+        L.db.execute("UPDATE statement_txs SET tx=NULL")
         L.db.commit()
     rows = api._issued(L, "NORD", TODAY, True)
-    assert [t["id"] for t in r.tasks(L, "NORD", TODAY, rows)] == ([i.import_id("local", iid)] if explained else [])
+    assert [t["id"] for t in r.tasks(L, "NORD", TODAY, rows)] == ([i.import_id("local", iid)] if reminded else [])
 
 
-def test_spv_synced_invoice_gets_reminder_text(reminder):
+@pytest.mark.parametrize("copy_explained", [False, True])
+def test_a_twin_naming_the_client_counts_unless_its_copy_is_explained(reminder, copy_explained):
+    # The statement names the client; the bank feed's copy of the same payment, kept by account_lines, names nobody.
     L, iid = reminder
+    named = _client_credit(L, iid)
+    blank = _client_credit(L, iid, day=date(2026, 11, 11), counterparty="", iban="", desc="Incasare")
+    L.record_statement(_st(named, blank))
+    _reserve(L, named, "twin feed")
+    if copy_explained:
+        _reserve(L, blank, "issued other")
+    rows = api._issued(L, "NORD", TODAY, True)
+    assert bool(r.tasks(L, "NORD", TODAY, rows)) is copy_explained
+
+
+@pytest.mark.parametrize(
+    "invoice, storno, reminded",
+    [
+        (dict(), False, True),
+        (dict(), True, False),  # a credit note against it: no longer the full amount owed
+        (dict(supplier_cui="RO12345678"), False, False),  # another supplier's invoice under this firm's SPV
+        (dict(client="", client_cui=""), False, False),  # no buyer to tell a payment from
+    ],
+)
+def test_spv_synced_invoice_gets_reminder_text(reminder, sec, monkeypatch, invoice, storno, reminded):
+    L, _ = reminder
     L.db.execute("DELETE FROM issued WHERE company='NORD'")  # only the invoice synced from SPV is left
-    L.add_issued(
-        dict(
-            message_id="9001",
-            company="NORD",
-            doc_type="380",
-            number="EXT 7",
-            issue_date="2026-11-01",
-            due_date="2026-11-08",
-            currency="RON",
-            total="300.00",
-            client_name="Gamma Test SRL",
-            client_cui="RO123456",
-            raw_path="spv/9001.zip",
-            status="open",
-        )
-    )
-    tasks = r.tasks(L, "NORD", date(2026, 11, 18), api._issued(L, "NORD", date(2026, 11, 18), True))
-    assert [t["id"] for t in tasks] == ["9001"] and "EXT 7" in tasks[0]["subject"]
+    L.db.commit()
+    blobs = {"9001": ubl(**dict(number="EXT 7", issue="2026-11-01", due="2026-11-08") | invoice)}
+    if storno:
+        blobs["9002"] = ubl(root="CreditNote", number="EXT 9", total="190.00", ref="EXT 7", issue="2026-11-05")
+    _stored(L, monkeypatch, **blobs)
+    today = date(2026, 11, 18)
+    tasks = r.tasks(L, "NORD", today, api._issued(L, "NORD", today, True))
+    assert [t["id"] for t in tasks] == (["9001"] if reminded else [])
