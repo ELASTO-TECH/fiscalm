@@ -243,7 +243,10 @@ def _explained(rows: list) -> set[str]:
     done = {r["tx_key"] for r in originals if what[r["tx_key"]] and not what[r["tx_key"]].startswith(UNEXPLAINED)}
     excused = {k for k, w in what.items() if w.startswith("duplicate:") and w.removeprefix("duplicate:") in done}
     twins = [r for r in rows if what[r["tx_key"]].startswith("twin ")]
-    copies = {t["tx_key"]: [e["tx_key"] for e in originals if _copy(t, e)] for t in twins}
+    by_amount: dict[str, list] = {}  # a copy has the same amount: compare only those
+    for e in originals:
+        by_amount.setdefault(e["amount"], []).append(e)
+    copies = {t["tx_key"]: [e["tx_key"] for e in by_amount.get(t["amount"], ()) if _copy(t, e)] for t in twins}
     wanted: dict[str, int] = {}
     for keys in copies.values():
         for k in keys:
