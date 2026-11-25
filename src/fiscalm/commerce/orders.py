@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from fiscalm import bnr, integrations
 from fiscalm.api.responses import Error, fail, page
+from fiscalm.identity import firm_name
 from fiscalm.invoicing import engine as inv
 from fiscalm.ledger import Ledger, is_live
 
@@ -90,6 +91,44 @@ def validate(body: object) -> dict:
         if inv.decimal(line["vat_rate"]) not in (0, 11, 21):
             fail(400, "invalid_order", "Use VAT rates 0, 11 or 21.")
     return row
+
+
+# Legal forms by the saved firm's country ('Spa' is a word in a Romanian or British name, S.p.A. in Italy).
+# A country without an entry keeps every word.
+LEGAL_FORMS = {
+    country: frozenset(forms.split())
+    for country, forms in {
+        "RO": "srl srld sa pfa ii if snc scs sca",
+        "IT": "spa srl srls sas snc",
+        "DE": "gmbh ag ug kg ohg",
+        "AT": "gmbh ag kg og",
+        "FR": "sa sas sasu sarl",
+        "ES": "sa sl",
+        "NL": "bv nv",
+        "BE": "bv nv sa srl",
+        "GB": "ltd plc llp",
+        "IE": "ltd plc dac",
+        "US": "inc llc corp",
+    }.items()
+}
+
+
+def _name_parts(name: str, country: str) -> tuple[list[str], str]:
+    """The words of a firm name and its trailing legal form ('' when it has none)."""
+    # firm_name drops a leading Romanian 'S.C.'; a lead word keeps it for firms elsewhere ('SC Harbour Ltd').
+    words = [w for w in firm_name(name if country == "RO" else "zz " + name).split("-") if w][country != "RO" :]
+    forms = LEGAL_FORMS.get(country, frozenset())
+    return (words[:-1], words[-1]) if len(words) > 1 and words[-1] in forms else (words, "")
+
+
+def same_firm(saved: dict, buyer: dict) -> bool:
+    """A company buyer is the saved company under its tax id when the names agree: case, accents and punctuation
+    don't count, a legal form counts only when both names write one. A person or a private client never matches."""
+    if buyer.get("private") or saved.get("private"):
+        return False
+    country = saved.get("country", "")
+    (words, form), (typed, typed_form) = _name_parts(saved["name"], country), _name_parts(buyer["name"], country)
+    return bool(words) and words == typed and (form == typed_form or not form or not typed_form)
 
 
 def channel(L: Ledger, co: str, iid: str) -> integrations.Instance:
@@ -201,12 +240,13 @@ def _intake(
         if matches:
             if len(matches) != 1:
                 fail(409, "client_conflict", "Resolve duplicate saved client identities first.")
-            saved = json.loads(matches[0]["data"])
-            if any(
-                saved.get(k, "") != normalized.get(k, "")
-                for k in ("name", "street", "city", "county", "country", "postal_code", "email")
-            ):
-                fail(409, "client_conflict", "Shop buyer differs from the saved client. Review the client first.")
+            if not same_firm(json.loads(matches[0]["data"]), normalized):
+                fail(
+                    409,
+                    "client_conflict",
+                    "Shop buyer names another firm than the saved client. Review the client first.",
+                )
+            # Address and email drift is accepted: the invoice carries the saved client, the order keeps what was typed.
             cid = matches[0]["id"]
         else:
             # Private clients belong to this order only; never edit another draft's client.

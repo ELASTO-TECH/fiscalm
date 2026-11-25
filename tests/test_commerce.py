@@ -158,6 +158,47 @@ def test_shop_never_overwrites_saved_client(shop):
     assert L.db.execute("SELECT data FROM invoice_clients WHERE id=?", (cid,)).fetchone()[0] == before
 
 
+@pytest.mark.parametrize(
+    "saved,typed,country,same",
+    [
+        ("Firma Fictivă SRL", "S.C. FIRMA FICTIVA S.R.L.", "RO", True),
+        ("Firma Fictivă SRL", "Firma Fictivă", "RO", True),
+        ("Spa SRL", "spa s.r.l.", "RO", True),
+        ("Atelier Spa SRL", "Atelier Spa", "RO", True),
+        ("Atelier SRL", "Atelier Spa", "RO", False),
+        ("Atelier SRL", "Atelier SA", "RO", False),
+        ("Atelier Spa Design SRL", "Atelier Design SRL", "RO", False),
+        ("Atelier Spa SRL", "Atelier SRL", "RO", False),
+        ("Atelier Fittizio S.p.A.", "Atelier Fittizio", "IT", True),
+        ("Fictional Spa", "Fictional", "GB", False),
+        ("Fictional Spa", "Fictional", "MC", False),
+        ("SC Harbour Ltd", "Harbour Ltd", "GB", False),
+        ("S.C. Harbour SRL", "Harbour SRL", "RO", True),
+        ("...", "!!!", "RO", False),
+    ],
+)
+def test_same_firm_names(saved, typed, country, same):
+    assert c.same_firm(dict(name=saved, country=country), dict(name=typed)) is same
+    assert not c.same_firm(dict(name=saved, country=country), dict(name=saved, private=True))
+    assert not c.same_firm(dict(name=saved, country=country, private=True), dict(name=saved))
+
+
+@pytest.mark.parametrize("name", ["S.C. FIRMA FICTIVA S.R.L.", "firma fictivă"])
+def test_returning_firm_accepts_address_and_email_drift(shop, name):
+    L, body = shop
+    cid = i.save_client(L, "NORD", PARTY | dict(street="Strada Exemplu nr. 10"))
+    before = L.db.execute("SELECT data FROM invoice_clients WHERE id=?", (cid,)).fetchone()[0]
+    buyer = dict(type="company", name=name, cui=PARTY["cui"], email="comenzi@example.invalid")
+    buyer["address"] = body["buyer"]["address"] | dict(street="Str. Exemplu 10")
+    result = c.intake(L, "NORD", body | dict(buyer=buyer), "2026-10-31")
+    order = c.get(L, "NORD", result["id"])
+    assert order["client_id"] == cid and order["body"]["buyer"] == buyer
+    client = i.invoice(L, result["draft_id"], company="NORD")["data"]["client"]
+    assert (client["street"], client["email"]) == ("Strada Exemplu nr. 10", PARTY["email"])
+    assert L.db.execute("SELECT data FROM invoice_clients WHERE id=?", (cid,)).fetchone()[0] == before
+    assert i.issue(L, result["draft_id"], "2026-10-31", company="NORD", version=1)["status"] == "issued"
+
+
 @pytest.mark.parametrize("price,qty", [("1.99", "1"), ("0.99", "3"), ("33.33", "1")])
 def test_gross_rounding_preserves_amount(shop, price, qty):
     L, body = shop
