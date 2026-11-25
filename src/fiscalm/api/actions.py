@@ -577,7 +577,7 @@ def tx_receipt(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
         out = _res(True, "Bonul a fost asociat cu plata.")
     except links.LinkRefused as e:
         out = _res(False, links.REFUSED.get(e.code, BAD))
-    ctx.log(f"web: tx-receipt {ctx.get('tx')[:20]}: {'ok' if out['ok'] else 'refused'}")
+    ctx.log(f"web: tx-receipt: {'ok' if out['ok'] else 'refused'}")  # the request's own text is never logged
     return out
 
 

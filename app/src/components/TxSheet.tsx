@@ -356,7 +356,8 @@ function Explain({ t, link, onDone, onCancel }: { t: Transaction; link?: TxLink;
  * (`tx-receipt`); either takes the debit's amount, day and card. */
 function Receipt({ t }: { t: Transaction }) {
   const up = useExpenseUpload(undefined, t.id);
-  const unread = useDetail().transaction?.choices.receipts?.data ?? [];
+  const first = useDetail().transaction?.choices.receipts;
+  const unread = useChoicePage(t.id, "receipts", first, "", undefined, !first);
   return <>
     {up ? <Actions>
       {up.input}
@@ -364,9 +365,10 @@ function Receipt({ t }: { t: Transaction }) {
         <I n="camera" />{up.busy ? "Se încarcă…" : "Încarcă bonul"}
       </Button>
     </Actions> : null}
-    {unread.length ? <section aria-label="Bonuri încărcate fără date" className="grid gap-2">
+    {unread.total ? <section aria-label="Bonuri încărcate fără date" className="grid gap-2">
       <h3 className={sectionHeadingStyle}>Sau alege un bon deja încărcat</h3>
-      {unread.map((d) => <div key={d.id} className="flex flex-wrap items-center justify-between gap-2">
+      <PageNav page={unread} label="Bonuri încărcate" />
+      {unread.data.map((d) => <div key={d.id} className="flex flex-wrap items-center justify-between gap-2">
         <L to={{ doc: d.id }}>{`Bon încărcat în ${lunaName(d.month)}`}</L>
         <Act action="tx-receipt" body={{ tx: t.id, id: d.id }} label="Este bonul acestei plăți" cls="btn g" />
       </div>)}

@@ -437,10 +437,17 @@ def receipt(L: Ledger, company: str, key: str, sha: str, by: str | None = None) 
 
     def build() -> dict:
         t, _ = _transaction(L, company, key)
-        item = "receipt " + sha
-        if t.direction != "debit" or L.db.execute("SELECT 1 FROM tx_link_items WHERE item=?", (item,)).fetchone():
+        item, amount = "receipt " + sha, t.orig_amount or t.amount
+        # the file itself, read under the same lock as the write: this firm's upload, with no data of its own yet
+        mine = L.db.execute(
+            "SELECT 1 FROM documents WHERE sha=? AND company=? AND kind='receipt' AND source LIKE 'upload:%' "
+            "AND amount IS NULL AND efactura_id IS NULL AND sent_at IS NULL",
+            (sha, company),
+        ).fetchone()
+        taken = L.db.execute("SELECT 1 FROM tx_link_items WHERE item=?", (item,)).fetchone()
+        if t.direction != "debit" or amount <= 0 or not mine or taken:
             raise LinkRefused("receipt")
-        return {"kind": "receipt", "difference": Decimal(0), "items": [(item, t.orig_amount or t.amount)]}
+        return {"kind": "receipt", "difference": Decimal(0), "items": [(item, amount)]}
 
     if not re.fullmatch(r"[0-9a-f]{64}", sha):
         raise LinkRefused("receipt")

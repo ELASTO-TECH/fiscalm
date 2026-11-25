@@ -925,9 +925,11 @@ def test_a_bon_already_uploaded_is_named_for_its_card_payment(ledger):
             ]
         ]
 
-    assert offered() == [stored["sha"]]
+    (foreign,) = intake.accept_member(ledger, intake.member("STUDIO9", "u_member"), [("png", PNG)])
+    assert offered() == [stored["sha"]]  # never another firm's file
+    assert not actions.act("tx-receipt", "NORD", {"tx": key, "id": foreign["sha"]})["ok"]
     body = {"tx": key, "id": stored["sha"]}
-    assert not actions.act("tx-receipt", "STUDIO9", body)["ok"]  # another firm's debit and file
+    assert not actions.act("tx-receipt", "STUDIO9", body)["ok"]  # another firm's debit
     assert actions.act("tx-receipt", "NORD", body)["ok"]
     assert explanation(ledger, key)["document"] == stored["sha"] and offered() == []
     assert not actions.act("tx-receipt", "NORD", body)["ok"]  # one debit, one bon
