@@ -486,12 +486,12 @@ def remembered(kept: list) -> list[dict]:
     ]
 
 
-def proposals(company: str, txs: list[statements.Tx], kept: list) -> list[dict | None]:
+def proposals(company: str, txs: list[statements.Tx], kept: list, L: Ledger | None = None) -> list[dict | None]:
     """What the user asked to remember for each transaction's card, account or merchant (that order), as a proposal:
     {kind: remembered, memory, as: {kind, partner, reason, note}}. One of the AUTOMATIC kinds is applied on its own
     (apply_rules); the rest the user confirms on the sheet."""
     by_key = {(m["key_kind"], m["key"]): m for m in kept}
-    own, out = companies.get(company).own_ibans, []
+    own, out = companies.get(company, L=L).own_ibans, []
     for t in txs:
         keys = efactura.line_keys(t, own)
         m = next((by_key[(k, keys[k])] for k in ("card", "iban", "name") if (k, keys.get(k)) in by_key), None)
@@ -559,12 +559,14 @@ def _free_other_end(L: Ledger, company: str, key: str, free: set[str]) -> str | 
             return None
     except LinkRefused:
         return None
+    if t.card_last4 or o.card_last4:  # a card pays a merchant; it never moves money between the firm's accounts
+        return None
     bank = {statements.BANK_FEE, statements.INTEREST} & {t.category, o.category}
     named = companies.normalize_iban(t.counterparty_iban) or companies.normalize_iban(o.counterparty_iban)
     own = companies.get(company, L=L).own_ibans
     if bank or not named or not {companies.normalize_iban(t.iban), companies.normalize_iban(o.iban)} <= own:
         return None
-    if settlements.claimed_credit(L, company, o) or any(proposals(company, [t, o], L.memories(company))):
+    if settlements.claimed_credit(L, company, o) or any(proposals(company, [t, o], L.memories(company), L)):
         return None  # a pending report's credit, or a rule saved since the rows were read, is not a transfer's
     return other if other_end(L, company, other, o, but=key) == key else None
 
@@ -603,7 +605,9 @@ def names_open_invoice(L: Ledger, company: str, t: statements.Tx) -> bool:
     text, norm = f" {plain(words)} ", efactura._norm(words)
 
     def names(number: str) -> bool:
-        ident, digits = issued._ident_re(number), efactura.number_of(number)
+        # a supplier's number is outside data: one too short names dates, one too long is not a number
+        sure = 3 <= len(number) <= 40 and (re.search(r"[A-Za-z]", number) or efactura.number_of(number))
+        ident, digits = (issued._ident_re(number) if sure else None), efactura.number_of(number)
         return (
             names_number(text, number)
             or bool(ident and ident.search(norm))
@@ -639,7 +643,7 @@ def _untouched(L: Ledger, company: str, key: str, memory: str | None, build: Cal
 
     def build_once() -> dict:
         t, _ = _transaction(L, company, key)
-        now = proposals(company, [t], L.memories(company))[0] if memory else None
+        now = proposals(company, [t], L.memories(company), L)[0] if memory else None
         gone = memory and (now or {}).get("memory") != memory
         receipt = t.direction == "debit" and t.card_last4 and recon.match_receipts([t], recon._receipts(L, company))
         if (

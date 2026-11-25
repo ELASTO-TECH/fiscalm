@@ -829,6 +829,17 @@ def test_a_transfer_rule_leaves_a_pair_it_cant_be_sure_of(ledger, live, monkeypa
     )
 
 
+def test_a_transfer_rule_never_takes_a_card_line(ledger, live):
+    card, into = _record(
+        ledger,
+        "NORD",
+        _tx(76, "debit", "500.00", card_last4="0001", counterparty="SHOP EXEMPLU"),
+        _tx(77, "credit", "500.00", iban=EUR_ACCOUNT, counterparty_iban=NORD_RON),
+    )
+    assert ledger.assign_card("NORD", card, "NORD")
+    assert _apply(ledger) == [] and _rows(ledger)[into]["explanation"] is None
+
+
 def test_a_transfer_rule_skips_bank_interest_and_an_unassigned_card(ledger, live):
     """The bank's interest is never a transfer's other end; a card debit nobody assigned is skipped, not a stop."""
     card, interest_out, interest, out, into = _record(
