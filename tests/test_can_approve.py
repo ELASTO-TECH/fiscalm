@@ -28,8 +28,8 @@ def _inactive(ledger, monkeypatch, mid="3001"):
     anaf_public.store_status(ledger, INACTIVE_CUI, {"checked_at": "2026-10-21", "inactive": True})
 
 
-def _credited(ledger, monkeypatch):
-    xml = ubl(root="CreditNote", number="COR 2", total="50.00").replace(
+def _credited(ledger, monkeypatch, due="2026-11-20"):
+    xml = ubl(root="CreditNote", number="COR 2", total="50.00", due=due).replace(
         b"</CreditNote>",
         b"<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>RMBU 2222602</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference></CreditNote>",
     )
@@ -145,6 +145,7 @@ TREZ_IBAN = synthetic_iban("RO00TREZ0000999900003333")
         ([OTHER_IBAN, SUPPLIER_IBAN], SUPPLIER_IBAN, SUPPLIER_IBAN),  # the one proved for this supplier wins
         ([TREZ_IBAN, SUPPLIER_IBAN], None, SUPPLIER_IBAN),  # the only commercial account beside Treasury
         ([SUPPLIER_IBAN, TREZ_IBAN], TREZ_IBAN, TREZ_IBAN),  # a proved Treasury account wins, with Treasury's BIC
+        ([SUPPLIER_IBAN, TREZ_IBAN], "both", "several_ibans"),  # two proved: never the TREZ rule
         ([TREZ_IBAN, OTHER_IBAN, SUPPLIER_IBAN], None, "several_ibans"),
         ([OTHER_IBAN, SUPPLIER_IBAN], None, "several_ibans"),
         (["DE00NOTROMANIAN", SUPPLIER_IBAN], None, SUPPLIER_IBAN),  # only valid Romanian IBANs count
@@ -155,8 +156,8 @@ def test_an_invoice_with_several_ibans_pays_the_one_account_it_can_prove(
 ):
     _stored(ledger, monkeypatch, **{"3001": ubl()})
     _set(ledger, "ibans=?,supplier_iban=?", json.dumps(ibans), ibans[0])
-    if proved:
-        _prove(ledger, proved)
+    for iban in ibans if proved == "both" else [proved] if proved else []:
+        _prove(ledger, iban)
     refusal = efactura.payment_refusal(ledger, ledger.efactura("3001"))
     assert (refusal.code if refusal else efactura.payment_item(ledger, "3001").payee_iban) == pays
     if not refusal:  # the XML's BIC is not tied to one of several accounts; Treasury has its own
@@ -203,8 +204,9 @@ def test_only_blocking_invoice_issues_refuse_payment(ledger, home, monkeypatch, 
     assert (refusal.code if refusal else None) == ("invoice_issues" if blocks else None)
 
 
-def test_a_credit_note_still_refuses_an_original_whose_due_date_is_unreadable(ledger, home, monkeypatch):
+@pytest.mark.parametrize("note_due", ["2026-11-20", "2026-13-01"])  # either may carry an unreadable due date
+def test_a_credit_note_still_refuses_an_original_whose_due_date_is_unreadable(ledger, home, monkeypatch, note_due):
     _stored(ledger, monkeypatch, **{"3001": ubl(due="2026-13-01")})
-    _credited(ledger, monkeypatch)
+    _credited(ledger, monkeypatch, note_due)
     assert json.loads(ledger.efactura("3001")["issues"])
     assert efactura.payment_refusal(ledger, ledger.efactura("3001")).code == "credited"

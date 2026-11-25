@@ -34,7 +34,7 @@ def credit_links(L: Ledger, company: str) -> dict[str, list[dict]]:
         if r["doc_type"] == "credit_note"
         and not r["parse_error"]
         and r["status"] != "duplicate"
-        and not json.loads(r["issues"] or "[]")
+        and not blocking_issues(r)
     ]
     if not credits:
         return {}

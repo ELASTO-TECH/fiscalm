@@ -1292,6 +1292,7 @@ class PaymentFacts:
     def __init__(self, L: Ledger, rows: Iterable = ()) -> None:
         self._L = L
         self._unfiled: set[tuple[str, str]] | None = None
+        self._payees: dict[tuple[str, str], str] | None = None
         self._credits: dict[str, dict[str, Decimal]] = {}
         self._status: dict[str, dict | None] = {}
         self._proved: dict[tuple[str, str], set[str]] = {}
@@ -1310,12 +1311,21 @@ class PaymentFacts:
 
     def unfiled(self, r) -> bool:
         if self._unfiled is None:
-            self._unfiled = {
-                (p["company"], p["item_id"])
-                for p in self._L.payments()
-                if p["status"] == "pending" and p["file_id"] is None
-            }
+            self._read_payments()
         return (r["company"], r["item_id"]) in self._unfiled
+
+    def queued_payee(self, r) -> str | None:
+        """The IBAN the invoice's payment row pays (a linked invoice), else None."""
+        if self._payees is None:
+            self._read_payments()
+        return self._payees.get((r["company"], r["item_id"])) if r["status"] == "linked" else None
+
+    def _read_payments(self) -> None:
+        rows = list(self._L.payments())
+        self._unfiled = {
+            (p["company"], p["item_id"]) for p in rows if p["status"] == "pending" and p["file_id"] is None
+        }
+        self._payees = {(p["company"], p["item_id"]): p["payee_iban"] for p in rows}
 
     def status(self, r) -> dict | None:
         """The last trusted cached ANAF status of an eligible Romanian supplier (`partner_anaf.supplier_cui`), or None."""
@@ -1367,10 +1377,7 @@ def check_payment(
     blocking = blocking_issues(r)
     if blocking:
         raise ApproveError("invoice_issues", "invoice has issues: " + "; ".join(blocking))
-    if account is None and r["status"] == "linked":
-        queued = L.payment(r["item_id"])
-        account = queued["payee_iban"] if queued else None
-    return payee_iban(r, facts, account)
+    return payee_iban(r, facts, account or facts.queued_payee(r))
 
 
 def payee_iban(r, facts: PaymentFacts, account: str | None = None) -> str:
@@ -1394,7 +1401,7 @@ def _ro_ibans(r) -> list[str]:
 
 
 def payee_choices(r, facts: PaymentFacts) -> list[str]:
-    """Of the invoice's own valid Romanian IBANs: the only one; else the only one already proved for this supplier (a
+    """Of the invoice's own valid Romanian IBANs: the only one; else those already proved for this supplier (a
     statement or a settled payment-file payment); else the only commercial one beside Treasury (TREZ) accounts; else
     all of them. Proof only breaks a tie between accounts the supplier itself signed in this invoice."""
     ibans = _ro_ibans(r)
@@ -1403,7 +1410,8 @@ def payee_choices(r, facts: PaymentFacts) -> list[str]:
     if len(ibans) > 1:
         proved = [i for i in ibans if i in facts.proved(r)]
         commercial = [i for i in ibans if i[4:8] != "TREZ"]
-        ibans = proved if len(proved) == 1 else commercial if len(commercial) == 1 else ibans
+        # Several proved: a person decides among them; the TREZ rule only applies when none is proved.
+        ibans = proved or (commercial if len(commercial) == 1 else ibans)
     return ibans
 
 
