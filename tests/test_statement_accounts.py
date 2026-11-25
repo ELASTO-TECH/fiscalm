@@ -12,7 +12,7 @@ from pdf_fake import bt_statement
 from test_camt import complete, fake_pdf, parse, write, xml
 
 from fiscalm import companies, integrations, pack, recon
-from fiscalm.bank import intake as statement_intake, statements, upload
+from fiscalm.bank import banking_days, intake as statement_intake, statements, upload
 from fiscalm.ledger import finance_home
 from fiscalm.mail import imap as imapread, invoices as mail_invoices
 
@@ -330,6 +330,71 @@ def test_mail_never_imports_an_unprotected_pdf(ledger, sec, tmp_path, monkeypatc
     plain = bt_statement(tmp_path / "p.pdf", nord.cui, ("01/10/2026", "31/10/2026"), accounts, password=None)
     assert bring(ledger, "mail", [plain], monkeypatch, account) == "not_ours"
     assert not ledger.documents(kind="statement")
+
+
+@pytest.mark.parametrize(
+    "day,banking",
+    [
+        (date(2026, 4, 10), False),  # Orthodox Good Friday (Easter 12 April 2026)
+        (date(2024, 5, 6), False),  # Orthodox Easter Monday (5 May 2024, not the Western 31 March)
+        (date(2024, 6, 24), False),  # Rusalii Monday, Easter + 50
+        (date(2025, 1, 6), False),  # Bobotează, a holiday since 2024
+        (date(2023, 1, 6), True),  # not yet in 2023
+        (date(2017, 4, 14), True),  # Good Friday became a holiday in 2018
+        (date(2026, 11, 30), False),
+        (date(2026, 10, 1), True),
+    ],
+)
+def test_banking_days_follow_romanian_legal_holidays(day, banking):
+    assert banking_days.banking_day(day) is banking
+
+
+def month_file(folder, lo: str, hi: str, opening: str = "100.00", *first):
+    """NORD's BT PDF for lo..hi, each section under its own period: `first` sections, then RON and EUR, each opening at
+    `opening` and crediting 10.00 on `lo`."""
+    nord = companies.get("NORD")
+    own = [(c, nord.ibans[c], Decimal(opening), [(lo, f"M-{c}", Decimal("10.00"))], (lo, hi)) for c in ("RON", "EUR")]
+    return bt_statement(folder / f"extras-{lo.replace('/', '')}.pdf", nord.cui, (lo, hi), [*first, *own])
+
+
+def usd(opening: str, lo: str = "10/10/2026"):
+    return ("USD", USD, Decimal(opening), [(lo, "M-USD", Decimal("5.00"))], (lo, "31/10/2026"))
+
+
+@pytest.mark.parametrize(
+    "case,files,opened,refusal",
+    [
+        ("1 May 2022 is a Sunday", [("02/05/2022", "31/05/2022")], "", None),
+        ("1 December is a holiday", [("02/12/2021", "31/12/2021")], "", None),
+        ("2 May 2022 is a banking day", [("03/05/2022", "31/05/2022")], "", "full calendar month"),
+        ("chains with April", [("01/04/2022", "30/04/2022", "90.00"), ("02/05/2022", "31/05/2022")], "", None),
+        ("April closes elsewhere", [("01/04/2022", "30/04/2022"), ("02/05/2022", "31/05/2022")], "", "chain"),
+        ("USD opened in October at zero", [("01/10/2026", "31/10/2026", "100.00", usd("0.00"))], "2026-10", None),
+        ("USD opened in October", [("01/10/2026", "31/10/2026", "100.00", usd("7.00"))], "2026-10", "full calendar"),
+        ("USD not marked opened", [("01/10/2026", "31/10/2026", "100.00", usd("0.00"))], "", "full calendar month"),
+    ],
+)
+def test_a_month_starts_after_the_1st_only_when_no_day_with_movements_is_left_out(
+    ledger, tmp_path, monkeypatch, case, files, opened, refusal
+):
+    """BT prints the month from its first banking day, or from the day an account opened: that is the whole month
+    when the days before could hold no movement and the balances open where the previous stored month closed."""
+    if "USD" in case:
+        nord_with(monkeypatch, (USD, "USD", "bt", {"opened": opened} if opened else {}))
+    *before, (lo, hi, *rest) = files
+    for b in before:  # the previous month, imported first
+        assert (
+            recon.ingest_files(ledger, [month_file(tmp_path, *b)], password_lookup=lambda co: "synthetic")[0]["status"]
+            == "added"
+        )
+    (result,) = recon.ingest_files(
+        ledger, [month_file(tmp_path, lo, hi, *rest)], password_lookup=lambda co: "synthetic"
+    )
+    if refusal:
+        assert result["status"] == "refused" and refusal in result["errors"][0]
+        assert len(ledger.documents(kind="statement")) == len(before)
+    else:
+        assert (result["status"], result["month"]) == ("added", hi[6:] + "-" + hi[3:5])
 
 
 @pytest.mark.parametrize(

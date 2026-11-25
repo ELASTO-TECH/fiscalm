@@ -13,11 +13,12 @@ import sqlite3
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager, suppress
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from fiscalm import companies
 from fiscalm.api.receipts import directory
-from fiscalm.bank import statements
+from fiscalm.bank import banking_days, statements
 from fiscalm.bank.camt import MAX_XML, parse_camt
 from fiscalm.ledger import Ledger, finance_home
 
@@ -218,42 +219,120 @@ def combine(parts: list[statements.Statement]) -> statements.Statement:
     account's days exactly once, without a gap. Each file keeps its own accounts and its own trust (a file's lines settle only when
     its balances add up), as when a stored file is read again on its own; two consecutive files of an account whose
     balances are proven must chain (each opens where the one before closed), or a statement between them is missing.
-    Completeness is the caller's (`refuse_incomplete`): the set must hold every account like one file."""
+    An account's days may start after the 1st only where none is left out (`_late_start`); the previous month's
+    closing balance is the caller's (`refuse_unchained`), as is completeness (`refuse_incomplete`)."""
     if any(not p.period_start or not p.period_end or p.period_end < p.period_start for p in parts):
         raise statements.StatementError("Cannot verify statement period")
     first, last = min(p.period_start for p in parts), max(p.period_end for p in parts)
-    if first.day != 1 or (last + timedelta(days=1)).day != 1:  # one file too: it stands for the month
-        raise statements.PartialMonth("Statement", first.replace(day=1))
-    if len(parts) == 1:
-        return parts[0]
-    if any(p.partial or not p.one_period for p in parts):
+    if len(parts) == 1 and parts[0].one_period and first.day == 1 and (last + timedelta(days=1)).day == 1:
+        return parts[0]  # the whole month in one file, one period: as printed
+    if any(p.partial for p in parts):
         raise statements.StatementError("Statement set: every file must name one period")
+    runs: dict[tuple[str, str], list[tuple[date, date, statements.Account]]] = {}
+    for p in parts:
+        for a in p.accounts:
+            lo, hi = _span(p, a)
+            runs.setdefault((companies.normalize_iban(a.iban), a.currency), []).append((lo, hi, a))
+    spans = [s for run in runs.values() for s in run] or [(p.period_start, p.period_end, None) for p in parts]
+    first, last = min(lo for lo, _, _ in spans), max(hi for _, hi, _ in spans)
+    if (last + timedelta(days=1)).day != 1:
+        raise statements.PartialMonth("Statement", last.replace(day=1))
     if first.strftime("%Y-%m") != last.strftime("%Y-%m"):
         raise statements.StatementError("Statement set: files of different months")
-    runs: dict[tuple[str, str], list[tuple[statements.Statement, statements.Account]]] = {}
-    for p in sorted(parts, key=lambda p: p.period_start):
-        for a in p.accounts:
-            runs.setdefault((companies.normalize_iban(a.iban), a.currency), []).append((p, a))
+    co = companies.get(parts[0].company)
     for run in runs.values():
-        _refuse_gaps(run, first, last)
+        _refuse_gaps(sorted(run, key=lambda s: s[0]), last, co)
     return statements.Statement(parts[0].company, first, last, [a for p in parts for a in p.accounts])
 
 
-def _refuse_gaps(run: list[tuple[statements.Statement, statements.Account]], first: date, last: date) -> None:
-    """One account's files, by first day: each day from `first` to `last` once, proven balances chaining."""
-    day, before = first, None
-    for p, a in run:
-        if p.period_start < day:
+def _span(p: statements.Statement, a: statements.Account) -> tuple[date, date]:
+    """The days an account's section covers: the period printed above it, else its file's single period."""
+    if a.period:
+        lo, hi = a.period
+    elif p.one_period:
+        lo, hi = p.period_start, p.period_end
+    else:
+        raise statements.StatementError("Statement set: every file must name one period")
+    if hi < lo:
+        raise statements.StatementError("Cannot verify statement period")
+    return lo, hi
+
+
+def opening(a: statements.Account) -> Decimal:
+    """A proven account's opening balance: its closing one less what its lines moved."""
+    return a.closing - a.total_credit + a.total_debit
+
+
+def _late_start(start: date, a: statements.Account, co) -> bool:
+    """An account's month may start after the 1st only when the days before could hold no movement, and its opening
+    balance is proven: no banking day before `start` (weekends, legal holidays), or the account opened that month
+    (set by a person) and opened at zero."""
+    month = start.replace(day=1)
+    if not a.trustworthy:
+        return False
+    if banking_days.none_between(month, start):
+        return True
+    own = co.account(a.iban)
+    return bool(own and own.opened == start.strftime("%Y-%m") and opening(a) == 0)
+
+
+def _refuse_gaps(run: list[tuple[date, date, statements.Account]], last: date, co) -> None:
+    """One account's sections, by first day: each day from the month's start to `last` once, proven balances
+    chaining."""
+    day, before = last.replace(day=1), None
+    if run[0][0] > day and _late_start(run[0][0], run[0][2], co):
+        day = run[0][0]
+    for lo, hi, a in run:
+        if lo < day:
             raise statements.StatementError("Statement set: an account appears twice for the same days")
-        if p.period_start > day:
-            raise statements.PartialMonth("Statement set", first.replace(day=1))
+        if lo > day:
+            raise statements.PartialMonth("Statement set", last.replace(day=1))
         # trustworthy: opening + credits - debits == closing, to the cent, so the opening is known
         proven = before is not None and before.trustworthy and a.trustworthy
-        if proven and a.closing - a.total_credit + a.total_debit != before.closing:
+        if proven and opening(a) != before.closing:
             raise statements.StatementError("Statement set: balances do not chain; a statement is missing")
-        day, before = p.period_end + timedelta(days=1), a
+        day, before = hi + timedelta(days=1), a
     if day != last + timedelta(days=1):
-        raise statements.PartialMonth("Statement set", first.replace(day=1))
+        raise statements.PartialMonth("Statement set", last.replace(day=1))
+
+
+def refuse_unchained(L: Ledger, st: statements.Statement) -> None:
+    """An account whose month starts after the 1st must open where the previous month's stored statement of that
+    account closed, when one is on record: otherwise days between them are missing. A stored statement that can't
+    be read, or whose closing balance isn't proven, can't show that: nothing is imported."""
+    starts: dict[str, tuple[date, statements.Account]] = {}
+    for a in st.accounts:
+        lo = a.period[0] if a.period else st.period_start
+        iban = companies.normalize_iban(a.iban)
+        if iban not in starts or lo < starts[iban][0]:
+            starts[iban] = (lo, a)
+    for iban, (lo, a) in starts.items():
+        if lo.day != 1:
+            _refuse_unchained_account(L, st.company, iban, lo, a)
+
+
+def _refuse_unchained_account(L: Ledger, company: str, iban: str, start: date, a: statements.Account) -> None:
+    """The last section of `iban` in the previous month's stored statements (one file, or one per day) closes at
+    `a`'s opening balance."""
+    month = (start.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    theirs = [
+        x
+        for doc in L.documents(company=company, month=month, kind="statement")
+        if not str(doc["path"]).endswith(".csv") and (not doc["accounts"] or iban in json.loads(doc["accounts"]))
+        for x in _read_stored(doc, company).accounts
+        if companies.normalize_iban(x.iban) == iban
+    ]
+    if not theirs:
+        return
+    end = max(theirs, key=lambda x: x.period[1] if x.period else x.closing_day or date.min)
+    if end.closing is None:
+        raise statements.StatementError(
+            "Statement starts after the 1st and the previous month's closing balance is not proven"
+        )
+    if end.closing != opening(a):
+        raise statements.StatementError(
+            "Statement balances do not chain with the previous month; a statement is missing"
+        )
 
 
 def refuse_incomplete(st: statements.Statement) -> None:

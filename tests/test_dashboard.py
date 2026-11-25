@@ -349,13 +349,19 @@ def test_a_bank_feed_read_from_mid_month_counts_until_a_statement_brings_the_mon
     assert _moves(ledger) == [("2026-10-15", "credit", "RON", Decimal("500.00"))]
 
 
-def test_a_bt_pdf_with_two_periods_dates_no_balance():
-    text = bt_text() + bt_text().replace("01/10/2026 - 31/10/2026", "01/09/2026 - 30/09/2026").replace(
-        RON, EUR
-    ).replace("RON  Cod", "EUR  Cod")
+def test_a_bt_pdf_with_two_periods_dates_each_balance_by_the_period_above_it():
+    september = bt_text().replace("01/10/2026 - 31/10/2026", "01/09/2026 - 30/09/2026")
+    text = bt_text() + september.replace(RON, EUR).replace("RON  Cod", "EUR  Cod")
     accounts = statements.parse_text(text, "NORD").accounts
     assert len(accounts) == 2 and all(a.balanced for a in accounts)
-    assert [(a.closing, a.closing_day) for a in accounts] == [(None, None), (None, None)]
+    closing = Decimal("1150.00")
+    assert [(a.closing, a.closing_day) for a in accounts] == [
+        (closing, date(2026, 10, 31)),
+        (closing, date(2026, 9, 30)),
+    ]
+    # a section with no period above it, in a file naming two, proves none
+    text = bt_text().split("\n", 1)[1] + bt_text() + september
+    assert statements.parse_text(text, "NORD").accounts[0].closing is None
 
 
 def test_the_newest_balance_of_a_month_wins_and_two_that_disagree_prove_none(ledger, home):

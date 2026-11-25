@@ -21,6 +21,7 @@ from fiscalm.bank.intake import (
     import_lock,
     refuse_incomplete,
     refuse_overlap,
+    refuse_unchained,
     statement_ibans,
 )
 from fiscalm.efactura import inbox as efactura
@@ -250,6 +251,7 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
     try:
         st = combine([o.st for o in parts])
         _set_checks(st, parts, check)
+        refuse_unchained(ledger, st)  # under the import lock: the previous month can't change meanwhile
         for o in parts:
             refuse_overlap(ledger, o.st, o.digest, siblings={p.digest for p in parts})
     except StoredStatementUnavailable as exc:
