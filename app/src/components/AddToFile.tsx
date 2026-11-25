@@ -60,8 +60,11 @@ export function AddToFile({ s, invoices, left = [], onDone }: { s: State; invoic
     // never a default that arrived while the sheet was open (the engine still pays only an account the invoice lists).
     const chosenAccounts = invoices.filter((r) => picks[r.id] !== undefined).map((r) => [r.id, picks[r.id]]);
     const accounts = chosenAccounts.length ? { accounts: Object.fromEntries(chosenAccounts) } : {};
-    const body: FileAction = fresh || !chosen ? { action: "payment_file_create", co: s.co as Co, name: name.trim(), invoice_ids, ...accounts }
-      : { action: "payment_file_add", file_id: chosen.id, invoice_ids, ...accounts };
+    // A credited invoice pays its net: the amount shown goes along, and the engine refuses if it changed meanwhile.
+    const credited = invoices.filter((r) => r.credits?.length).map((r) => [r.id, r.left]);
+    const shown = credited.length ? { amounts: Object.fromEntries(credited) } : {};
+    const body: FileAction = fresh || !chosen ? { action: "payment_file_create", co: s.co as Co, name: name.trim(), invoice_ids, ...accounts, ...shown }
+      : { action: "payment_file_add", file_id: chosen.id, invoice_ids, ...accounts, ...shown };
     setSending(true);
     const r = await run(s.co as Co, () => postFile(body), undefined, () => false);
     setSending(false);

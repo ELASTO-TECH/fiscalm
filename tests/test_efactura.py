@@ -17,7 +17,7 @@ from payment_cases import download_batch
 from synthetic_world import ubl_lines, ubl_totals
 
 from fiscalm import companies, invoice_lines, recon
-from fiscalm.api import lists, state as api, tasks
+from fiscalm.api import actions, lists, state as api, tasks
 from fiscalm.bank import statements
 from fiscalm.efactura import client as anaf, credits, inbox as efactura
 from fiscalm.ledger import Ledger
@@ -1560,6 +1560,17 @@ def test_a_net_payment_whose_credit_no_longer_links_is_withdrawn_before_download
         pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
     assert ledger.payment(item)["status"] == "pending"  # nothing exported: the 200.00 never reaches a bank file
     assert not pay.named_path(ledger.payment_file(ident)).exists()
+    debit = _tx("200.00", date(2026, 10, 30), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN, desc="plata factura TEST 1")
+    assert recon.auto_mark_paid(ledger, _debit_st(debit)) == []  # a 200.00 debit never hides the 50.00 left
+    assert ledger.payment(item)["status"] == "pending"
+
+
+@pytest.mark.parametrize(("shown", "ok"), [("200.00", True), ("250.00", False), ("200", None)])
+def test_a_credited_invoice_is_added_only_for_the_amount_the_person_saw(ledger, home, monkeypatch, shown, ok):
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    body = {"name": "Net", "invoice_ids": ["3001"], "amounts": {"3001": shown}}
+    assert actions.act("payment_file_create", "NORD", body)["ok"] is bool(ok)
+    assert (ledger.efactura("3001")["status"] == "linked") is bool(ok)
 
 
 @pytest.mark.parametrize("exported", [False, True])

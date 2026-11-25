@@ -28,6 +28,7 @@ from fiscalm.bank.intake import (
 )
 from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import Ledger, finance_home
+from fiscalm.payments import engine as pay
 from fiscalm.payments.orders import parse_payment_pdf
 from fiscalm.pdftext import pdf_text, sha256
 from fiscalm.storage import read_file
@@ -486,7 +487,11 @@ def auto_mark_paid(ledger: Ledger, st: statements.Statement) -> list[str]:
     rivals = efactura.rivals(ledger, st.company)
     advance = efactura.remembered_advance(ledger, st.company)  # the owner's money: never a payment row's
 
+    stale = pay.stale_payments(ledger, st.company)
+
     def settle(p, t):
+        if p["item_id"] in stale:  # its amount is no longer the invoice's net: a person checks it
+            return
         if ledger.mark_paid(p["item_id"], f"statement {t.date} REF {t.ref}", statements.tx_key(t)):
             done.append(p["item_id"])
         used.add(statements.tx_key(t))

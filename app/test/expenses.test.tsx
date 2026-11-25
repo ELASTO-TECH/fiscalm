@@ -525,6 +525,19 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
       { action: "payment_file_add", file_id: 9, invoice_ids: [telecom.id], accounts: { [telecom.id]: 2 } }]));
   });
 
+  it("sends the net amount shown for a credited invoice, so a changed amount is refused", async () => {
+    const s = withFiles();
+    const telecom = s.invoices.find((r) => r.supplier === "Telecom Rapid SRL")!;
+    telecom.credits = [{ id: "302", number: "COR 2", amount: "-50.00", date: "2026-10-22" }];
+    telecom.left = "200.00";
+    const api = await choose("open", { state: () => json(s), onPost: ok(s) });
+    await userEvent.click(box("Telecom Rapid SRL"));
+    await put();
+    await userEvent.click(within(await chooser()).getByRole("button", { name: "Pune în fișier" }));
+    await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
+      { action: "payment_file_add", file_id: 9, invoice_ids: [telecom.id], amounts: { [telecom.id]: "200.00" } }]));
+  });
+
   it("asks again when the chosen file is imported elsewhere meanwhile, and sends nothing until then", async () => {
     let s = withFiles();
     const api = await choose("open", { state: () => json(s), onPost: ok(s) });

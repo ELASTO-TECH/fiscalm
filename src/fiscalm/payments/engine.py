@@ -121,6 +121,19 @@ def version(item_ids) -> str:
     return hashlib.sha256(",".join(sorted(item_ids)).encode()).hexdigest()[:12]
 
 
+def stale_payments(ledger: Ledger, company: str) -> set[str]:
+    """Pending invoice payments whose amount is not their invoice's total minus its linked credits now (a credit that
+    stopped linking, or arrived since): no debit settles them, so a shortfall is never hidden as paid."""
+    credits = credited(ledger, company)
+    pending = {p["item_id"]: Decimal(p["amount"]) for p in ledger.payments(company=company, status="pending")}
+    return {
+        r["item_id"]
+        for r in ledger.efactura_rows(status="linked", company=company)
+        if r["item_id"] in pending
+        and pending[r["item_id"]] != Decimal(r["total"]) - credits.get(r["message_id"], Decimal(0))
+    }
+
+
 def _without_credits(ledger: Ledger, rows: list) -> list:
     """Under pay_lock: no unimported invoice payment keeps an amount that is not its invoice's total minus its linked
     credits now (efactura.payment_item): one built before a credit, or for a credit that no longer links, is withdrawn."""
@@ -307,8 +320,10 @@ def add_invoices(
     name: str | None = None,
     approve_invoice: Callable,
     accounts: dict[str, str] | None = None,
+    amounts: dict[str, str] | None = None,
 ) -> int:
-    """`accounts`: the IBAN a person picked for an invoice listing several (efactura.approve's `account`)."""
+    """`accounts`: the IBAN a person picked for an invoice listing several (efactura.approve's `account`). `amounts`:
+    the amount the person saw for an invoice; its payment must be that amount, or nothing is added."""
     with pay_lock(), ledger.tx():
         if file_id is None:
             file_id = ledger.create_payment_file(company, name or "")
@@ -323,6 +338,8 @@ def add_invoices(
                 raise FileRefusal("Factura nu aparține firmei.")
             account = (accounts or {}).get(mid)
             item = approve_invoice(ledger, mid, origin="person", unfiled=True, account=account)["item_id"]
+            if mid in (amounts or {}) and Decimal(ledger.payment(item)["amount"]) != Decimal(amounts[mid]):
+                raise FileRefusal("Suma de plată s-a schimbat. Verifică factura din nou.")
             if not ledger.attach_payment_file(file_id, company, item, origin="person"):
                 raise FileRefusal("Factura este deja într-un fișier sau s-a schimbat.")
         return file_id
