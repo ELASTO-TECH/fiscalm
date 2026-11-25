@@ -3,6 +3,16 @@
 Product versions describe fiscalm releases. The API and the ledger schema have their own
 version numbers. Back up before upgrading; see [self-hosting](docs/self-hosting.md).
 
+## 0.1.5 (2026-11-25)
+
+- A BT statement whose final balance falls alone on the next page is read correctly and
+  its lines are matched. Statements stored before can be fixed with `fiscalm ingest` on
+  the same file.
+- Quarterly and older daily BT PDFs are imported.
+- `fiscalm ingest` reads plain BT PDFs under any name; one bad file is refused, not the
+  whole import.
+- A BT month may start on its first banking day or on the day an account was opened.
+
 ## 0.1.4 (2026-11-25)
 
 - Older BT PDFs are read, and accounts opened after a statement's month are not required
