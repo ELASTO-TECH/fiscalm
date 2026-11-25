@@ -865,17 +865,17 @@ def candidates(L: Ledger, company: str, fit=None) -> Callable[[statements.Tx], s
         tracked = {(p["payee_iban"], Decimal(p["amount"])) for p in L.payments(company=company)}
         own = companies.get(company, L=L).own_ibans
         refs = {ref for r in L.efactura_rows(company=company) if (ref := _reference(r["number"]))}
-        return remembered_advance(L, company), _open_invoices(L, company)[0], tracked, fit.known | refs, own
+        return remembered_advance(L, company), _open_invoices(L, company)[0], tracked, (fit.known, refs), own
 
     def alone(t: statements.Tx) -> set[tuple[str, str]]:
         statements.classify_tx(t)
         if t.category in (statements.TAX, statements.OWNER_ADVANCE) or not L.card_allows(company, t.card_last4):
             return set()
-        advance, invoices, tracked, numbers, own = known()
+        advance, invoices, tracked, (numbers, refs), own = known()
         if advance(t) or t.counterparty_iban in own or (t.counterparty_iban, t.amount) in tracked:
             return set()
         text = re.sub(r"[^A-Z0-9]", "", t.description.upper())  # a whole reference, written with separators too
-        names = _named(numbers, t) | {ref for ref in numbers if not ref.isdigit() and ref in text}
+        names = _named(numbers, t) | {ref for ref in refs if ref in text}  # can only narrow what is offered
         return {
             ("efactura", r["message_id"])
             for r in invoices
