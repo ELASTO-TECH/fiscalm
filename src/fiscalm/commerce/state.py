@@ -121,7 +121,7 @@ def project(L: Ledger, co: str, issued: list[dict]) -> dict:
             action=None,
         )
         for o in orders
-        if o["status"] == "draft" and o["reason"]
+        if o["status"] == "draft" and (o["reason"] or {}).get("code") == commerce.VAT_REVIEW["code"]
     ]
     origins = [dict(id="manual", company=None, label="Manual")]
     origins += [

@@ -247,7 +247,9 @@ def get(L: Ledger, co: str, oid: str) -> dict:
         else ("cancelled" if invoice is None else "draft" if invoice["status"] == "draft" else "issued")
     )
     result["reason"] = json.loads(row["reason"]) if row["reason"] else None
-    if result["reason"] == VAT_REVIEW and status != "draft":  # the review ends when the draft is issued or cancelled
+    if (result["reason"] or {}).get("code") == VAT_REVIEW[
+        "code"
+    ] and status != "draft":  # the review ends when the draft is issued or cancelled
         result["reason"] = None
     result["invoice_summary"] = (
         {"currency": invoice["data"]["currency"], "totals": invoice["data"]["totals"]} if invoice else None
