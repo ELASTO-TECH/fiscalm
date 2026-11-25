@@ -643,6 +643,7 @@ def test_a_debit_without_an_iban_settles_the_one_invoice_of_its_exact_amount(
     "numbers, paid, desc, settled, waits",
     [
         ({"3001": "12345", "3002": "67890"}, [], "Order 9123456", [], True),  # part of a longer code: names nothing
+        ({"3001": "X12345678", "3002": "X87654321"}, [], "POS TID: 1 GAMMA ROM 12345678 valoare", [], True),  # card
         ({"3001": "BILL-12", "3002": "N55555"}, ["3001"], "Plata factura BILL-12", [], False),  # names a paid one
         ({"3001": "INV-2026-0042", "3002": "ALT-2026-0042"}, ["3001"], "Plata factura INV-2026-0042", [], False),
         ({"3001": "INV-2026-0042", "3002": "ALT-2026-0042"}, [], "Plata factura ALT 2026 0042", ["3002"], False),

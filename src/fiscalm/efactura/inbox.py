@@ -846,7 +846,10 @@ def _known_numbers(L: Ledger, company: str, old: list) -> set[str]:
 
 
 # A statement line's own fields: its terminal, merchant, bank reference and card number, never an invoice's number.
-_BANK_FIELDS = re.compile(r"\b(?:TID|MID|RRN|REF)\b\s*:?\s*\S+|\b\d{4,6}[X*]{4,}\d{4}\b", re.IGNORECASE)
+_BANK_FIELDS = re.compile(
+    r"\b(?:TID|MID|RRN|REF)\b\s*:?\s*\S+|\b\d{4,6}[X*]{4,}\d{4}\b|\b\d{8}(?=\s+(?:VALOARE|RRN)\b)",  # BT: card, then value
+    re.IGNORECASE,
+)
 
 
 def _named(known: set[str], t: statements.Tx) -> set[str]:
