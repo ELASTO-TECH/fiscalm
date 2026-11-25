@@ -82,11 +82,49 @@ def test_xlsx_sparse_and_formula():
         table(workbook(header + '<row><c r="A2"><f>1+1</f><v>2</v></c></row>'), "xlsx")
 
 
+def excel_package(*sheets) -> bytes:
+    """A workbook laid out as Excel saves one: every manifest, styles, theme and document properties."""
+    pkg, rel = "http://schemas.openxmlformats.org/package/2006", "http://schemas.openxmlformats.org/officeDocument/2006"
+    ct = "application/vnd.openxmlformats-officedocument"
+    parts = {
+        f"xl/worksheets/sheet{n}.xml": f"<worksheet {NS}><sheetData>{rows}</sheetData></worksheet>"
+        for n, rows in enumerate(sheets, 1)
+    }
+    overrides = "".join(f'<Override PartName="/{p}" ContentType="{ct}.spreadsheetml.worksheet+xml"/>' for p in parts)
+    links = "".join(
+        f'<Relationship Id="rId{n}" Type="{rel}/relationships/worksheet" Target="worksheets/sheet{n}.xml"/>'
+        for n in range(1, len(sheets) + 1)
+    )
+    listed = "".join(f'<sheet name="Foaie{n}" sheetId="{n}" r:id="rId{n}"/>' for n in range(1, len(sheets) + 1))
+    parts |= {
+        "[Content_Types].xml": f'<Types xmlns="{pkg}/content-types"><Default Extension="rels" ContentType="application/'
+        f'vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+        f'<Override PartName="/xl/workbook.xml" ContentType="{ct}.spreadsheetml.sheet.main+xml"/>{overrides}'
+        f'<Override PartName="/xl/styles.xml" ContentType="{ct}.spreadsheetml.styles+xml"/></Types>',
+        "_rels/.rels": f'<Relationships xmlns="{pkg}/relationships"><Relationship Id="rId1" Type="{rel}/relationships/'
+        f'officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="{pkg}/relationships/metadata/'
+        f'core-properties" Target="docProps/core.xml"/></Relationships>',
+        "docProps/core.xml": f'<cp:coreProperties xmlns:cp="{pkg}/metadata/core-properties"/>',
+        "xl/workbook.xml": f'<workbook {NS} xmlns:r="{rel}/relationships"><sheets>{listed}</sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{pkg}/relationships">{links}<Relationship Id="rId99" '
+        f'Type="{rel}/relationships/styles" Target="styles.xml"/></Relationships>',
+        "xl/styles.xml": f"<styleSheet {NS}/>",
+        "xl/theme/theme1.xml": '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>',
+    }
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for name, body in parts.items():
+            z.writestr(name, body)
+    return out.getvalue()
+
+
 def test_xlsx_sheets_with_one_header_read_as_one_table():
     """Monthly workbooks split lines over sheets with one header: one table. Any other sheet (a summary, a title row,
     another layout) refuses: no sheet is left unread."""
     header = ["Ref", "Gross", "Fee"]
     data = workbook(cells(header, ["TEST-1", "100.00", "2.00"]), cells(header, ["TEST-2", "100.00", "2.00"]))
+    excel = excel_package(cells(header, ["TEST-1", "100.00", "2.00"]), cells(header, ["TEST-2", "100.00", "2.00"]))
+    assert table(excel, "xlsx") == table(data, "xlsx")  # a workbook as Excel saves it reads the same
     assert table(data, "xlsx") == [header, ["TEST-1", "100.00", "2.00"], ["TEST-2", "100.00", "2.00"]]
     for other in (["Total", "Lines"], ["REF", "GROSS", "FEE"], ["Gross", "Ref", "Fee"]):
         with pytest.raises(ReportError):
