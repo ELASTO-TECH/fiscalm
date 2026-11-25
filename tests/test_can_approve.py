@@ -205,13 +205,20 @@ def test_only_blocking_invoice_issues_refuse_payment(ledger, home, monkeypatch, 
     assert (refusal.code if refusal else None) == ("invoice_issues" if blocks else None)
 
 
-@pytest.mark.parametrize("due", ["2026-11-20", "2026-13-01"])  # either may carry an unreadable due date
-@pytest.mark.parametrize("note_due", ["2026-11-20", "2026-13-01"])
-def test_a_partly_credited_invoice_pays_its_net_remaining(ledger, home, monkeypatch, due, note_due):
+@pytest.mark.parametrize(
+    ("due", "note_due", "credit"),
+    [
+        ("2026-11-20", "2026-11-20", "50.00"),
+        ("2026-13-01", "2026-13-01", "50.00"),  # either may carry an unreadable due date
+        ("2026-11-20", "2026-11-20", "150.00"),  # more than half: state compares the credit to the gross total
+    ],
+)
+def test_a_partly_credited_invoice_pays_its_net_remaining(ledger, home, monkeypatch, due, note_due, credit):
     _stored(ledger, monkeypatch, **{"3001": ubl(due=due)})
-    _credited(ledger, monkeypatch, "50.00", note_due)
+    _credited(ledger, monkeypatch, credit, note_due)
     assert efactura.payment_refusal(ledger, ledger.efactura("3001")) is None
-    assert efactura.payment_item(ledger, "3001").amount == Decimal("200.00")
+    assert _can_approve(ledger) == (True, True)
+    assert efactura.payment_item(ledger, "3001").amount == Decimal("250.00") - Decimal(credit)
 
 
 def test_a_person_picks_one_of_several_unproved_accounts_and_fiscalm_remembers_it_once_paid(ledger, home, monkeypatch):

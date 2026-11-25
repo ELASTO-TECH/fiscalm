@@ -1428,7 +1428,8 @@ def check_payment(
         raise ApproveError("not_open", f"not an open, parsed invoice (status {r['status']})")
     if r["doc_type"] != "invoice" or r["currency"] != "RON":
         raise ApproveError("not_ron", "only RON invoices can go into the payment file")
-    if facts.credit(r) >= Decimal(r["total"]):  # a linked credit note (credit_links) leaves its net remaining to pay
+    gross = Decimal(dict(r).get("gross_total", r["total"]))  # a state row (net_invoices) carries the net in total
+    if facts.credit(r) >= gross:  # a linked credit note (credit_links) leaves its net remaining to pay
         raise ApproveError("credited", "invoice is fully credited; nothing remains to pay")
     status = facts.inactive(r)
     if status:
@@ -1546,6 +1547,10 @@ def approve(L: Ledger, message_id: str, *, origin: str, unfiled: bool = False, a
     so a pick made before proof narrowed the choice is refused, never paid in place of the proved one."""
     if account is not None and (row := L.efactura(message_id)) and account not in payee_choices(row, PaymentFacts(L)):
         raise ApproveError("several_ibans", "the picked account is no longer one of those offered; check again")
+    if origin == "auto" and (row := L.efactura(message_id)) and PaymentFacts(L).credit(row):
+        # Only a person pays a partly credited invoice: a debit made before the credit (gross or net) may already
+        # cover it, and the matchers leave such an invoice open.
+        raise ApproveError("credited", "a credited invoice waits for a person to add it to a payment file")
     item = payment_item(L, message_id, unfiled=unfiled, account=account)
     row = L.efactura(message_id)
     if unfiled and row["status"] == "linked" and row["item_id"] == item.item_id:

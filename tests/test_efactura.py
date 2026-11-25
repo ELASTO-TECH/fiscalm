@@ -5,6 +5,7 @@ import json
 import sys
 import threading
 import zipfile
+from contextlib import closing
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -1532,8 +1533,12 @@ def test_a_partly_credited_invoice_is_downloaded_for_its_net_and_a_credit_since_
     (home / "state" / "LIVE").touch()
     _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
     stale = efactura.payment_item(ledger, "3001")  # read before a second credit note arrives
-    _stored(ledger, monkeypatch, **{"3003": _credit_note("COR 3", "-20.00")})
+    with closing(Ledger(ledger.path)) as other:  # another connection commits it before this one writes
+        _stored(other, monkeypatch, **{"3003": _credit_note("COR 3", "-20.00")})
     assert ledger.queue_efactura(stale, "3001", "person") is None and ledger.efactura("3001")["status"] == "open"
+    assert not ledger.db.execute("SELECT 1 FROM payments").fetchone()
+    with pytest.raises(efactura.ApproveError, match="credited"):  # only a person pays a credited invoice
+        efactura.approve(ledger, "3001", origin="auto")
     ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
     item = ledger.efactura("3001")["item_id"]
     assert ledger.payment(item)["amount"] == "180.00"
@@ -1542,6 +1547,19 @@ def test_a_partly_credited_invoice_is_downloaded_for_its_net_and_a_credit_since_
         ledger.payment(item)["status"] == "exported"
         and b"180.00" in pay.named_path(ledger.payment_file(ident)).read_bytes()
     )
+
+
+def test_a_net_payment_whose_credit_no_longer_links_is_withdrawn_before_download(ledger, home, monkeypatch):
+    (home / "state" / "LIVE").touch()
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    item = ledger.efactura("3001")["item_id"]
+    _stored(ledger, monkeypatch, **{"3003": ubl(number="TEST 1", issue="2026-10-19")})  # the credit fits two now
+    assert efactura.credited(ledger, "NORD") == {}
+    with pytest.raises(PaymentFileError):
+        pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
+    assert ledger.payment(item)["status"] == "pending"  # nothing exported: the 200.00 never reaches a bank file
+    assert not pay.named_path(ledger.payment_file(ident)).exists()
 
 
 @pytest.mark.parametrize("exported", [False, True])
