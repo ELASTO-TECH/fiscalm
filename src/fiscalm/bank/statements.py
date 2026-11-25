@@ -68,12 +68,20 @@ def month_from_filename(name: str) -> str | None:
     return f"{m.group(2)}-{MONTHS_EN[m.group(1)]:02d}"
 
 
+def is_bt_statement(text: str) -> bool:
+    """The text of a BT account statement: BT's name and an `EXTRAS CONT` header, as every BT statement prints."""
+    return "BANCA TRANSILVANIA" in text.upper() and re.search(r"EXTRAS\s+CONT", text) is not None
+
+
 def open_encrypted(path: Path, password_lookup=secrets.bt_statement_password, only: str | None = None):
     """Try each company's Keychain password. Returns (company_key, pikepdf.Pdf) or raises.
 
     A statement that opens with neither password (e.g. the user's personal PFA
-    statement) is not ours.
+    statement) is not ours. A PDF without a password belongs to the one company with a BT account whose CUI its
+    header names; no password is read for it.
     """
+    if _plain(path):
+        return _open_plain(Path(path), only)
     unavailable = []
     for key, company in companies.all().items():
         if only is not None and key != only:  # the statement was uploaded for this company: no other is tried
@@ -97,6 +105,32 @@ def open_encrypted(path: Path, password_lookup=secrets.bt_statement_password, on
         # Can't tell "not ours" from "Keychain locked/inaccessible": never conclude not-ours.
         raise SecretsUnavailable(f"{Path(path).name}: " + "; ".join(unavailable))
     raise StatementError(f"{Path(path).name}: no company password opens it (not a statement of a configured company)")
+
+
+def _plain(path: Path) -> bool:
+    """A PDF that opens without a password (a damaged or missing one is neither: the password loop refuses it)."""
+    try:
+        pikepdf.open(path).close()
+    except (pikepdf.PasswordError, pikepdf.PdfError, OSError, ValueError):
+        return False
+    return True
+
+
+def _open_plain(path: Path, only: str | None):
+    try:
+        text = pdf_text(path)
+    except RuntimeError:
+        raise StatementError(f"{path.name}: cannot read the PDF") from None
+    named = [
+        key
+        for key, company in companies.all().items()
+        if (only is None or key == only)
+        and any(a.bank == "bt" for a in company.accounts)
+        and names_cui(text, company.cui)
+    ]
+    if len(named) != 1:
+        raise StatementError(f"{path.name}: its header names no single configured company with a BT account")
+    return named[0], pikepdf.open(path)
 
 
 def encrypted(path: Path) -> bool:

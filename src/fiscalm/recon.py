@@ -26,7 +26,7 @@ from fiscalm.bank.intake import (
 from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import Ledger, finance_home
 from fiscalm.payments.orders import parse_payment_pdf
-from fiscalm.pdftext import sha256
+from fiscalm.pdftext import pdf_text, sha256
 
 MATCH_DAYS = 12
 
@@ -59,7 +59,7 @@ def ingest_file(
         }
     try:
         with path.open("rb") as stream:
-            prefix = stream.read(4096).lstrip(b"\xef\xbb\xbf \t\r\n")
+            raw = stream.read(4096)
     except OSError:
         return {
             "file": str(path),
@@ -69,6 +69,8 @@ def ingest_file(
     if allowed_companies is not None:
         return ingest_op(ledger, path, allowed_companies)
     from fiscalm.bank.mt940 import looks_like
+
+    prefix = raw.lstrip(b"\xef\xbb\xbf \t\r\n")
 
     if prefix.startswith(b"<") or path.suffix.lower() == ".xml" or looks_like(prefix):
         if not operator:
@@ -81,9 +83,16 @@ def ingest_file(
             return {"file": str(path), "status": "error", "errors": [str(exc)]}
         except statements.StatementError as exc:
             return {"file": str(path), "status": "refused", "errors": [str(exc)]}
+    if not raw.startswith(b"%PDF-"):
+        csv = path.suffix.lower() == ".csv"
+        return {"file": str(path), "status": "refused", "errors": [_NOT_ACCOUNT_CSV if csv else _UNSUPPORTED]}
     if _bt_pdf(path):
         return ingest_statement(ledger, path, home, password_lookup)
     return ingest_op(ledger, path)
+
+
+_NOT_ACCOUNT_CSV = "A CSV statement names no account: upload it on its account in the app"
+_UNSUPPORTED = "Unsupported file: use a BT PDF, CAMT.053 XML, MT940 or a payment order PDF"
 
 
 def ingest_files(ledger: Ledger, paths: list[Path], home: Path | None = None, password_lookup=None) -> list[dict]:
@@ -96,15 +105,30 @@ def ingest_files(ledger: Ledger, paths: list[Path], home: Path | None = None, pa
 
 
 def _bt_pdf(path: Path) -> bool:
-    """A BT statement: its monthly "allmerge" PDF, or any PDF that needs a password (older per-account or daily ones)."""
+    """A BT statement: its monthly "allmerge" PDF, any PDF that needs a password (older per-account or daily ones), or
+    a plain PDF whose text is a BT account statement, whatever its name (downloaded from BT24 or a shared folder)."""
     if path.is_symlink() or not path.is_file():
         return False
-    return bool(re.search(r"allmerge.*\.pdf$", path.name, re.I)) or statements.encrypted(path)
+    try:
+        with path.open("rb") as stream:
+            if stream.read(5) != b"%PDF-":
+                return False
+    except OSError:  # ingest_file reports it
+        return False
+    if re.search(r"allmerge.*\.pdf$", path.name, re.I) or statements.encrypted(path):
+        return True
+    try:
+        return statements.is_bt_statement(pdf_text(path))
+    except RuntimeError:  # unreadable: the payment order reader refuses it on its own
+        return False
 
 
 def ingest_op(ledger: Ledger, path: Path, allowed_companies: list[str] | None = None) -> dict:
     """A mailed OP may name only a firm configured for its sender, before any ledger write."""
-    res = parse_payment_pdf(path)
+    try:
+        res = parse_payment_pdf(path)
+    except RuntimeError:  # a damaged or oversized PDF: this file is refused, the others of the call still run
+        return {"file": str(path), "status": "refused", "errors": ["Cannot read the PDF; check the file"]}
     if not res.ok:
         return {"file": str(path), "status": "refused", "errors": res.errors}
     item = res.item
