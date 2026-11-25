@@ -1504,7 +1504,10 @@ def current_refusal(L: Ledger, row, facts: PaymentFacts | None = None) -> str:
 def approve(L: Ledger, message_id: str, *, origin: str, unfiled: bool = False, account: str | None = None) -> dict:
     """Put the invoice in the payment file. `origin`: 'person' when someone picked it (they know whether they already
     paid it), 'auto' for the autopay rule (its payment waits for last month's statement, payments.engine). `account`:
-    the IBAN a person picked when the invoice lists several (payee_iban)."""
+    the IBAN a person picked when the invoice lists several: it must be one of the accounts offered now (payee_choices),
+    so a pick made before proof narrowed the choice is refused, never paid in place of the proved one."""
+    if account is not None and (row := L.efactura(message_id)) and account not in payee_choices(row, PaymentFacts(L)):
+        raise ApproveError("several_ibans", "the picked account is no longer one of those offered; check again")
     item = payment_item(L, message_id, unfiled=unfiled, account=account)
     row = L.efactura(message_id)
     if unfiled and row["status"] == "linked" and row["item_id"] == item.item_id:

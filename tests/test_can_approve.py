@@ -229,9 +229,13 @@ def test_a_person_picks_one_of_several_unproved_accounts_and_fiscalm_remembers_i
     item = ledger.efactura("3001")["item_id"]
     assert ledger.payment(item)["payee_iban"] == SUPPLIER_IBAN
     assert efactura.payment_refusal(ledger, ledger.efactura("3002")).code == "several_ibans"
+    _stored(ledger, monkeypatch, **{"3003": ubl(number="X3", total="320.00")})  # picked before proof arrives
+    _set(ledger, "ibans=?,supplier_iban=?", json.dumps([OTHER_IBAN, SUPPLIER_IBAN]), OTHER_IBAN, mid="3003")
     debit = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN, desc="plata factura RMBU")
     assert recon.auto_mark_paid(ledger, _debit_st(debit)) == [item]  # the bank statement proves the picked account
     assert efactura.payment_item(ledger, "3002").payee_iban == SUPPLIER_IBAN
+    stale = {"name": "Stale", "invoice_ids": ["3003"], "accounts": {"3003": 0}}  # the other account, no longer offered
+    assert actions.act("payment_file_create", "NORD", stale)["ok"] is False
 
 
 def test_the_picker_never_offers_an_own_account_and_tells_alike_endings_apart(ledger, home, monkeypatch):
