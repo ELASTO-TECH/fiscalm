@@ -92,6 +92,7 @@ def schemas() -> dict:
         "paid_method": {"enum": ["bank", "card", "cash", "own", "other", None]},
         "total": MONEY,
         "credits": array(obj({"id": STRING, "number": STRING, "amount": MONEY, "date": NULL_STRING})),
+        "credit_question": array(obj({"id": STRING, "number": STRING, "amount": MONEY, "date": NULL_STRING})),
         "credit_note": BOOL,
         "covered": MONEY,
         "left": MONEY,
@@ -776,6 +777,9 @@ def schemas() -> dict:
             "paid_detail": "card: the card's last four digits; own: who paid; other: the person's note; else null.",
             "covered": "Amount covered by explicit transaction links.",
             "credits": "Unambiguously linked received credit notes, scoped to this company, supplier and currency.",
+            "credit_question": "For a credit note naming no invoice: the invoices it could cancel (same supplier and "
+            "currency, exact opposite total, issued up to 14 days before), when several fit or SPV order or an archived invoice "
+            "leaves one in doubt. None is cancelled until credit-pick.",
             "credit_note": "An unmatched received credit note; never payable.",
             "left": "Remaining payable amount after credit notes and explicit links; zero when closed.",
         },

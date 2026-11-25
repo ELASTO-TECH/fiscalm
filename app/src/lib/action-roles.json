@@ -52,6 +52,7 @@
   "issued-mark": "member",
   "issued-unmark": "member",
   "resolve-debit": "member",
+  "credit-pick": "member",
   "card-owner": "member",
   "tx-link": "member",
   "tx-await": "member",

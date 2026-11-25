@@ -3,6 +3,7 @@
 import io
 import json
 import sys
+import threading
 import zipfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -15,9 +16,9 @@ from payment_cases import download_batch
 from synthetic_world import ubl_lines, ubl_totals
 
 from fiscalm import companies, invoice_lines, recon
-from fiscalm.api import lists, state as api
+from fiscalm.api import lists, state as api, tasks
 from fiscalm.bank import statements
-from fiscalm.efactura import client as anaf, inbox as efactura
+from fiscalm.efactura import client as anaf, credits, inbox as efactura
 from fiscalm.ledger import Ledger
 from fiscalm.payments import engine as pay
 from fiscalm.payments.orders import PaymentFileError
@@ -195,7 +196,7 @@ def test_sync_stores_raw_zip_and_dedupes_on_message_id(ledger, home, sec, monkey
     downloads = []
     blobs = {
         "3001": anaf_zip(ubl()),
-        "3002": anaf_zip(ubl(root="CreditNote", number="CN 1")),
+        "3002": anaf_zip(ubl(root="CreditNote", number="CN 1", total="50.00")),
         "3003": anaf_zip(ubl()),
         "3004": b"PK\x03\x04garbage",
     }
@@ -541,8 +542,6 @@ def test_one_debit_settles_one_thing_even_when_the_key_is_reused(ledger, home, s
     assert not ledger.mark_efactura_paid("3001", "statement z", "k3")  # already paid: k3 stays free
     assert "k3" not in ledger.used_txs() and ledger.mark_efactura_paid("3002", "statement z", "k3")
     # two callers with their own connection, both sure the key is still free
-    import threading
-
     _stored(ledger, monkeypatch, **{"3004": ubl(number="RMBU 2222605"), "3005": ubl(number="RMBU 2222606")})
     gate, won = threading.Barrier(2), []
 
@@ -1558,16 +1557,140 @@ def test_credit_withdraws_unimported_payment_and_never_exports_original_amount(
         assert efactura.unpaid(ledger, "NORD")[0]["total"] == "200.00"
 
 
-def test_received_credit_with_multiple_original_references_refuses_grouping(ledger, monkeypatch):
+@pytest.mark.parametrize(
+    "refs",
+    [
+        [b"<cbc:ID>TEST 1</cbc:ID>", b"<cbc:ID>TEST 2</cbc:ID>"],  # several invoices
+        [b"<cbc:IssueDate>2026-10-19</cbc:IssueDate>"],  # a reference that identifies none
+    ],
+)
+def test_received_credit_with_a_reference_naming_no_single_invoice_links_none(ledger, monkeypatch, refs):
     refs = b"".join(
-        b"<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>"
-        + number
-        + b"</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference>"
-        for number in (b"TEST 1", b"TEST 2")
+        b"<cac:BillingReference><cac:InvoiceDocumentReference>"
+        + r
+        + b"</cac:InvoiceDocumentReference></cac:BillingReference>"
+        for r in refs
     )
-    credit = ubl(root="CreditNote", number="COR 2", total="50.00").replace(b"</CreditNote>", refs + b"</CreditNote>")
-    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": credit})
+    credit = ubl(root="CreditNote", number="COR 2", total="250.00").replace(b"</CreditNote>", refs + b"</CreditNote>")
+    blobs = {"3001": anaf_zip(ubl(number="TEST 1")), "3002": anaf_zip(credit)}
+    _fake_anaf(monkeypatch, {NORD_CUI: [msg("3001", "202610201200"), msg("3002", "202610231200")]}, blobs)
+    efactura.sync(ledger)
+    assert efactura.credited(ledger, "NORD") == {}  # never read as a note naming none, though the exact total fits
+    assert not credits.credit_questions(ledger, "NORD")
+
+
+def _unreferenced(ledger, monkeypatch, *docs):
+    """Synced in one pass: (id, number, total, issue day, ANAF listing time) per document, none naming an invoice."""
+    blobs = {d[0]: anaf_zip(ubl(number=d[1], total=d[2], issue=d[3], buyer=(d[5:] or [NORD_CUI])[0])) for d in docs}
+    _fake_anaf(monkeypatch, {NORD_CUI: [msg(d[0], d[4]) for d in docs]}, blobs)
+    efactura.sync(ledger)
+    return {r["id"]: r for r in api.state(ledger, "NORD")["invoices"]}
+
+
+@pytest.mark.parametrize(
+    "docs,cancelled,asked",
+    [
+        ([("2026-10-20", "1000.00")], {"3001"}, []),
+        ([("2026-10-20", "1000.00"), ("2026-10-21", "999.00")], {"3001"}, []),
+        ([("2026-10-08", "1000.00")], set(), []),  # 15 days before the note: too old to read as its storno
+        ([("2026-10-20", "1000.00", "202610240900")], set(), []),  # reached SPV after the note
+        ([("2026-10-20", "1000.00", "20261020")], set(), ["3001"]),  # imported: no SPV order proves it came first
+        ([("2026-10-20", "1000.00", "202613409999")], set(), ["3001"]),  # not a time
+        ([("2026-10-20", "1000.00", "202610231200")], set(), ["3001"]),  # the note's minute: either came first
+        ([("2026-10-19", "1000.00"), ("2026-10-20", "1000.00")], set(), ["3002"]),  # 3001 is archived (history)
+        ([("2026-10-20", "1000.00"), ("2026-10-21", "1000.00", "202610221200", "22222222")], set(), ["3001", "3002"]),
+    ],
+)
+def test_unreferenced_credit_cancels_its_only_fitting_invoice(ledger, home, monkeypatch, docs, cancelled, asked):
+    ledger.set_meta("history_start:NORD", "2026-10-20")
+    invoices = [
+        (f"300{n}", f"SUP 000{n}", d[1], d[0], d[2] if len(d) > 2 else "202610221200", *d[3:])
+        for n, d in enumerate(docs, 1)
+    ]  # a buyer CUI that is not ours blocks paying it, yet it stays a plausible original
+    rows = _unreferenced(ledger, monkeypatch, *invoices, ("3009", "SUP 0009", "-1000.00", "2026-10-23", "202610231200"))
+    assert {k for k, r in rows.items() if r["credits"]} == cancelled
+    assert {r["message_id"] for r in efactura.unpaid(ledger, "NORD")} == set(rows) - {"3009"} - cancelled
+    assert [c["id"] for c in rows.get("3009", {"credit_question": []})["credit_question"]] == asked  # linked: hidden
+
+
+def test_unreferenced_credits_in_a_row_each_cancel_the_invoice_before_them(ledger, home, monkeypatch):
+    """Invoice, storno, corrected invoice, twice over: each note takes the invoice already in SPV that no earlier took."""
+    rows = _unreferenced(
+        ledger,
+        monkeypatch,
+        ("3001", "SUP 0001", "1000.00", "2026-10-20", "202610201000"),
+        ("3002", "SUP 0002", "-1000.00", "2026-10-21", "202610210900"),
+        ("3003", "SUP 0003", "1000.00", "2026-10-21", "202610211000"),
+        ("3004", "SUP 0004", "-1000.00", "2026-10-22", "202610220900"),
+        ("3005", "SUP 0005", "1000.00", "2026-10-22", "202610221000"),
+    )
+    assert {k: [c["id"] for c in r["credits"]] for k, r in rows.items() if r["credits"]} == {
+        "3001": ["3002"],
+        "3003": ["3004"],
+    }
+    assert [r["message_id"] for r in efactura.unpaid(ledger, "NORD")] == ["3005"]
+
+
+@pytest.mark.parametrize("answer", ["3001", "-"])
+def test_unreferenced_credit_fitting_several_waits_for_a_person(ledger, home, monkeypatch, answer):
+    docs = [("3001", "SUP 0001", "1000.00", "2026-10-20", "202610231200")]
+    docs += [("3002", "SUP 0003", "1000.00", "2026-10-21", "202610231200")]
+    rows = _unreferenced(ledger, monkeypatch, *docs, ("3009", "SUP 0002", "-1000.00", "2026-10-23", "202610231200"))
+    assert [c["id"] for c in rows["3009"]["credit_question"]] == ["3001", "3002"]
     assert efactura.credited(ledger, "NORD") == {}
+    keys = [key for key, *_ in tasks.references(api.state(ledger, "NORD"))]
+    assert keys.count("NORDcq3009") == 1
+    assert not credits.pick(ledger, "NORD", "3009", "3005")  # not one of its candidates
+    assert credits.pick(ledger, "NORD", "3009", answer)
+    assert not credits.pick(ledger, "NORD", "3009", "3002")  # the first answer stands
+    assert efactura.credited(ledger, "NORD") == ({"3001": Decimal("1000.00")} if answer == "3001" else {})
+    assert "NORDcq3009" not in [key for key, *_ in tasks.references(api.state(ledger, "NORD"))]
+
+
+def test_a_picked_invoice_taken_since_leaves_the_note_unapplied(ledger, home, monkeypatch):
+    docs = [("3001", "SUP 0001", "1000.00", "2026-10-20", "202610231200")]
+    docs += [("3002", "SUP 0003", "1000.00", "2026-10-21", "202610231200")]
+    _unreferenced(ledger, monkeypatch, *docs, ("3009", "SUP 0002", "-1000.00", "2026-10-23", "202610231200"))
+    assert credits.pick(ledger, "NORD", "3009", "3001")
+    named = ubl(number="COR 7", total="-100.00", issue="2026-10-24").replace(
+        b"</Invoice>", b"<cbc:Note>Storno factura seria SUP nr. 0001 din data 20/10/2026</cbc:Note></Invoice>"
+    )
+    _stored(ledger, monkeypatch, **{"3010": named})  # 3001 now has a credit naming it: the pick no longer applies
+    assert efactura.credited(ledger, "NORD") == {"3001": Decimal("100.00")}
+    assert not credits.credit_questions(ledger, "NORD")  # answered: never asked again, never moved to 3002
+
+
+def test_two_answers_at_once_cannot_take_one_invoice(ledger, home, monkeypatch):
+    docs = [("3001", "SUP 0001", "1000.00", "2026-10-20", "202610231200")]
+    docs += [("3002", "SUP 0003", "1000.00", "2026-10-21", "202610231200")]
+    docs += [("3008", "SUP 0008", "-1000.00", "2026-10-23", "202610231200")]
+    _unreferenced(ledger, monkeypatch, *docs, ("3009", "SUP 0009", "-1000.00", "2026-10-23", "202610231200"))
+    assert set(credits.credit_questions(ledger, "NORD")) == {"3008", "3009"}
+    gate, won = threading.Barrier(2), []
+
+    def answer(note):
+        L = Ledger()
+        gate.wait()
+        won.append(credits.pick(L, "NORD", note, "3001"))
+        L.close()
+
+    threads = [threading.Thread(target=answer, args=(n,)) for n in ("3008", "3009")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(won) == [False, True]
+    assert efactura.credited(ledger, "NORD") == {"3001": Decimal("1000.00")}
+    assert [[r["message_id"] for r in fits] for fits in credits.credit_questions(ledger, "NORD").values()] == [["3002"]]
+
+
+def test_a_credit_on_an_invoice_in_the_payment_file_keeps_its_payment_pending(ledger, home, monkeypatch):
+    (home / "state" / "LIVE").touch()
+    _unreferenced(ledger, monkeypatch, ("3001", "SUP 0001", "1000.00", "2026-10-20", "202610201200"))
+    item = efactura.approve(ledger, "3001", origin="person")["item_id"]
+    s = _unreferenced(ledger, monkeypatch, ("3009", "SUP 0009", "-1000.00", "2026-10-23", "202610231200"))
+    assert (s["3001"]["status"], ledger.payment(item)["status"]) == ("linked", "pending")
+    assert "NORDcredit3001" in [key for key, *_ in tasks.references(api.state(ledger, "NORD"))]
 
 
 @pytest.mark.parametrize("proved", [False, True])

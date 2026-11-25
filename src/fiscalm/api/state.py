@@ -431,7 +431,7 @@ def _invoices(
         }
     proofs = L.paid_proofs(co)
     have = covered(L, co, "efactura")
-    credits = received_credits.credit_links(L, co)
+    credits, questions = received_credits.links(L, co)
     grouped = {c["message_id"] for group in credits.values() for c in group}
     out = []
     for r in L.efactura_rows(company=co):
@@ -449,8 +449,9 @@ def _invoices(
         )
         if status == "credit" or net == 0 and corrections and status in ("open", "marked"):
             status = "skipped"
-        if status == "linked" and r["message_id"] not in unpaid:  # its payment-file row is settled: paid, or dropped
-            p = payments.get(r["item_id"]) if r["item_id"] else None
+        p = payments.get(r["item_id"]) if r["item_id"] else None
+        # Its payment-file row is settled: paid, or dropped. A credit taking it out of `unpaid` settles no payment.
+        if status == "linked" and r["message_id"] not in unpaid and not (p and p["status"] in ("pending", "exported")):
             status, r["paid_at"] = (
                 ("skipped" if p and p["status"] == "skipped" else "paid"),
                 p["paid_at"] if p else None,
@@ -479,6 +480,10 @@ def _invoices(
                         "date": c["issue_date"],
                     }
                     for c in corrections
+                ],
+                "credit_question": [
+                    {"id": c["message_id"], "number": c["number"], "amount": money(c["total"]), "date": c["issue_date"]}
+                    for c in questions.get(r["message_id"], [])
                 ],
                 "credit_note": r["doc_type"] == "credit_note",
                 "status": status,

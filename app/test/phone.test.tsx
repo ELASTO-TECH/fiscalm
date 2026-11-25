@@ -281,4 +281,21 @@ describe("sections", () => {
     expect(api.posts()[0].body).toEqual({ co: "STUDIO9", tx: a.tx, target: "204" });
   });
 
+  it("a credit note naming no invoice asks which of the supplier's invoices it cancels", async () => {
+    const s = fixture("NORD"), [a, b] = s.invoices.filter((r) => !r.credit_note);
+    const question = [a, b].map((r) => ({ id: r.id, number: r.number, amount: r.total, date: r.issue_date }));
+    s.invoices = [...s.invoices, { ...a, id: "123", number: "TT-13", supplier: "Tipografia Test SRL", total: "-480.00",
+      status: "skipped", credit_note: true, credits: [], credit_question: question }];
+    at("?co=NORD&tab=sarcini");
+    const api = server({ state: () => json(s), onPost: () => json({ ok: true, message: "", state: s }) });
+    render(<App />);
+    const card = (await screen.findByText("Tipografia Test SRL: ce factură anulează stornarea?")).closest(".task") as HTMLElement;
+    expect(within(card).getByRole("button", { name: "Niciuna" })).toBeTruthy();
+    await userEvent.click(within(card).getByRole("button", { name: new RegExp(`^Factura ${b.number}, din `) }));
+    await answer();
+    await waitFor(() => expect(api.posts()).toHaveLength(1));
+    expect(api.posts()[0].url).toMatch(/api\/credit-pick$/);
+    expect(api.posts()[0].body).toEqual({ co: "NORD", id: "123", target: b.id });
+  });
+
 });

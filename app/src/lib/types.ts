@@ -60,6 +60,8 @@ export type CollectedMethod = Exclude<PaidMethod, "own">;
 
 export type Invoice = {
   credits?: { id: string; number: string; amount: string }[];
+  /** A credit note naming no invoice: the invoices it could cancel; the person picks one or none (credit-pick). */
+  credit_question?: { id: string; number: string; amount: string; date: string | null }[];
   credit_note?: boolean;
   id: string;
   company: Co;

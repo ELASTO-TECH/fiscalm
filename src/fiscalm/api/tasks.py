@@ -52,6 +52,10 @@ def _invoice_references(s: dict) -> Iterator[tuple[str, bool, dict]]:
             yield co + "late" + r["id"], True, {"invoices": [r]}
     for r in s["ambiguous"]:
         yield co + "amb" + r["tx"], False, {"ambiguous": [r | {"candidate_count": len(r["candidates"])}]}
+    for r in s["invoices"]:
+        if r.get("credit_question"):  # a credit note naming no invoice fits several: a person says which it cancels
+            fits = [invoices[c["id"]] for c in r["credit_question"] if c["id"] in invoices]
+            yield co + "cq" + r["id"], False, {"invoices": [r, *fits]}
     for r in credit_holds(s):
         yield co + "credit" + r["id"], True, {"invoices": [r]}
     for r in s["refused"]:

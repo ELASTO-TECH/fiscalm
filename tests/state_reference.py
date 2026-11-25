@@ -60,6 +60,7 @@ def state__invoices(
                 "currency": r["currency"] or "RON",
                 "total": money(r["total"]),
                 "credits": [],
+                "credit_question": [],
                 "credit_note": False,
                 "status": status,
                 "payment_state": ps,

@@ -52,6 +52,7 @@
   "issued-mark": "local",
   "issued-unmark": "local",
   "resolve-debit": "local",
+  "credit-pick": "local",
   "card-owner": "local",
   "tx-link": "local",
   "tx-await": "local",

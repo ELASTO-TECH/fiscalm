@@ -6,7 +6,7 @@ import { useCallback, useState, type ReactElement, type ReactNode } from "react"
 import { FIXTURES, actionRole, getCandidates, packFile, post } from "@/lib/api";
 import { cap, curOf, daysTo, dm, dmt, lei, luna, lunaName, nOf, weekday } from "@/lib/format";
 import { FirmStatementUpload } from "./Accounts";
-import { coName, isAll, parts, type Ambiguous, type PartnerTask, type PaymentFile, type ReminderTask, type Report, type State, type TaskEntry, type View } from "@/lib/types";
+import { coName, isAll, parts, type Ambiguous, type Invoice, type PartnerTask, type PaymentFile, type ReminderTask, type Report, type State, type TaskEntry, type View } from "@/lib/types";
 import { Company, useApp, useCan, useCompany } from "./context";
 import { anafExpiringSoon, findIssued, openInvoices, refusalReason, REPORT_LABEL } from "./derive";
 import { ANAF_PORTAL } from "./AnafConnect";
@@ -115,6 +115,22 @@ function ReminderText({ t }: { t: ReminderTask }) {
   </details>;
 }
 
+/** A credit note that names no invoice and fits several of the supplier's: the person says which one it cancels, or none
+ * (credit-pick); until then every one of them stays to pay. */
+function creditQuestionCard(s: State, r: Invoice, own: string | undefined): ReactElement {
+  const amount = `${lei(r.total.replace("-", ""))} ${curOf(r.currency)}`;
+  return <Task co={own} key={`${s.co}cq${r.id}`} icon="warning-circle" title={`${r.supplier}: ce factură anulează stornarea?`}
+    body={`Factura de stornare ${r.number}, de ${amount}, nu spune ce factură anulează. Până alegi, nu anulează niciuna.`}>
+    <div className="grid w-full gap-2">
+      {r.credit_question?.map((c) => <Act key={c.id} action="credit-pick" body={{ id: r.id, target: c.id }} cls="btn g"
+        label={`Factura ${c.number}, din ${dm(c.date, s.today)}`}
+        confirm={{ text: `Factura ${c.number} nu se mai plătește?`, yes: "Stornează factura" }} />)}
+      <Act action="credit-pick" body={{ id: r.id, target: "-" }} cls="btn g" label="Niciuna"
+        confirm={{ text: "Stornarea nu anulează niciuna dintre aceste facturi?", yes: "Niciuna" }} />
+    </div>
+  </Task>;
+}
+
 function reminderCard(s: State, t: ReminderTask, own: string | undefined): ReactElement {
   const r = findIssued(s, t.id)?.[0];
   return <Task co={own} key={`${s.co}rem${t.id}`} icon="envelope-simple"
@@ -196,6 +212,7 @@ export function taskCards(s: State, { tag = false }: TaskOpts = {}): Card[] {
       </Task>,
     );
   }
+  for (const r of s.invoices.filter((r) => r.credit_question?.length)) add(creditQuestionCard(s, r, own));
   for (const r of s.invoices.filter((r) => r.credits?.length && r.status === "linked" && r.payment_state !== "imported")) {
     add(<Task co={own} key={`${co}credit${r.id}`} icon="warning-circle" title="Plată în fișier, cu factură de stornare" late
       body="Verifică plata în bancă. Fișierul nu se mai descarcă până lămurești situația.">

@@ -34,7 +34,7 @@ from xml.etree import ElementTree as ET
 from fiscalm import ai, audit, companies, history_invoices, integrations
 from fiscalm.bank import catalogue as banks, statements
 from fiscalm.efactura import client as anaf, partners as partner_anaf
-from fiscalm.efactura.credits import blocking_issues, credited, net_invoices
+from fiscalm.efactura.credits import UNCLEAR_REFERENCE, blocking_issues, credited, net_invoices
 from fiscalm.identity import partner_id, tax_token
 from fiscalm.ledger import BON_PAID, MAIL_PROVED, USER_MARKED, Ledger, covered, finance_home, now, unlinked, user_note
 from fiscalm.mail import imap as imapread
@@ -258,8 +258,10 @@ def parse_ubl(data: bytes) -> Invoice:
     references = root.findall("cac:BillingReference/cac:InvoiceDocumentReference/cbc:ID", NS)
     reference = (references[0].text or "").strip() if len(references) == 1 else ""
     reference_day = t("cac:BillingReference/cac:InvoiceDocumentReference/cbc:IssueDate")
-    if not references:
+    if not root.findall("cac:BillingReference", NS):
         reference, reference_day = storno_reference(t("cbc:Note"))
+    elif not reference:  # several invoices, or none identified: it links to none, and never reads as naming none
+        reference_day = UNCLEAR_REFERENCE
     return Invoice(
         doc_type=kind,
         number=t("cbc:ID"),

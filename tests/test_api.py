@@ -96,6 +96,7 @@ INVOICE = {
     "paid_method",
     "paid_detail",
     "credits",
+    "credit_question",
     "credit_note",
     "id",
     "company",

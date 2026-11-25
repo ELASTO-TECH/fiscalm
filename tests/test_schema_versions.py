@@ -799,3 +799,21 @@ def test_reading_off_and_no_ai_become_a_stopped_integration(tmp_path, monkeypatc
             ("mail-aaaaaaaa", 0, {"firm_scope": "all"}),
             ("mail-bbbbbbbb", 1, {"firm_scope": "all"}),
         ]
+
+
+def test_credit_notes_stored_without_a_reference_are_read_again_on_upgrade(tmp_path, monkeypatch):
+    """Several references were stored as none: the next sync reads every such note again (fill_credit_references)."""
+    path = tmp_path / "previous.db"
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.credit_references_reread))
+        Ledger(path).close()
+    with sqlite3.connect(path) as db:
+        for mid, status, ref in (("none", "credit", ""), ("named", "credit", "SUP 1"), ("invoice", "open", "")):
+            db.execute(
+                "INSERT INTO efactura(message_id,company,raw_path,status,billing_ref,created_at) "
+                "VALUES(?,'EXAMPLE','synthetic',?,?,'2026-10-31')",
+                (mid, status, ref),
+            )
+    with closing(Ledger(path)) as ledger:
+        refs = dict(ledger.db.execute("SELECT message_id, billing_ref FROM efactura"))
+        assert refs == {"none": None, "named": "SUP 1", "invoice": ""}

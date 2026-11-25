@@ -616,6 +616,12 @@ def drop_receipt_items(db: sqlite3.Connection) -> None:
     db.execute("DROP TABLE receipt_items")
 
 
+def credit_references_reread(db: sqlite3.Connection) -> None:
+    # A received credit note with several references was stored without one, like a note that names no invoice.
+    # The next e-Factura sync reads both again from their archives (efactura.fill_credit_references).
+    db.execute("UPDATE efactura SET billing_ref=NULL,billing_date='' WHERE status='credit' AND billing_ref=''")
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     baseline,
     transaction_links,
@@ -658,6 +664,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     app_statements_imported,
     account_opened,
     drop_receipt_items,
+    credit_references_reread,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 
