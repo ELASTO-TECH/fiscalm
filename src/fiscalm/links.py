@@ -545,8 +545,10 @@ def _free_other_end(L: Ledger, company: str, key: str, free: set[str]) -> str | 
     """The other end (other_end) of debit `key` when a rule may explain both as a Transfer între conturi: each is the
     other's only candidate, it is one of the rows left free, nobody decided otherwise for it since (_decided), both
     are on the firm's own accounts, neither is the bank's own fee or interest or has a saved rule now (proposals), the
-    credit is no pending report's (settlements.claimed_credit), and one of the two names the other's account. Two lines that only share an amount and a few days, naming no account, may be a
-    payment and an unrelated collection: left to people. A line refused as a person's would be has none."""
+    credit is no pending report's (settlements.claimed_credit), neither names an open invoice (names_open_invoice),
+    and one of the two names the other's account. Two lines that only share an amount and a few days, naming no
+    account, may be a payment and an unrelated collection: left to people. A line refused as a person's would be has
+    none."""
     try:
         t, _ = _transaction(L, company, key)
         other = other_end(L, company, key, t)
@@ -594,14 +596,27 @@ def names_number(text: str, number: str) -> bool:
 
 def names_open_invoice(L: Ledger, company: str, t: statements.Tx) -> bool:
     """The line's bank details name one of the firm's invoices it may still pay (a debit) or collect (a credit), at any
-    amount: what it covers is a person's to say, never a rule's. Read under the write lock."""
-    text = f" {plain(t.description or t.title or '')} "
+    amount, by any reading a matcher or the sheet uses (names_number; the full identifier with or without its zeros,
+    issued._ident_re; its digits, as the collections matcher reads them): what it covers is a person's to say, never a
+    rule's. Read under the write lock."""
+    words = t.description or t.title or ""
+    text, norm = f" {plain(words)} ", efactura._norm(words)
+
+    def names(number: str) -> bool:
+        ident, digits = issued._ident_re(number), efactura.number_of(number)
+        return (
+            names_number(text, number)
+            or bool(ident and ident.search(norm))
+            or bool(digits and re.search(rf"(?<!\d){digits}(?!\d)", words))
+        )
+
     sql = (
         "SELECT number FROM issued WHERE company=? AND status IN ('open','marked')"
         if t.direction == "credit"
-        else "SELECT number FROM efactura WHERE company=? AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)"
+        else "SELECT number FROM efactura WHERE company=? "
+        "AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)"
     )
-    return any(names_number(text, r["number"] or "") for r in L.db.execute(sql, (company,)))
+    return any(names(r["number"] or "") for r in L.db.execute(sql, (company,)))
 
 
 def _decided(L: Ledger, key: str) -> bool:

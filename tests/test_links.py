@@ -776,6 +776,7 @@ EUR_ACCOUNT = "RO71BTRLEURCRT0000000001"
         "an invoice the credit names",
         "two invoices the credit names",
         "an invoice issued after the read",
+        "its number without zeros",
     ],
 )
 def test_a_transfer_rule_leaves_a_pair_it_cant_be_sure_of(ledger, live, monkeypatch, case):
@@ -793,11 +794,13 @@ def test_a_transfer_rule_leaves_a_pair_it_cant_be_sure_of(ledger, live, monkeypa
             "800.00",
             iban=EUR_ACCOUNT,
             counterparty="Administrator Exemplu",
-            description="Plata NRD 7031 7032",
+            description="Plata NRD 7031 si NRD 7032 NRD-42",
         ),
     )
     if case in ("an invoice the credit names", "two invoices the credit names"):
         _sale(ledger, "7031", "800.00" if case == "an invoice the credit names" else "300.00")
+    if case == "its number without zeros":
+        scenario._issued(ledger, "7033", "NORD", "NRD 0042", CLIENT, "5001", TODAY, TODAY, "300.00")
     if case == "two invoices the credit names":
         _sale(ledger, "7032", "500.00")
     if case == "two debits, one credit":
