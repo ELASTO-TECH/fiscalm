@@ -816,8 +816,9 @@ def schemas() -> dict:
             "logo (null without one) for invoicing/logo?co=&sha=.",
             "parts": "Per-company state under ALL. Money and identities never merge across firms.",
             "expenses": "Stored invoice/receipt links only. Ambiguous or contradictory links stay separate; no fuzzy matching here.",
-            "statement_hold": "Automatic payments held until last month's (month, YYYY-MM) statement of the paying "
-            "account is in: one task with the count; uploading the statement releases them. Null when none wait.",
+            "statement_hold": "Automatic payments held until the bank's record of the paying account covers every day of "
+            "last month (month, YYYY-MM): a statement, CSV exports or the open banking feed. One task with the count; "
+            "uploading the statement releases them. Null when none wait.",
         },
         "Action": {
             "message": "Romanian toast; clients should use error codes and capability flags, not parse this text.",

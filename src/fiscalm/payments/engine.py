@@ -8,12 +8,12 @@ import json
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 from fiscalm import companies
-from fiscalm.bank import intake as statement_intake
+from fiscalm.bank import coverage
 from fiscalm.efactura.credits import credited
 from fiscalm.ledger import Ledger, finance_home, is_live
 from fiscalm.migrations import payment_file_name
@@ -46,19 +46,23 @@ def to_pay_dir() -> Path:
     return finance_home() / TO_PAY
 
 
-def _previous_month(d: date) -> str:
-    return f"{d.year - 1}-12" if d.month == 1 else f"{d.year}-{d.month - 1:02d}"
-
-
 def missing_statement(ledger: Ledger, company: str, today: date) -> str:
-    """Require last month's paying-account statement only for firms that receive statements."""
-    month = _previous_month(today)
-    connected = ledger.db.execute("SELECT 1 FROM bank_connections WHERE company=? LIMIT 1", (company,)).fetchone()
-    earlier = any(d["month"] < today.strftime("%Y-%m") for d in ledger.documents(company=company, kind="statement"))
-    if not connected and not earlier:
+    """Last month (YYYY-MM) when the bank's record of the paying account doesn't cover all of it yet, else "". Any
+    record counts (bank.coverage: a statement, a CSV, the open banking feed). Only for firms that receive the bank's
+    record: one with a bank connection or a statement of an earlier month."""
+    last = today.replace(day=1) - timedelta(days=1)
+    first = last.replace(day=1)
+    receives = ledger.db.execute(
+        "SELECT EXISTS(SELECT 1 FROM bank_connections WHERE company=:co) OR EXISTS(SELECT 1 FROM documents "
+        "WHERE company=:co AND kind='statement' AND month<:month)",
+        {"co": company, "month": today.strftime("%Y-%m")},
+    ).fetchone()[0]
+    if not receives:
         return ""
     account = companies.get(company).paying_account
-    return month if account and not statement_intake.covers(ledger, company, month, account.iban) else ""
+    if not account or coverage.covered(ledger, company, account.iban, first, last):
+        return ""
+    return first.strftime("%Y-%m")
 
 
 @contextmanager

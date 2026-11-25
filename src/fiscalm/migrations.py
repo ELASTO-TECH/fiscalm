@@ -622,6 +622,23 @@ def credit_references_reread(db: sqlite3.Connection) -> None:
     db.execute("UPDATE efactura SET billing_ref=NULL,billing_date='' WHERE status='credit' AND billing_ref=''")
 
 
+def bank_coverage(db: sqlite3.Connection) -> None:
+    # What each stored statement covers, per account (bank.coverage.recorded), and from which day the open banking
+    # feed has read each account. A CAMT or MT940 stored before this was a whole month of the accounts it names,
+    # proven by its balances, and its lines were matched (the backup before migrating refuses a ledger with an
+    # unfinished, journalled import). A PDF, a CSV, or one that names no account, covers nothing yet: nothing
+    # proves its lines were matched (a PDF set had no journal), so it counts once imported again.
+    # A connection's feed covers its accounts from its next read on.
+    db.execute("ALTER TABLE documents ADD COLUMN coverage TEXT")
+    db.execute("ALTER TABLE bank_connections ADD COLUMN covered TEXT NOT NULL DEFAULT '{}'")
+    db.execute(
+        "UPDATE documents SET coverage=(SELECT json_group_object(a.value, json(json_array(documents.month||'-01', "
+        "date(documents.month||'-01','+1 month','-1 day'), json('true')))) "
+        "FROM json_each(documents.accounts) a) "
+        "WHERE kind='statement' AND accounts IS NOT NULL AND (path LIKE '%.xml' OR path LIKE '%.sta')"
+    )
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     baseline,
     transaction_links,
@@ -665,6 +682,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     account_opened,
     drop_receipt_items,
     credit_references_reread,
+    bank_coverage,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

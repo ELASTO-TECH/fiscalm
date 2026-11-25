@@ -2,7 +2,7 @@
 
 import dataclasses
 import json
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,9 +12,10 @@ from pdf_fake import bt_statement
 from test_camt import complete, fake_pdf, parse, write, xml
 
 from fiscalm import companies, integrations, pack, recon
-from fiscalm.bank import banking_days, intake as statement_intake, statements, upload
+from fiscalm.bank import banking_days, coverage, intake as statement_intake, statements, upload
 from fiscalm.ledger import finance_home
 from fiscalm.mail import imap as imapread, invoices as mail_invoices
+from fiscalm.payments import engine as pay
 from fiscalm.pdftext import pdf_text
 
 ING = "RO00INGB0000000000000009"
@@ -34,6 +35,8 @@ def test_an_imported_statement_records_its_accounts_and_its_transactions_carry_t
     (doc,) = ledger.documents(kind="statement")
     nord = companies.get("NORD")
     assert json.loads(doc["accounts"]) == sorted([nord.ibans["RON"], nord.ibans["EUR"]])
+    october = date(2026, 10, 1), date(2026, 10, 31)
+    assert all(coverage.covered(ledger, "NORD", i, *october, trusted_only=True) for i in nord.ibans.values())
     ledger.record_statement(parse(tmp_path, xml()))
     rows = ledger.db.execute("SELECT DISTINCT iban, company FROM statement_txs").fetchall()
     assert [tuple(r) for r in rows] == [(nord.ibans["RON"], "NORD")]
@@ -294,6 +297,10 @@ def test_the_operator_imports_one_months_bt_pdfs_together(ledger, tmp_path, peri
     assert len(docs) == len(files) and all(len(json.loads(d["accounts"])) == 1 for d in docs)
     days = ledger.db.execute("SELECT COUNT(DISTINCT day), COUNT(DISTINCT iban) FROM statement_txs").fetchone()
     assert tuple(days) == (len(periods), 2)  # every file's lines are on record, for both accounts
+    october = date(2026, 10, 1), date(2026, 10, 31)  # and their days add up to the month, proven by the balances
+    assert all(
+        coverage.covered(ledger, "NORD", json.loads(d["accounts"])[0], *october, trusted_only=True) for d in docs
+    )
     again = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
     assert [r["status"] for r in again] == ["duplicate"]
 
@@ -432,6 +439,16 @@ def test_a_month_starts_after_the_1st_only_when_no_day_with_movements_is_left_ou
         assert len(ledger.documents(kind="statement")) == len(before)
     else:
         assert (result["status"], result["month"]) == ("added", hi[6:] + "-" + hi[3:5])
+        assert proven_month(ledger, result["month"])  # from the 1st: the days before held no movement
+
+
+def proven_month(ledger, month):
+    """Every account of the month's stored statements is covered from its 1st to its last day, proven by balances."""
+    first = date.fromisoformat(month + "-01")
+    last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    docs = [d for d in ledger.documents(kind="statement") if d["month"] == month]
+    ibans = {i for d in docs for i in json.loads(d["accounts"])}
+    return bool(ibans) and all(coverage.covered(ledger, "NORD", i, first, last, trusted_only=True) for i in ibans)
 
 
 def quarter(folder, pages=True):
@@ -520,6 +537,7 @@ def test_older_daily_bt_pdfs_make_a_month_only_when_numbers_and_balances_leave_n
         assert not [d for d in ledger.documents(kind="statement") if d["month"] == "2020-01"]
         return
     assert (january["status"], january["month"], january["transactions"]) == ("added", "2020-01", 6)
+    assert proven_month(ledger, "2020-01")  # the days between statements too
     # February's own last statement waits for March's first
     assert february[0]["status"] == "refused" and "last statement" in february[0]["errors"][0]
 
@@ -589,6 +607,9 @@ def test_a_final_balance_after_a_page_break_still_proves_the_month(ledger, tmp_p
     assert recon.ingest_files(ledger, [pdf], password_lookup=lambda co: "synthetic")[0]["status"] == "duplicate"
     lines = ledger.db.execute("SELECT COUNT(*) FROM statement_txs").fetchone()[0]
     assert lines == (4 if trusted else 0)
+    assert proven_month(ledger, "2026-10") == trusted  # its coverage is the new reading's, once matched again
+    # unproven, its lines never reach the matchers: November's automatic payments wait for October
+    assert pay.missing_statement(ledger, "NORD", date(2026, 11, 6)) == ("" if trusted else "2026-10")
 
 
 @pytest.mark.parametrize("shape", ["one file", "a month set"])
