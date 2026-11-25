@@ -28,7 +28,7 @@ class ReportError(ValueError):
 
 
 # Currency words a report writes next to an amount or in its currency column, by ISO code.
-CURRENCY_WORDS = {"RON": "RON", "LEI": "RON", "EUR": "EUR", "€": "EUR", "USD": "USD", "$": "USD"}
+CURRENCY_WORDS = {"RON": "RON", "LEI": "RON", "EUR": "EUR", "€": "EUR", "USD": "USD"}  # never `$`: USD, CAD, AUD…
 _WORD = "|".join(re.escape(w) for w in CURRENCY_WORDS)
 _AMOUNT = re.compile(rf"(?i)(?:(?P<pre>{_WORD})\s*)?(?P<sign>[+-]?)\s*(?P<number>[\d.,' ]+?)\s*(?P<post>{_WORD})?")
 _NUMBER = re.compile(
@@ -58,12 +58,17 @@ def amount(value: str) -> tuple[Decimal, str]:
     ):
         raise ReportError("Invalid amount")
     digits = re.sub(r"\D", "", n["int"]) + "." + (n["cents"] or "0")
+    if len(digits.partition(".")[0]) > 12:  # the same bound as a stored amount (`money`)
+        raise ReportError("Invalid amount")
     word = m["pre"] or m["post"] or ""
     return Decimal(m["sign"] + digits), currency_code(word) if word else ""
 
 
 def money(value: str) -> Decimal:
-    return amount(value)[0]
+    """A stored or structured amount (a parsed line, a Shopify payout): plain dot decimal, nothing to interpret."""
+    if not isinstance(value, str) or not re.fullmatch(r"\d{1,12}(?:\.\d{1,2})?", value):
+        raise ReportError("Invalid amount; use decimal strings with a dot")
+    return Decimal(value)
 
 
 def _xml(data: bytes) -> ET.Element:
@@ -146,7 +151,7 @@ def _money_line(n: int, line: dict[str, str]) -> dict[str, str]:
     an empty fee is zero."""
     gross, currencies = amount(line["gross"]), set()
     fee = amount(line["fee"]) if line["fee"] else (Decimal(0), "")
-    net = amount(line["net"]) if line.get("net") else None
+    net = amount(line["net"]) if "net" in line else None  # a mapped net is evidence: a blank or `-` refuses
     for _, code in (gross, fee, net or (0, "")):
         currencies.add(code)
     if line.get("currency"):

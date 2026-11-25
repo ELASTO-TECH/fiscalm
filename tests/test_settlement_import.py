@@ -6,6 +6,7 @@ import io
 import json
 import zipfile
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from test_settlements import collect, setup, statement
@@ -13,7 +14,7 @@ from test_settlements import collect, setup, statement
 from fiscalm import companies
 from fiscalm.api import actions
 from fiscalm.settlements import engine as settlements, upload as bank_upload
-from fiscalm.settlements.reports import SOURCES, STRIPE, ReportError, parse, table
+from fiscalm.settlements.reports import SOURCES, STRIPE, ReportError, money, parse, table
 
 UPLOAD = dict(report_date="2026-10-10", today=date(2026, 10, 12))
 NETOPIA = dict(
@@ -120,8 +121,11 @@ def test_bad_delimiter_and_negative_string_index():
     [
         ("1.250,50", "-12,50", "1.238,00", ("1250.50", "12.50", "")),
         ("1,250.50", "12.50", "", ("1250.50", "12.50", "")),
-        ("1 250,50 lei", "-", "-", ("1250.50", "0.00", "RON")),
+        ("1 250,50 lei", "-", "1.250,50", ("1250.50", "0.00", "RON")),
         ("€ 100", "2,00 EUR", "98", ("100.00", "2.00", "EUR")),
+        ("100", "2", "-", None),  # a mapped net must say the amount
+        ("$ 100", "0", "", None),  # USD, CAD or AUD
+        ("1,000,000,000,000.00", "0", "", None),  # past the stored amount's 12 digits
         ("1.250", "0", "", None),  # one group, no decimals: 1250 or 1.25
         ("100,005", "0", "", None),
         ("1e3", "0", "", None),
@@ -139,6 +143,7 @@ def test_real_amounts_parse_exactly_or_refuse(gross, fee, net, expected):
         return
     line = parse(data, "csv", "fan", mapping, ";")[0]
     assert (line["reference"], line["gross"], line["fee"], line.get("currency", "")) == ("=TEST-1", *expected)
+    assert money(line["gross"]) + 0 == Decimal(expected[0])  # what is stored reads back exactly
 
 
 def test_uploaded_format_belongs_to_partner_and_is_reused(ledger):
