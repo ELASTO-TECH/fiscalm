@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import shutil
+import stat
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -247,8 +249,7 @@ def _open_statement(path: Path, out_dir: Path, kw: dict) -> list[_Opened] | dict
     what is identified."""
     snapshot = out_dir / "source" / path.name
     try:
-        snapshot.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, snapshot, follow_symlinks=False)
+        _snapshot(path, snapshot)
     except OSError:
         return {
             "file": str(path),
@@ -279,6 +280,17 @@ def _open_statement(path: Path, out_dir: Path, kw: dict) -> list[_Opened] | dict
     except statements.StatementError as e:
         return {"file": str(path), "status": "refused", "errors": [str(e)]}
     return [_Opened(path, company, month, out, st, sha256(snapshot))]
+
+
+def _snapshot(path: Path, dest: Path) -> None:
+    """Copy the regular file at `path` (never a symlink) into `dest`, from one opened descriptor."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise OSError("not a regular file")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("xb") as out:
+            shutil.copyfileobj(source, out)
 
 
 def _checked(groups: dict[tuple[str, str], list[_Opened]], check) -> list[statements.Statement]:

@@ -641,6 +641,10 @@ def test_a_stored_copy_is_read_once_under_the_imports_own_home(ledger, tmp_path,
 
     monkeypatch.setattr(statements, "decrypt_to", then_swapped)
     assert recon.ingest_files(ledger, copies, home, lambda co: "synthetic")[0]["status"] == "duplicate"
+    linked = tmp_path / "linked.pdf"  # a source that became a symlink after it was routed: never followed
+    linked.symlink_to(Path(ledger.documents(kind="statement")[0]["path"]))
+    (result,) = recon.ingest_statements(ledger, [linked], home, lambda co: "synthetic")
+    assert result["status"] == "error" and not ledger.used_txs()
 
 
 @pytest.mark.parametrize(
