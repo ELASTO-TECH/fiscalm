@@ -1428,8 +1428,8 @@ def check_payment(
         raise ApproveError("not_open", f"not an open, parsed invoice (status {r['status']})")
     if r["doc_type"] != "invoice" or r["currency"] != "RON":
         raise ApproveError("not_ron", "only RON invoices can go into the payment file")
-    if facts.credit(r):
-        raise ApproveError("credited", "invoice has a credit note; verify the remaining amount before paying by hand")
+    if facts.credit(r) >= Decimal(r["total"]):  # a linked credit note (credit_links) leaves its net remaining to pay
+        raise ApproveError("credited", "invoice is fully credited; nothing remains to pay")
     status = facts.inactive(r)
     if status:
         raise ApproveError(
@@ -1499,7 +1499,7 @@ def payment_item(L: Ledger, message_id: str, *, unfiled: bool = False, account: 
         payee_iban=iban,
         payee_bic=_payee_bic(r, iban),
         payee_fiscal_code="",
-        amount=Decimal(r["total"]),
+        amount=Decimal(r["total"]) - PaymentFacts(L).credit(r),  # net of its linked credit notes
         details=f"Plata factura {r['number']} din {date.fromisoformat(r['issue_date']):%d.%m.%Y}",
         issue_date=date.fromisoformat(r["issue_date"]),
         doc_ref=r["number"],

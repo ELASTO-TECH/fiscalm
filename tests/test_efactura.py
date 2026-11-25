@@ -1485,9 +1485,12 @@ def test_received_credit_groups_only_one_matching_invoice(ledger, home, monkeypa
         assert ("3002" not in rows) is grouped
         if not grouped:
             assert rows["3002"]["credit_note"] and not rows["3002"]["can_mark_paid"]
-    if grouped:
-        with pytest.raises(efactura.ApproveError, match="credit note"):
+    if grouped and case == "partial":  # the net remaining is payable (#51)
+        assert efactura.payment_item(ledger, "3001").amount == Decimal(left)
+    elif grouped:
+        with pytest.raises(efactura.ApproveError, match="credited"):
             efactura.payment_item(ledger, "3001")
+    if grouped:
         assert (
             efactura.match_statement(
                 ledger, _debit_st(_tx("250.00", date(2026, 10, 21), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN))
@@ -1514,6 +1517,31 @@ def test_product_credit_reference_reads_only_own_company_archive(ledger, home, m
     (home / "outside.zip").write_bytes(anaf_zip(credit))
     efactura.fill_credit_references(ledger)
     assert efactura.credited(ledger, "NORD") == {}
+
+
+def _credit_note(number="COR 2", total="-50.00") -> bytes:
+    return ubl(number=number, total=total).replace(
+        b"</Invoice>",
+        b"<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>TEST 1</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference></Invoice>",
+    )
+
+
+def test_a_partly_credited_invoice_is_downloaded_for_its_net_and_a_credit_since_reading_writes_nothing(
+    ledger, home, monkeypatch
+):
+    (home / "state" / "LIVE").touch()
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    stale = efactura.payment_item(ledger, "3001")  # read before a second credit note arrives
+    _stored(ledger, monkeypatch, **{"3003": _credit_note("COR 3", "-20.00")})
+    assert ledger.queue_efactura(stale, "3001", "person") is None and ledger.efactura("3001")["status"] == "open"
+    ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    item = ledger.efactura("3001")["item_id"]
+    assert ledger.payment(item)["amount"] == "180.00"
+    pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
+    assert (
+        ledger.payment(item)["status"] == "exported"
+        and b"180.00" in pay.named_path(ledger.payment_file(ident)).read_bytes()
+    )
 
 
 @pytest.mark.parametrize("exported", [False, True])

@@ -122,11 +122,16 @@ def version(item_ids) -> str:
 
 
 def _without_credits(ledger: Ledger, rows: list) -> list:
-    """Under pay_lock: no unimported payment retains its original amount after a linked credit."""
+    """Under pay_lock: no unimported payment keeps an amount a linked credit changed. A row already built for the net
+    remaining (efactura.payment_item) stays; one built before a credit is withdrawn."""
     with ledger.tx():
-        credits = {key for co in {r["company"] for r in rows} for key in credited(ledger, co)}
+        credits = {k: v for co in {r["company"] for r in rows} for k, v in credited(ledger, co).items()}
+        amounts = {r["item_id"]: Decimal(r["amount"]) for r in rows}
         by_item = {
-            r["item_id"]: r["message_id"] for r in ledger.efactura_rows(status="linked") if r["message_id"] in credits
+            r["item_id"]: r["message_id"]
+            for r in ledger.efactura_rows(status="linked")
+            if r["message_id"] in credits
+            and amounts.get(r["item_id"]) != Decimal(r["total"]) - credits[r["message_id"]]
         }
         for row in rows:
             if row["item_id"] in by_item and not ledger.withdraw_credited_payment(
