@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from fiscalm import companies, integrations, ledger as ledger_module, storage
+from fiscalm import companies, integrations, ledger as ledger_module, pack, storage
 from fiscalm.ledger import Ledger, finance_home, now
 from fiscalm.pdftext import sha256
 
@@ -104,9 +104,13 @@ def archive_all(ledger: Ledger, dry_run: bool = False, drive_factory=Drive) -> l
     drives: dict[str, Drive] = {}
     folder_cache: dict[tuple[str, str, str], str] = {}
     registry = companies.all(ledger)
+    named: dict[str, set[str]] = {}
     for doc in ledger.documents():
         if (doc["source"] or "").startswith("upload:"):
-            continue
+            if doc["company"] not in named:
+                named[doc["company"]] = ledger.linked_receipts(doc["company"])
+            if pack.held_upload(doc, named[doc["company"]]):
+                continue
         if ledger.db.execute("SELECT 1 FROM archive WHERE sha=?", (doc["sha"],)).fetchone():
             continue
         rec = {"file": Path(doc["path"]).name, "dest": ""}

@@ -674,7 +674,7 @@ describe("Bonuri", () => {
     renderApp({ state: () => json(s) });
     const sheet = await screen.findByRole("dialog", { busy: false });
     expect(sheet).toHaveAccessibleName("Bon din 6 oct, 300,08 lei");
-    expect(sheet).toHaveTextContent("ContabilNu intră în dosarul contabilului până nu este asociat cu plata din Tranzacții");
+    expect(sheet).toHaveTextContent("ContabilNu intră în dosarul contabilului până nu are data și suma");
   });
 
   it("shows an amount not read yet as unknown, never 0,00: in the list and on its sheet", async () => {

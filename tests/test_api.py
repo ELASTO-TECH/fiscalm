@@ -790,7 +790,7 @@ def test_docfile_serves_only_receipt_files_inside_their_folders(ledger, world, s
     bon = row["id"]
     assert (row["amount"], row["currency"]) == ("300.08", "RON") and bon in s["reports"][0]["documents"]
     assert row["files"] == [{"id": bon, "type": "image"}]  # one row per file, no paths leave the server
-    assert _doc(s, "Hetzner")["files"] == [{"id": het, "type": "pdf"}] and _doc(s, "Hetzner")["card"] == "4242"
+    assert _doc(s, "Hetzner")["files"] == [{"id": het, "type": "pdf"}] and _doc(s, "Hetzner")["card"] == "0001"
     assert _doc(s, "Figma")["files"] == [] and _doc(s, "Figma")["card"] is None  # its file is not on this machine
     code, hdr, data = _req(server, "GET", f"/web/docfile?co=NORD&sha={bon}")
     assert code == 200 and hdr["content-type"] == "image/jpeg" and data == b"fake jpeg, Benzinaria Nord"

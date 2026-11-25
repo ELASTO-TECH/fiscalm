@@ -655,6 +655,15 @@ def statement_tx_readings(db: sqlite3.Connection) -> None:
     db.execute("CREATE TABLE statement_tx_readings (tx_key TEXT NOT NULL, tx TEXT NOT NULL, PRIMARY KEY (tx_key, tx))")
 
 
+def receipt_headers(db: sqlite3.Connection) -> None:
+    # One AI reading per uploaded receipt (receipt_header), kept whatever it says so a file is read once; header is
+    # NULL while no request brought an answer, after `tries` requests.
+    db.execute(
+        "CREATE TABLE receipt_headers (sha TEXT PRIMARY KEY REFERENCES documents(sha), "
+        "header TEXT, tries INTEGER NOT NULL, at TEXT NOT NULL)"
+    )
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     baseline,
     transaction_links,
@@ -701,6 +710,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     bank_coverage,
     ai_transaction_proposals,
     statement_tx_readings,
+    receipt_headers,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

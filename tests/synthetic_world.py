@@ -616,11 +616,11 @@ def build(L, home: Path, patch, now: datetime | None = None, *, integrations_con
     doc("NORD", m1, "receipt", "Hetzner", 2, amount="9.00")
     doc("NORD", m1, "receipt", "Google Workspace", 5, note="abonament anual", amount="72.00")
     doc("NORD", months[0], "receipt", "Figma", 3, amount="15.00")
-    # Hetzner's invoice came by mail as a PDF, in fiscalm's own folder, paid with the card ending 4242
+    # Hetzner's invoice came by mail as a PDF, in fiscalm's own folder, paid with the card ending 0001 (its debit's)
     pdf = home / "NORD" / m1 / "facturi" / f"{m1}-02_Hetzner_Invoice.pdf"
     pdf.parent.mkdir(parents=True, exist_ok=True)
     pdf.write_bytes(b"%PDF-1.4 fake invoice")
-    L.db.execute("UPDATE documents SET path=?, card_last4='4242' WHERE vendor='Hetzner'", (str(pdf),))
+    L.db.execute("UPDATE documents SET path=?, card_last4='0001' WHERE vendor='Hetzner'", (str(pdf),))
     L.db.commit()
 
     # photographed bons: one paid by card, one whose shop also sent the e-Factura (linked: paid at the till), and one

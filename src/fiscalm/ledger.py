@@ -2716,6 +2716,66 @@ class Ledger:
         with self.tx() as db:
             return db.execute("UPDATE documents SET note=? WHERE sha=?", (note, sha)).rowcount > 0
 
+    def save_receipt_header(self, sha: str, header: str | None, tries: int) -> bool:
+        """Keep an upload's AI reading (receipt_header), or count a request that brought none (`header` None). Only the
+        worker that saw `tries` requests so far writes, and a reading is never replaced. A reading of an install-wide
+        upload a person was asked about sends it back to assignment once (upload_assignment.waiting)."""
+        with self.tx() as db:
+            if header is not None:
+                db.execute(
+                    "UPDATE documents SET issues='[\"to-check\"]' WHERE sha=? AND company='ALL' "
+                    "AND issues='[\"buyer-unclear\"]' AND NOT EXISTS (SELECT 1 FROM receipt_headers WHERE sha=? "
+                    "AND header IS NOT NULL)",
+                    (sha, sha),
+                )
+            return (
+                db.execute(
+                    "INSERT INTO receipt_headers(sha,header,tries,at) SELECT sha,?,1,? FROM documents "
+                    "WHERE sha=? AND kind='receipt' AND source LIKE 'upload:%' ON CONFLICT(sha) DO UPDATE SET "
+                    "header=excluded.header, tries=receipt_headers.tries+1, at=excluded.at "
+                    "WHERE receipt_headers.header IS NULL AND receipt_headers.tries=?",
+                    (header, now(), sha, tries),
+                ).rowcount
+                == 1
+            )
+
+    def cash_receipts(self, company: str) -> set[str]:
+        """The firm's uploads whose reading says they were paid in cash, wholly or in part (receipt_header): their total
+        is not what a card paid."""
+        return {
+            r[0]
+            for r in self.db.execute(
+                "SELECT h.sha FROM receipt_headers h JOIN documents d USING(sha) WHERE d.company=? "
+                "AND d.source LIKE 'upload:%' AND json_extract(h.header, '$.payment') IN ('cash','mixed')",
+                (company,),
+            )
+        }
+
+    def fill_upload(self, sha: str, company: str, fields: dict) -> bool:
+        """An unread upload of `company` takes the date, amount, currency, shop and card its reading found. Never a
+        document that has data already: one a person linked to its card debit (links.receipt), one a trusted import
+        took over, one already sent, or one moved to another firm since it was read."""
+        with self.tx() as db:
+            return (
+                db.execute(
+                    "UPDATE documents SET vendor=?,doc_date=?,amount=?,currency=?,card_last4=?,month=? "
+                    "WHERE sha=? AND company=? AND kind='receipt' AND source LIKE 'upload:%' AND amount IS NULL "
+                    "AND doc_date IS NULL AND sent_at IS NULL AND efactura_id IS NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM tx_link_items WHERE item='receipt '||documents.sha)",
+                    (
+                        fields["vendor"],
+                        fields["doc_date"],
+                        fields["amount"],
+                        fields["currency"],
+                        fields["card_last4"],
+                        fields["doc_date"][:7],
+                        sha,
+                        company,
+                    ),
+                ).rowcount
+                == 1
+            )
+
     def assign_upload(self, sha: str, company: str, path: str) -> bool:
         """First assignment wins; the file has already been safely copied into the firm inbox."""
         with self.tx() as db:

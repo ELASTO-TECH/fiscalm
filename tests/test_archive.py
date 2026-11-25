@@ -54,6 +54,13 @@ def test_company_layout_and_retry(ledger, home, configured):
     assert archive.archive_all(ledger, drive_factory=Drive) == []
 
 
+@pytest.mark.parametrize("read", [False, True])
+def test_an_upload_is_archived_once_its_date_and_amount_are_known(ledger, home, configured, read):
+    data = {"doc_date": "2026-11-02", "amount": "45.00", "currency": "RON"} if read else {}
+    ledger.add_document("upload", "NORD", "2026-11", "receipt", str(configured[1]), source="upload:phone", **data)
+    assert [r["file"] for r in archive.archive_all(ledger, drive_factory=Drive)] == ["receipt.pdf"] * (1 + read)
+
+
 @pytest.mark.parametrize(
     "refusal", ["disabled", "other-company", "ambiguous", "symlink", "outside", "company-symlink", "month", "name"]
 )
