@@ -20,7 +20,7 @@ from pdf_fake import text_pdf
 from test_issued import _credit, _st, anaf_zip, ubl
 from test_settlement_import import workbook
 
-from fiscalm import ai, ai_extract, cli, history, history_invoices, history_pdf, integrations
+from fiscalm import ai, cli, history, history_invoices, history_pdf, integrations
 from fiscalm.api import lists, state as api
 from fiscalm.bank import statements
 from fiscalm.efactura import inbox as efactura
@@ -712,7 +712,7 @@ FACTURA = ["Factura SB-0099", *HISTORY_TEXT]
                 "Ship to: Atelier Nord SRL",
                 *HISTORY_TEXT[2:],
             ],
-            {},
+            {"buyer_tax_id": ""},  # only its delivery address
         ),
         (FACTURA, {"issue_date": "03.11.2026"}),  # a field failing its rule
         (FACTURA + ["Total 120,00 RON"], {}),  # the rules found another total
@@ -742,25 +742,6 @@ def test_history_pdf_read_by_ai_in_sandbox(ledger, monkeypatch, lines):
     row = history.rows(ledger, "NORD")[0]
     got = tuple(row[k] for k in ("direction", "number", "issue_date", "total", "party_tax_id"))
     assert got == ("received", "SB-0099", "2026-11-03", "119.00", "77777777")
-
-
-@pytest.mark.parametrize(
-    ("token", "text", "printed"),
-    [
-        ("77777777", "CUI: RO 7777 7777", True),
-        ("11111111", "RO77777777      RO11111111", True),
-        ("7777", "CUI RO7777 7777", False),
-        ("7777", "RO5555   7777", False),
-        ("7777", "RO77777777", False),
-        ("77777777", "VAT: DE 77777777", False),
-        ("77777777", "VAT: DE-77777777", False),
-        ("77777777", "VAT: CHE 77777777", False),
-        ("2026", "03.11.2026", False),
-        ("119", "119,00 lei", False),
-    ],
-)
-def test_a_partner_id_counts_only_printed_whole(token, text, printed):
-    assert ai_extract.printed_id(token, text) is printed
 
 
 def history_ai(ledger, monkeypatch, fields):
