@@ -380,7 +380,12 @@ def test_an_ai_reading_never_overrules_the_document(ledger, fields, result):
 def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
     got = ai_extract.check(reading(**{field: value})("", "", {}), companies.all(ledger))
     assert (getattr(got, field), got.rejected) == (kept, () if kept else (field,))
-    assert ai_extract.check(reading(card_last4="2026")("", "", {}), {}, "Date 2026-10-28\nTotal 1.00").card_last4 == ""
+    for text, card, kept in (
+        ("Date 2026-10-28", "2026", ""),
+        ("Visa total 4242.00", "4242", ""),
+        ("Visa 4242", "4242", "4242"),
+    ):
+        assert ai_extract.check(reading(card_last4=card)("", "", {}), {}, text).card_last4 == kept
 
 
 @pytest.mark.parametrize(
