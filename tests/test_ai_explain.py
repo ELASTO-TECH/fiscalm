@@ -4,15 +4,17 @@ sure label on a line nothing fits by amount is applied, and no document is ever 
 from __future__ import annotations
 
 from contextlib import closing
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
-from test_links import _bill, _record, _sale, _tx
+from test_links import TODAY, _bill, _record, _sale, _tx
 
 from fiscalm import ai_explain, links
 from fiscalm.ai import AIError
 from fiscalm.api import state as api, transaction_choices
 from fiscalm.bank import statements
+from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import Ledger
 
 
@@ -113,30 +115,42 @@ def test_a_rule_still_explains_a_line_the_ai_only_proposed_for(ledger, live):
 
 
 def test_a_sure_label_waits_when_an_amount_fits_by_the_write_or_answers_disagree(ledger, live):
-    """An invoice recorded while the provider answers, a card's signed original amount fitting an open invoice, or two
-    answers for one line: nothing applied. A note never keeps an account in full."""
-    late, abroad, twice = _record(
+    """An invoice or a rule recorded while the provider answers, a card's signed original amount fitting an open invoice
+    or a receipt, or two answers for one line: nothing applied. A note never keeps an account in full."""
+    late, abroad, twice, bon, ruled = _record(
         ledger,
         "NORD",
         _tx(9, "debit", "44.00"),
         _tx(10, "debit", "49.70", orig_amount=Decimal("-10.00"), orig_currency="EUR", card_last4="0005"),
         _tx(11, "debit", "61.00"),
+        _tx(12, "debit", "59.64", orig_amount=Decimal("-12.00"), orig_currency="EUR", card_last4="0005"),
+        _tx(13, "debit", "27.00", counterparty="ABONAMENT EXEMPLU"),
     )
     assert ledger.assign_card("NORD", abroad, "NORD")
     _bill(ledger, "89", "10.00", currency="EUR")
+    day = (TODAY - timedelta(days=3)).isoformat()
+    ledger.add_document(
+        "b" * 64, "NORD", day[:7], "receipt", "bon.jpg", vendor="ALT NUME", doc_date=day, amount="12.00", currency="EUR"
+    )
+    name = efactura.line_keys(_tx(13, "debit", "27.00", counterparty="ABONAMENT EXEMPLU"), frozenset())["name"]
     iban = "RO49AAAA1B31007593840000"
 
     def answers(prompt):
-        with closing(Ledger(ledger.path)) as other:  # another connection records the invoice meanwhile
+        with closing(Ledger(ledger.path)) as other:  # another connection records an invoice and a rule meanwhile
             _bill(other, "88", "44.00")
+            other.remember(
+                "NORD", "name", name, {"kind": "advance", "partner": None, "reason": None, "note": "A"}, None
+            )
         return [
             _answer(late, "label", label="other", note=f"Plata catre {iban}"),
             _answer(abroad, "label", label="personal"),
             _answer(twice, "documents", partner="", sure=False),
             _answer(twice, "label", label="personal"),
+            _answer(bon, "label", label="personal"),
+            _answer(ruled, "label", label="personal"),
         ]
 
-    assert _run(ledger, answers)[0] == {"sent": 1, "asked": 3, "applied": 0}
+    assert _run(ledger, answers)[0] == {"sent": 1, "asked": 5, "applied": 0}
     kept = ledger.ai_proposals("NORD")
     assert kept[late]["note"] == "Plata catre ••••0000"
     assert kept[twice]["kind"] == "none" and ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 0
@@ -146,3 +160,9 @@ def test_one_firm_a_run_asks_the_ai_in_turn(ledger):
     assert ai_explain.in_turn(ledger, ["A", "B", "C"]) == ["A", "B", "C"]
     ledger.set_meta(ai_explain.TURN, "B")
     assert ai_explain.in_turn(ledger, ["A", "B", "C"]) == ["C", "A", "B"]
+
+
+def test_an_invoice_without_a_readable_total_fits_no_amount(ledger, live):
+    (key,) = _record(ledger, "NORD", _tx(14, "debit", "7.00"))
+    _bill(ledger, "90", None, parse_error="unreadable")
+    assert _run(ledger, [_answer(key, "label", label="bank_fee")])[0]["applied"] == 1
