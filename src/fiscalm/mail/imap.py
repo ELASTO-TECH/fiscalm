@@ -30,6 +30,7 @@ import email.utils
 import hashlib
 import html
 import imaplib
+import json
 import re
 import sqlite3
 import ssl
@@ -629,6 +630,18 @@ def _alternatives_agree(msg) -> bool:
     return True
 
 
+def _digest(msg) -> str:
+    """Every text part's content, plain and HTML, as one value: two copies differing anywhere are two mails."""
+    parts = []
+    for part in msg.walk():
+        if part.get_content_maintype() == "text" and not part.get_filename():
+            try:
+                parts.append(part.get_content())
+            except Exception:  # undecodable: its bytes stand for it
+                parts.append(repr(part.get_payload(decode=True)))
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
+
+
 def _text_record(msg, mid: str, end: date, account: integrations.Instance, size: int) -> dict:
     """complete: the whole message was fetched, it has one text (_text reads only the plain parts of several, so they
     must agree), its
@@ -648,6 +661,7 @@ def _text_record(msg, mid: str, end: date, account: integrations.Instance, size:
         "text": _text(msg),
         "domain": authenticated_domain(msg, authserv),
         "firms": account.firm_scope,
+        "digest": _digest(msg),
         "complete": size < TEXT_BYTES
         and _bodies(msg) == 1
         and _alternatives_agree(msg)
@@ -690,9 +704,14 @@ def texts(L: Ledger, start: date, end: date, words: list[str], *, connect=None) 
                     continue
                 msg = email.message_from_bytes(rec[1], policy=email.policy.default)
                 mid = _message_id(msg.get("Message-ID")) or "sha256:" + hashlib.sha256(rec[1]).hexdigest()
-                if any(m["key"] == f"imap:{mid}" for m in out):
-                    continue  # the same mail in two accounts is one mail: one proof, ever
-                out.append(_text_record(msg, mid, end, account, len(rec[1])))
+                record = _text_record(msg, mid, end, account, len(rec[1]))
+                same = next((m for m in out if m["key"] == record["key"]), None)
+                if same is None:
+                    out.append(record)
+                elif any(same[k] != record[k] for k in ("sender", "subject", "date", "digest", "complete")):
+                    # two different mails under one id (or one copy saying more than the other): neither proves
+                    same |= {"collides": True, "complete": False}
+                # else the same mail in two accounts is one mail: one proof, ever
         except (OSError, imaplib.IMAP4.error, ValueError, _OutOfTime, _TooLarge, ReadError):
             continue
         finally:

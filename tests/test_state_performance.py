@@ -47,8 +47,9 @@ def test_state_equivalence_and_query_budget(ledger, home, co, scale, monkeypatch
     # ALL: 145 since the enabled shops are read once per request for their Emitere automată rules; 147 since each
     # firm with an open invoice reads its credit lines once for client reminders (mail.reminders, #52); 149 since each
     # firm's paying account record (lines, month sources, feeds, statements) is read in one query for the payment
-    # hold (bank.coverage), whatever the number of lines.
-    assert metrics["queries"] <= (102 if co == "NORD" else 149)
+    # hold (bank.coverage), whatever the number of lines; 150 since the payment mails waiting for a person are read
+    # once per request (efactura.reviews), and invoices only when one waits.
+    assert metrics["queries"] <= (102 if co == "NORD" else 150)
     assert metrics["queries"] < before["queries"]
     assert metrics["subprocesses"] == before["subprocesses"] == 0
     (home / "state").mkdir(exist_ok=True)

@@ -71,6 +71,7 @@ TOP = {
     "refused",
     "unreadable",
     "ambiguous",
+    "mail_proofs",
     "partners",
     "inbox",
     "upload_tasks",
@@ -960,6 +961,48 @@ def test_http_resolve_debit(ledger, world, server):
     assert ledger.efactura("203")["status"] == "open"
     code, r = _api(server, "resolve-debit", {"co": "STUDIO9", "tx": a["tx"], "target": "203"})
     assert not r["ok"] and ledger.efactura("203")["status"] == "open"
+
+
+def test_http_mail_proof_review(ledger, world, server):
+    """A payment mail judge left for a person: one tap makes it one invoice's proof, or takes it off the tasks."""
+    from fiscalm.api import tasks
+
+    mail = {"key": "imap:<pay@processor.example>", "from": "Plati <no@processor.example>", "date": "2026-10-21"}
+    iban = "RO49AAAA1B31007593840000"  # the sender's text shown masked, whenever it was stored
+    efactura.set_review(ledger, mail | {"subject": f"Plata confirmata {iban}"}, ["203", "204"], "confirmare plata")
+    efactura.set_review(ledger, mail | {"key": "imap:<news@x.example>", "subject": "Oferta"}, ["203"], "plata?")
+    s = api.state(ledger, "STUDIO9")
+    [_, m] = s["mail_proofs"]  # by key
+    rid = efactura.review_id(mail["key"])
+    assert (m["id"], [c["id"] for c in m["candidates"]]) == (rid, ["203", "204"])
+    assert iban not in json.dumps(s["mail_proofs"]) and mail["key"] not in json.dumps(s) and m["candidate_count"] == 2
+    assert "STUDIO9mp" + rid in [key for key, _, _ in tasks.references(s)]
+    assert api.state(ledger, "NORD")["mail_proofs"] == []
+    for body in (
+        {"co": "NORD", "id": rid, "target": "204"},
+        {"co": "STUDIO9", "id": rid, "target": "201"},
+    ):
+        code, r = _api(server, "mail-proof", body)
+        assert code == 200 and not r["ok"] and r["message"] == "E-mailul nu mai așteaptă un răspuns."
+    code, r = _api(server, "mail-proof", {"co": "STUDIO9", "id": rid})  # no answer is no dismissal
+    assert not r["ok"] and len(api.state(ledger, "STUDIO9")["mail_proofs"]) == 2
+    code, r = _api(server, "mail-proof", {"co": "STUDIO9", "id": rid, "target": "204"})
+    assert r["ok"] and r["message"] == "Factura CX-1010 este confirmată ca plătită, cu e-mailul ca dovadă."
+    assert ledger.paid_proofs("STUDIO9")["efactura 204"] == "ef-proof:" + mail["key"]
+    news = efactura.review_id("imap:<news@x.example>")
+    assert [x["id"] for x in api.state(ledger, "STUDIO9")["mail_proofs"]] == [news]
+    code, r = _api(server, "mail-proof", {"co": "STUDIO9", "id": rid, "target": "203"})
+    assert not r["ok"] and ledger.efactura("203")["status"] == "open"  # one mail proves one invoice
+    code, r = _api(server, "mail-proof", {"co": "STUDIO9", "id": news, "target": ""})
+    assert r["ok"] and api.state(ledger, "STUDIO9")["mail_proofs"] == [] and ledger.efactura("203")["status"] == "open"
+    efactura.set_review(ledger, mail | {"key": "imap:<news@x.example>", "subject": "Oferta"}, ["203"], "plata?")
+    assert api.state(ledger, "STUDIO9")["mail_proofs"] == []  # offered again by a later read: still no
+    code, r = _api(server, "mail-proof", {"co": "STUDIO9", "id": news, "target": "203"})
+    assert not r["ok"] and ledger.efactura("203")["status"] == "open"
+    other = mail | {"key": "imap:<twice@x.example>", "subject": "Plata 1"}
+    efactura.set_review(ledger, other, ["203"], "plata")
+    efactura.set_review(ledger, other | {"subject": "Plata 2", "from": "Alt <a@other.example>"}, ["203"], "plata")
+    assert api.state(ledger, "STUDIO9")["mail_proofs"] == []  # two mails, one Message-ID: neither proves
 
 
 def test_withdraw_then_reopen_puts_the_row_back_in_the_file(ledger, world, server):

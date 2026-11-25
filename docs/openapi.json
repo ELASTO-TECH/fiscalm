@@ -4414,6 +4414,7 @@
                 "issued-unmark",
                 "resolve-debit",
                 "credit-pick",
+                "mail-proof",
                 "upload-link-create",
                 "upload-link-revoke",
                 "integration-add",
@@ -4568,6 +4569,7 @@
           "issued-unmark": "id Effect: local; allowed in shadow.",
           "resolve-debit": "tx, target (one of its candidates[].id) Effect: local; allowed in shadow.",
           "credit-pick": "id: a received credit note with credit_question; target: one of its credit_question[].id, or \"-\" when it cancels none of them. The first answer stands; local operation. Effect: local; allowed in shadow.",
+          "mail-proof": "id (a mail_proofs[].id), target (one of its candidates[].id: the mail proves that invoice paid; \"\": it is no payment, the mail leaves this company's tasks) Effect: local; allowed in shadow.",
           "upload-link-create": "label; optional all_firms (boolean), expires_in_days (1..365), max_files (positive integer). Write scope required; explicit upload-link routes are also available. Effect: local; allowed in shadow.",
           "upload-link-revoke": "id: upload link ID. Write scope required; explicit upload-link routes are also available. Effect: local; allowed in shadow.",
           "integration-add": "App authentication required; bearer requests return 403 app_required. Effect: local; allowed in shadow.",
@@ -10136,6 +10138,7 @@
     "issued-unmark": "local",
     "resolve-debit": "local",
     "credit-pick": "local",
+    "mail-proof": "local",
     "card-owner": "local",
     "tx-link": "local",
     "tx-receipt": "local",
@@ -10227,6 +10230,7 @@
     "issued-unmark": "member",
     "resolve-debit": "member",
     "credit-pick": "member",
+    "mail-proof": "member",
     "card-owner": "member",
     "tx-link": "member",
     "tx-receipt": "member",
@@ -14800,6 +14804,44 @@
               "type": "object"
             }
           },
+          "mail_proofs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string"
+                },
+                "subject": {
+                  "type": "string"
+                },
+                "date": {
+                  "type": "string"
+                },
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "candidate_count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "from",
+                "subject",
+                "date",
+                "candidates",
+                "candidate_count"
+              ]
+            },
+            "description": "Payment mails the AI read as proof that settled nothing on their own: pick the invoice each paid, or none (mail-proof)."
+          },
           "unreadable": {
             "type": "array",
             "items": {
@@ -14922,6 +14964,7 @@
           "news",
           "ambiguous",
           "bank_connections",
+          "mail_proofs",
           "unreadable",
           "refused",
           "system",
@@ -19983,6 +20026,9 @@
           "bank_connections": {
             "$ref": "#/components/schemas/State/properties/bank_connections"
           },
+          "mail_proofs": {
+            "$ref": "#/components/schemas/State/properties/mail_proofs"
+          },
           "unreadable": {
             "$ref": "#/components/schemas/State/properties/unreadable"
           },
@@ -20059,6 +20105,7 @@
           "news",
           "ambiguous",
           "bank_connections",
+          "mail_proofs",
           "unreadable",
           "refused",
           "system",

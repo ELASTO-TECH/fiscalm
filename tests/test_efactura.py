@@ -1096,6 +1096,98 @@ def test_judge_leaves_a_mail_fitting_twin_invoices_to_a_person(ledger, home, sec
     assert [r["mail_key"] for r in efactura.reviews(ledger, "NORD")] == [other["key"]]  # that mail proved one
 
 
+@pytest.mark.parametrize("answers", [("3001", "3002"), ("3001", "")])
+def test_two_people_answering_one_mail_at_once_settle_at_most_one_invoice(ledger, home, sec, monkeypatch, answers):
+    import threading
+
+    from fiscalm.ledger import Ledger
+
+    twins = {m: ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number=f"F-LUM {m}") for m in ("3001", "3002")}
+    _stored(ledger, monkeypatch, **twins)
+    mail = {"key": "imap:<pay@x>", "from": NETOPIA, "subject": "Plata", "date": "2026-10-21"}
+    efactura.set_review(ledger, mail, ["3001", "3002"], "plata")
+    gate, done = threading.Barrier(2), []
+
+    def answer(target):
+        L = Ledger()
+        gate.wait()
+        done.append(efactura.resolve_review(L, "NORD", efactura.review_id(mail["key"]), target))
+        L.close()
+
+    threads = [threading.Thread(target=answer, args=(t,)) for t in answers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(done) == 2
+    [won] = [d for d in done if d is not None]  # the first answer wins, the second finds nothing waiting
+    paid = [m for m in twins if ledger.efactura(m)["status"] == "paid"]
+    assert paid == ([won] if won else [])
+    assert not paid or ledger.paid_proofs("NORD")[f"efactura {won}"] == "ef-proof:" + mail["key"]
+    assert efactura.reviews(ledger, "NORD") == []
+
+
+def test_a_mail_a_person_said_is_no_payment_never_settles_nor_returns(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
+    mail = _mail(NETOPIA, "Plata confirmata", PAID) | {"domain": "netopia-payments.com", "complete": True}
+    efactura.set_review(ledger, mail | {"from": NETOPIA, "date": "2026-10-21"}, ["3001"], "plata")
+    assert efactura.resolve_review(ledger, "NORD", efactura.review_id(mail["key"]), "") == ""
+    res, calls = _judge(ledger, [mail], ("3001", 0, "high"))  # a judge that read it before the answer, or again
+    assert len(calls) == 1 and res["settled"] == [] and res["review"] == []
+    assert ledger.efactura("3001")["status"] == "open" and efactura.reviews(ledger, "NORD") == []
+
+
+def test_two_mails_under_one_message_id_prove_nothing(ledger, home, sec, monkeypatch):
+    lumen = ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")
+    _stored(
+        ledger, monkeypatch, **{"3001": lumen, "3002": ubl(supplier="VALEA STORE SRL", total="240.00", number="V 1")}
+    )
+    same = {"domain": "netopia-payments.com", "complete": True}
+    by = {w: _mail(NETOPIA, "Plata", f"{w.title()}: plata de 240,00 RON acceptata") | same for w in ("lumen", "valea")}
+    for m in by.values():
+        m["key"] = "imap:<same@x>"  # one Message-ID, two different mails
+    read = lambda q: [by[w] for w in q[2] if w in by]  # noqa: E731
+    answer = [
+        {"message_id": m, "paid": True, "confidence": "high", "mail_key": "imap:<same@x>", "reason": "plata"}
+        for m in ("3001", "3002")
+    ]
+    res = efactura.judge(ledger, ask=lambda p: {"decisions": answer}, read=read)
+    assert res["settled"] == [] and efactura.reviews(ledger, "NORD") == []
+    assert not efactura.confirm_by_mail(ledger, "3001", "imap:<same@x>", "mail: plata")  # the key proves nothing now
+
+
+@pytest.mark.parametrize("dismissed, said", [(False, "high"), (True, "high"), (False, "none")])
+def test_a_later_different_mail_under_a_reviewed_message_id_proves_nothing(
+    ledger, home, sec, monkeypatch, dismissed, said
+):
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
+    first = {"key": "imap:<same@x>", "from": NETOPIA, "subject": "Plata", "date": "2026-10-21", "text": "alta plata"}
+    efactura.set_review(ledger, first, ["3001"], "plata")
+    efactura.judged(ledger, "3001", [first["key"]])  # as judge records it: the review's mail is never read again
+    if dismissed:  # the record and its fingerprint stay after the last firm says no
+        assert efactura.resolve_review(ledger, "NORD", efactura.review_id(first["key"]), "") == ""
+        _stored(ledger, monkeypatch, **{"3002": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 2")})
+    second = _mail(NETOPIA, "Plata confirmata", PAID) | {"domain": "netopia-payments.com", "complete": True}
+    second["key"] = first["key"]  # a sure, unique, authenticated mail, but not the one reviewed under this id
+    target = "3002" if dismissed else "3001"
+    res, _ = _judge(ledger, [second], (target, 0, said))  # read again, even judged no payment: the key is spoilt
+    assert res["settled"] == [] and res["review"] == [] and ledger.efactura(target)["status"] == "open"
+    assert not efactura.confirm_by_mail(ledger, target, first["key"], "mail: plata")
+    assert efactura.reviews(ledger, "NORD") == []  # the first mail's review can't be answered any more
+
+
+def test_a_reviewed_mail_read_again_with_a_twin_under_its_id_is_spoilt(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
+    mail = _mail(NETOPIA, "Plata confirmata", PAID) | {"domain": "netopia-payments.com", "complete": True}
+    efactura.set_review(ledger, mail | {"from": NETOPIA}, ["3001"], "plata")
+    efactura.judged(ledger, "3001", [mail["key"]])
+    _judge(ledger, [mail])  # the same mail read again: its review stays
+    assert [r["message_ids"] for r in efactura.reviews(ledger, "NORD")] == [["3001"]]
+    _judge(ledger, [mail | {"collides": True, "complete": False}])  # intake saw a different mail under its id
+    assert efactura.reviews(ledger, "NORD") == []
+    assert efactura.resolve_review(ledger, "NORD", efactura.review_id(mail["key"]), "3001") is None
+
+
 def test_two_judges_racing_settle_a_mail_once(ledger, home, sec, monkeypatch):
     import threading
 

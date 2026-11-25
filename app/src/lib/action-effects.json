@@ -54,6 +54,7 @@
   "issued-unmark": "local",
   "resolve-debit": "local",
   "credit-pick": "local",
+  "mail-proof": "local",
   "card-owner": "local",
   "tx-link": "local",
   "tx-receipt": "local",

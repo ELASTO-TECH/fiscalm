@@ -671,6 +671,18 @@ def schemas() -> dict:
             }
         ),
         **{k: array(OBJECT) for k in ("to_check", "news", "ambiguous", "bank_connections")},
+        "mail_proofs": array(
+            obj(
+                {
+                    **strings("id", "from", "subject", "date"),
+                    "candidates": array(OBJECT),
+                    "candidate_count": INTEGER,
+                }
+            )
+        )
+        | {
+            "description": "Payment mails the AI read as proof that settled nothing on their own: pick the invoice each paid, or none (mail-proof)."
+        },
         "unreadable": array(obj({"id": STRING, "listed": NULL_STRING})),
         "refused": array(
             obj(

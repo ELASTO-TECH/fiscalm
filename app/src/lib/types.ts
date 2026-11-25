@@ -548,6 +548,8 @@ export type State = {
   unreadable: { id: string; listed: string | null }[];
   /** Statement debits that fit several invoices and settled none: the user picks the one each paid (resolve-debit). */
   ambiguous: Ambiguous[];
+  /** Payment mails the AI read as proof that settled nothing on their own: the user picks the invoice each paid, or none (mail-proof). */
+  mail_proofs: MailProof[];
   /** Tranzacții: the statement transactions of the last 13 months, newest first, and how many have no explanation. */
   transactions: { rows: Transaction[]; to_explain: number; reasons: Record<Transaction["direction"], { less: Reason[]; more: Reason[] }>;
     remembered: Remembered[] };
@@ -655,6 +657,15 @@ export type Transaction = {
   remember: Partial<Record<MemoryKey, string>>;
 };
 
+export type MailProof = {
+  id: string;
+  from: string;
+  subject: string;
+  date: string;
+  candidates: { id: string; number: string; supplier: string; amount: string; currency: string; date: string }[];
+  /** All of them; a task page carries at most 50. */
+  candidate_count: number;
+};
 export type Ambiguous = {
   candidate_count?: number;
   tx: string;
