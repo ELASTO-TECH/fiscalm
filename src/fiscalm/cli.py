@@ -81,7 +81,6 @@ def cmd_sync(a, L: Ledger) -> int:
     recover(L)
     mail = mail_invoices.run(L, date.today())  # invoices, statements and the accountant's OPs by mail
     L.set_meta("last_check_at", datetime.now().isoformat(timespec="seconds"))  # Setări: when mail was last read
-    months = set()
     # Shadow (before cut-over): the Mac still archives, so only look, never upload.
     archived = [r for r in archive.archive_all(L, dry_run=not is_live()) if r["status"] != "already there"]
     try:  # the connected banks, once a day; read only, so before going live too (decided 2026-11-03)
@@ -90,13 +89,6 @@ def cmd_sync(a, L: Ledger) -> int:
         read_banks = [{"status": "error", "error": type(e).__name__}]
     files = pay.prepare_files(L, date.today())
     refreshed = pay.refresh_to_pay(L)
-    for co in companies.all(L):
-        for mo in _recent_months(1):
-            months.add((co, mo))
-    reports = {}
-    for co, mo in sorted(months):
-        path, summary = recon.write_report(L, co, mo)
-        reports[f"{co} {mo}"] = {"report": str(path), **summary}
     actions = []
     for f in files:
         actions.append(
@@ -117,7 +109,6 @@ def cmd_sync(a, L: Ledger) -> int:
             "drive_archive": archived,
             "payment_files": files,
             "to_pay_refreshed": refreshed,
-            "reports": reports,
             "banks_read": read_banks,
             "actions_needed": sorted(set(actions)),
         }
@@ -698,19 +689,6 @@ def _status_data(L: Ledger, open_pay: list[dict], packs: list[dict], to_import: 
     }
 
 
-def cmd_report(a, L: Ledger) -> int:
-    cos = [a.company] if a.company else list(companies.all(L))
-    out = {}
-    for co in cos:
-        path, summary = recon.write_report(L, co, a.month)
-        out[co] = {"report": str(path), **summary}
-        if a.print:
-            print(path.read_text())
-    if not a.print:
-        _out(out)
-    return 0
-
-
 def cmd_pack_build(a, L: Ledger) -> int:
     _out(pack.build(L, a.company, a.month, summary=lambda: api.pack_summary(L, a.company, a.month)))
     return 0
@@ -1029,7 +1007,7 @@ def build_parser() -> argparse.ArgumentParser:
     register_settlement(sub)
     sub.add_parser(
         "sync",
-        help="read the mail accounts (invoices, statements, the accountant's OPs), build payment files, write reports",
+        help="read the mail accounts (invoices, statements, the accountant's OPs), build payment files",
     ).set_defaults(fn=cmd_sync)
     s = sub.add_parser(
         "ingest",
@@ -1210,11 +1188,6 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="what do I need to pay / send?")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
-    s = sub.add_parser("report", help="write report.md per company-month")
-    s.add_argument("--month", required=True)
-    s.add_argument("--company")
-    s.add_argument("--print", action="store_true")
-    s.set_defaults(fn=cmd_report)
 
     pk = sub.add_parser("pack", help="accountant pack").add_subparsers(dest="pack_cmd", required=True)
     s = pk.add_parser("build", help="freeze a firm's month of documents into the accountant's ZIP")

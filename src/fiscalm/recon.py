@@ -1,16 +1,15 @@
-"""Ingest documents into the ledger, reconcile statements vs receipts/payments, write reports."""
+"""Ingest documents into the ledger and reconcile statements against receipts and payments."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import secrets
 import shutil
 import stat
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 from functools import cache
 from pathlib import Path
@@ -567,124 +566,6 @@ def match_receipts(txs: list[statements.Tx], receipts) -> dict[int, tuple[str, d
                 used.add(r["sha"])
                 break
     return matches
-
-
-def _name(t: statements.Tx) -> str:
-    """A line's name for a person: its counterparty, else the bank's own words, with every IBAN and card number reduced
-    to its last four (as Tranzacții shows them): the free text can hold a full account number."""
-    return statements.masked(" ".join((t.counterparty or t.title or t.description).split()))
-
-
-def _fmt(amount, cur="RON") -> str:
-    return f"{Decimal(amount):,.2f} {cur}"
-
-
-def build_report(ledger: Ledger, company: str, month: str, home: Path | None = None) -> tuple[str, dict]:
-    home = home or finance_home()
-    co = companies.get(company)
-    lines = [f"# {co.legal_name} - {month}", "", f"_Generated {datetime.now():%Y-%m-%d %H:%M} by fiscalm_", ""]
-    summary: dict = {"company": company, "month": month}
-
-    # Payments
-    pays = [p for p in ledger.payments(company=company) if p["month"] == month]
-    lines.append("## Payments (OPs and the accountant's invoices)")
-    if not pays:
-        lines.append("- none recorded for this month")
-    for p in pays:
-        where = f" -> `{p['csv_path']}`" if p["csv_path"] else ""
-        lines.append(
-            f"- **{p['status'].upper()}** {p['kind']} {p['doc_ref']}: {_fmt(p['amount'])} to "
-            f"{p['payee_name']} ({p['payee_iban']}){where}"
-            + (f" - {p['paid_note']}" if p["status"] in ("paid", "skipped") and p["paid_note"] else "")
-        )
-    summary["payments_open"] = sum(1 for p in pays if p["status"] not in ("paid", "skipped"))
-    lines.append("")
-
-    # Statement
-    st_docs = ledger.documents(company=company, month=month, kind="statement")
-    lines.append("## Bank statement")
-    if not st_docs:
-        lines.append("- No statement for this month yet")
-        summary["statement"] = False
-        text = "\n".join(lines) + "\n"
-        return text, summary
-    summary["statement"] = True
-    st = month_statement(st_docs, company)
-    for a in st.accounts:
-        ok = "totals match bank" if a.balanced else "**TOTALS DO NOT MATCH BANK - check manually**"
-        lines.append(f"- {a.currency} {a.iban}: {len(a.txs)} transactions, {ok}")
-    classify(ledger, company, st.txs)
-    lines.append("")
-
-    need = [t for t in st.txs if t.category == statements.NEEDS_INVOICE]
-    matches = match_receipts(need, _receipts(ledger, company))
-    missing = [t for i, t in enumerate(need) if i not in matches]
-    summary.update(needs_invoice=len(need), matched=len(matches), missing=len(missing), transactions=len(st.txs))
-
-    lines.append(
-        f"## Foreign card/transfer outflows: {len(need)} need an invoice, {len(matches)} matched, "
-        f"{len(missing)} WITHOUT invoice"
-    )
-    if matches:
-        lines.append("")
-        lines.append("### Matched")
-        for i, t in enumerate(need):
-            if i in matches:
-                conf, r = matches[i]
-                tag = "" if conf == "exact" else " (matched by vendor/date; amounts differ by FX)"
-                lines.append(f"- {t.date} {_name(t)}: {_fmt(t.amount)} -> {Path(r['path']).name}{tag}")
-    if missing:
-        lines.append("")
-        lines.append("### WITHOUT invoice (flagged; do not guess, find the receipt or ask the user)")
-        for t in missing:
-            orig = f" ({t.orig_amount} {t.orig_currency})" if t.orig_currency and t.orig_currency != "RON" else ""
-            lines.append(f"- {t.date} {_name(t)}: {_fmt(t.amount)}{orig}, card ...{t.card_last4}")
-    lines.append("")
-
-    dom = [t for t in st.txs if t.category == statements.DOMESTIC]
-    lines.append(f"## Romanian suppliers ({len(dom)}): invoices arrive via e-Factura/SPV, not checked here")
-    for t in dom:
-        lines.append(f"- {t.date} {_name(t)}: {_fmt(t.amount)}")
-    lines.append("")
-    adv = [t for t in st.txs if t.category == statements.OWNER_ADVANCE]
-    if adv:
-        lines.append("## Transfers to the user (avans trezorerie): need a settlement (decont), not an invoice")
-        for t in adv:
-            lines.append(f"- {t.date} {_fmt(t.amount)}")
-        lines.append("")
-
-    # Issues
-    issues = []
-    for d in ledger.documents(company=company, month=month):
-        for iss in json.loads(d["issues"] or "[]"):
-            issues.append(f"- {Path(d['path']).name}: {iss}")
-    lines.append("## Invoices with issues")
-    lines.extend(issues or ["- none"])
-    summary["issues"] = len(issues)
-    lines.append("")
-
-    # Pack
-    pk = ledger.pack(company, month)
-    from fiscalm.pack import pending_docs
-
-    unsent = pending_docs(ledger, company, month)
-    lines.append("## Accountant pack")
-    if pk and pk["status"] == "sent":
-        lines.append(f"- sent ({pk['note'] or pk['updated_at']})")
-    else:
-        lines.append(
-            f"- {len(unsent)} document(s) not yet sent to the accountant: `fiscalm pack build --company {company} --month {month}`"
-        )
-    summary["unsent_docs"] = len(unsent)
-    return "\n".join(lines) + "\n", summary
-
-
-def write_report(ledger: Ledger, company: str, month: str, home: Path | None = None) -> tuple[Path, dict]:
-    text, summary = build_report(ledger, company, month, home)
-    out = month_dir(company, month, home) / "report.md"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text)
-    return out, summary
 
 
 def month_statement(docs, company: str, parse=None) -> statements.Statement:

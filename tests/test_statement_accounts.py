@@ -170,11 +170,10 @@ def test_a_months_report_reads_every_banks_statement(ledger, tmp_path, monkeypat
     bt, ing = write(tmp_path, complete(), "bt.xml"), write(tmp_path, xml(iban=ING, currency="EUR"), "ing.xml")
     ledger.add_document("bt", "NORD", "2026-10", "statement", str(bt), accounts=["x"])
     ledger.add_document("ing", "NORD", "2026-10", "statement", str(ing), accounts=[ING])
-    view = recon.month_view(ledger, "NORD", "2026-10", [])
-    text, summary = recon.build_report(ledger, "NORD", "2026-10", tmp_path)
-    assert summary["transactions"] == len(parse(tmp_path, complete()).txs) + 1  # BT's and ING's
-    assert ING in text and companies.get("NORD").ibans["RON"] in text
-    assert view["balanced"] is True
+    st = recon.month_statement(ledger.documents(company="NORD", month="2026-10", kind="statement"), "NORD")
+    assert len(st.txs) == len(parse(tmp_path, complete()).txs) + 1  # BT's and ING's
+    assert {ING, companies.get("NORD").ibans["RON"]} <= {a.iban for a in st.accounts}
+    assert recon.month_view(ledger, "NORD", "2026-10", [])["balanced"] is True
     ing.unlink()  # one bank's file gone: the month can't be judged
     assert recon.month_view(ledger, "NORD", "2026-10", [])["balanced"] is None
 

@@ -11,7 +11,7 @@ from test_api import (
 )
 from test_api_v1 import request
 
-from fiscalm.api import mcp, mcp_tools, tokens, v1 as api_v1
+from fiscalm.api import actions, mcp, mcp_tools, tokens, v1 as api_v1
 
 READ = {"scope": "read"}
 INIT = {"protocolVersion": mcp.LEGACY, "capabilities": {}}
@@ -120,10 +120,15 @@ def test_tool_definitions_scope_schemas_and_untrusted_data():
     assert not any(t["name"].startswith("action_") for t in read)
     assert {t["name"] for t in read} < set(write)
     assert {n[7:].replace("_", "-") for n in write if n.startswith("action_")} == set(mcp_tools.ACTION_FIELDS)
+    # Every tool names a public action with its exact fields; the public actions left out are the documented ones.
+    left_out = set(actions.API_ACTIONS) - set(mcp_tools.ACTION_FIELDS)
+    assert left_out == {a for a in actions.API_ACTIONS if a.startswith(("integration-", "upload-link-"))}
+    assert not any("403" in t["description"] for t in write.values())
+    assert "invoicing_auto_upload" not in write  # a bearer is always refused: not a tool
     for action, (required, optional) in mcp_tools.ACTION_FIELDS.items():
         definition = write["action_" + action.replace("-", "_")]
         body = definition["inputSchema"]["properties"]["body"]
-        assert set(body["properties"]) == set(required + optional)
+        assert set(body["properties"]) == set(required + optional) == set(actions.ACTIONS[action].fields.split())
         assert body["required"] == list(required)
         assert body["additionalProperties"] is False
         assert {"destructiveHint", "idempotentHint"} <= set(definition["annotations"])

@@ -37,14 +37,12 @@ TOOLS = {
 }
 
 
-# Body fields mirror docs/openapi.json's action table.
+# Body fields mirror the public actions in api.actions.ACTIONS (docs/openapi.json x-action-fields). Not offered:
+# integration-* (bearer requests always get 403 app_required) and upload-link-* (their own typed routes).
 ACTION_FIELDS = {
-    "approve": (("id",), ()),
     "mark-paid": (("id", "method"), ("detail",)),
     "reopen": (("id",), ()),
     "withdraw": (("id", "method"), ("detail",)),
-    "imported": ((), ("v", "missing")),
-    "restore": (("missing",), ()),
     "pack-prepare": (("month",), ()),
     "pack-sent": (("month", "version"), ("mark",)),
     "check": ((), ()),
@@ -52,7 +50,13 @@ ACTION_FIELDS = {
     "issued-mark": (("id", "method"), ("detail",)),
     "issued-unmark": (("id",), ()),
     "resolve-debit": (("tx", "target"), ()),
+    "settlement-withdraw": (("id",), ()),
+    "settlement-confirm": (("id", "tx", "confirmed"), ()),
+    "emag-refund": (("id",), ()),
+    "emag-resolve": (("id",), ()),
 }
+# Roles a bearer token never holds: their routes always answer 403, so they are not tools.
+APP_ONLY_ROLES = ("manage_rules", "manage_integrations")
 
 
 def definitions(scope: str) -> list[dict]:
@@ -78,7 +82,7 @@ def definitions(scope: str) -> list[dict]:
         specs["get_invoicing_" + kind] = ("invoicing_" + kind, fields, tuple(fields))
     if scope == "write":
         for op, spec in invoicing_api.ACTIONS.items():
-            if not spec.public:
+            if not spec.public or spec.role in APP_ONLY_ROLES:
                 continue
             body = spec.public_schema
             fields = {"co": CO, "body": body}
@@ -88,12 +92,7 @@ def definitions(scope: str) -> list[dict]:
     return [
         {
             "name": name,
-            "description": (
-                ("App-admin configuration only; always refused with 403 admin_required for bearer tokens.")
-                if name == "invoicing_auto_upload"
-                else name.replace("_", " ") + "."
-            )
-            + UNTRUSTED,
+            "description": name.replace("_", " ") + "." + UNTRUSTED,
             "inputSchema": {
                 "type": "object",
                 "properties": fields,
