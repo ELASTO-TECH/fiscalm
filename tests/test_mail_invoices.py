@@ -772,7 +772,7 @@ def test_a_firm_added_later_is_offered_for_a_document_without_a_firm(ledger):
 @pytest.mark.parametrize("live_mode", [False, True])
 @pytest.mark.parametrize("configured", [False, True])
 @pytest.mark.parametrize("source", ["mail", "history"])
-def test_document_ai_respects_configuration_and_history_shadow_boundary(
+def test_document_ai_runs_in_sandbox_and_live_only_when_configured(
     ledger, home, monkeypatch, live_mode, configured, source
 ):
     if live_mode:
@@ -785,13 +785,11 @@ def test_document_ai_respects_configuration_and_history_shadow_boundary(
 
     def ask(L, system, prompt, schema, image=None):
         calls.append(prompt)
-        if "doc_type" in schema["properties"]:
-            return reading(total="15.00")(system, prompt, schema)
-        return {"total": "15.00", "currency": "EUR"}
+        return reading(total="15.00")(system, prompt, schema)
 
     monkeypatch.setattr(ai, "ask_json", ask)
     raw = invoice("Total paid 15.00 EUR")
-    allowed = configured and (source == "mail" or live_mode)
+    allowed = configured
     if source == "mail":
         assert mi.handle(ledger, message(("pdf", raw))) == ("filed:1" if configured else "asked:1")
     else:
@@ -1197,7 +1195,7 @@ def test_history_reader_reuses_fields_but_accepts_romanian_parties(ledger):
     assert not doc.refused
     assert (doc.number, doc.date, doc.roles) == ("TEST-42", "2023-11-03", {"NORD": "buyer"})
     assert mi.pdf_party(doc.text, "seller") == ("Furnizor Exemplu SRL", "77777777")
-    assert mi.pdf_total(ledger, doc) == ("119.00", "RON")
+    assert doc.totals == [("119.00", "RON")]
 
 
 def test_history_reader_refuses_ambiguous_party_blocks():

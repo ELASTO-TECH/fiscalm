@@ -20,7 +20,7 @@ from pdf_fake import text_pdf
 from test_issued import _credit, _st, anaf_zip, ubl
 from test_settlement_import import workbook
 
-from fiscalm import cli, history, history_invoices, history_pdf
+from fiscalm import ai, cli, history, history_invoices, history_pdf, integrations
 from fiscalm.api import lists, state as api
 from fiscalm.bank import statements
 from fiscalm.efactura import inbox as efactura
@@ -684,6 +684,87 @@ def test_empty_pdf_review_is_separate_and_answer_is_once(ledger):
     assert not history_pdf.pending(ledger, "NORD")
 
 
+HISTORY_TEXT = ["Firma Exemplu SRL      Atelier Nord SRL", "RO77777777      RO11111111", "03.11.2026", "119,00 lei"]
+FACTURA = ["Factura SB-0099", *HISTORY_TEXT]
+
+
+@pytest.mark.parametrize(
+    ("lines", "fields"),
+    [
+        (FACTURA, {"confidence": "low"}),
+        (FACTURA, {"seller_tax_id": "RO88888888"}),  # a partner id it doesn't print
+        (FACTURA, {"seller_tax_id": "7777"}),  # a fragment of the printed one
+        (FACTURA, {"currency": "EUR"}),  # the document prints lei
+        ([*FACTURA[:4], "Curs BNR 1 EUR = 4,97 RON", "Total 119,00"], {"currency": "EUR"}),  # a total without currency
+        ([*FACTURA, "Proiect pentru Studio 9 SRL"], {}),  # another of the firms on it
+        (FACTURA, {"seller_tax_id": "SRL"}),  # not a firm's id
+        (  # the rules read the partner; the AI's other, unprinted id contradicts it
+            ["FACTURA", "SB-0099", "Furnizor: Firma Exemplu SRL CUI: RO77777777", "Client: Atelier Nord SRL"]
+            + ["Data: 03.11.2026", "Total 119,00 lei"],
+            {"seller_tax_id": "RO88888888"},
+        ),
+        (FACTURA, {"currency": ""}),  # a total it gave without its currency
+        (["Factura SB-0099", *HISTORY_TEXT[:2], "Data: 03.11.2026", "Data: 03.12.2026", "119,00 lei"], {}),  # two dates
+        (["Aviz de insotire SB-0099", *HISTORY_TEXT], {}),  # no invoice title
+        (
+            [
+                "Factura SB-0099",
+                "Bill to: Firma Exemplu SRL RO77777777",
+                "Ship to: Atelier Nord SRL",
+                *HISTORY_TEXT[2:],
+            ],
+            {"buyer_tax_id": ""},  # only its delivery address
+        ),
+        (FACTURA, {"issue_date": "03.11.2026"}),  # a field failing its rule
+        (FACTURA + ["Total 120,00 RON"], {}),  # the rules found another total
+        (FACTURA + ["Total 120,00 RON", "Total 121,00 RON", "Subtotal 119,00 RON"], {}),  # none of their totals
+        (FACTURA + ["Factura SB-0100"], {}),  # two invoices in one PDF: the rules cleared the number
+        (["Factura Seria SB nr 0099", *HISTORY_TEXT], {"number": "0099"}),  # a separately printed series
+    ],
+)
+def test_history_pdf_ai_reading_in_doubt_waits_in_review(ledger, monkeypatch, lines, fields):
+    history_ai(ledger, monkeypatch, fields)
+    assert run(ledger, zipped(("factura.pdf", text_pdf(lines)))).review == 1
+    (q,) = history_pdf.pending(ledger, "NORD")
+    assert (q["reason"], q["direction"], q["party_name"]) == ("unsure", "received", "Firma Exemplu SRL")
+
+
+@pytest.mark.parametrize("head", [["Proforma SB-0099"], ["Adjustment SB-0099", "Total -119,00 lei"]])
+def test_a_proforma_or_negative_total_is_never_filed_by_an_ai_reading(ledger, monkeypatch, head):
+    history_ai(ledger, monkeypatch, {})
+    assert run(ledger, zipped(("p.pdf", text_pdf([*head, *HISTORY_TEXT])))).review == 1
+
+
+@pytest.mark.parametrize("lines", [FACTURA, []])  # a text PDF, and a scan read from its first page's picture
+def test_history_pdf_read_by_ai_in_sandbox(ledger, monkeypatch, lines):
+    history_ai(ledger, monkeypatch, {})
+    res = run(ledger, zipped(("factura.pdf", text_pdf(lines))))
+    assert (res.history_received, res.review) == (1, 0)
+    row = history.rows(ledger, "NORD")[0]
+    got = tuple(row[k] for k in ("direction", "number", "issue_date", "total", "party_tax_id"))
+    assert got == ("received", "SB-0099", "2026-11-03", "119.00", "77777777")
+
+
+def history_ai(ledger, monkeypatch, fields):
+    integrations.add(
+        ledger, "ai", "Local AI", {"provider": "openai", "base_url": "http://127.0.0.1:9/v1", "model": "t"}
+    )
+    answer = {
+        "doc_type": "invoice",
+        "buyer_name": "Atelier Nord SRL",
+        "buyer_tax_id": "RO11111111",
+        "seller_name": "Firma Exemplu SRL",
+        "seller_tax_id": "RO77777777",
+        "number": "SB-0099",
+        "issue_date": "2026-11-03",
+        "total": "119.00",
+        "currency": "RON",
+        "card_last4": "",
+        "confidence": "high",
+    } | fields
+    monkeypatch.setattr(ai, "ask_json", lambda L, system, prompt, schema, image=None: answer)
+
+
 @pytest.mark.parametrize("numbers", [("NRD 1", "NRD 2"), ("A-0042", "B-0042")])
 @pytest.mark.parametrize("way", ["issued", "received"])
 def test_pdf_number_identity_preserves_series_and_short_numbers(ledger, numbers, way):
@@ -1107,7 +1188,11 @@ def test_archive_pdf_number_is_never_a_label_and_xml_still_supersedes_it(ledger,
 
 
 @pytest.mark.parametrize("series", [["ABC 0065", "XYZ 0066"], ["Data scadenta 30.09.2026"], ["ABC 0065/2026"]])
-def test_archive_pdf_with_bare_heading_and_no_single_series_stays_in_review(ledger, series):
+def test_archive_pdf_with_bare_heading_and_no_single_series_stays_in_review(ledger, monkeypatch, series):
+    seller = {"seller_name": "Atelier Nord SRL", "seller_tax_id": "RO11111111", "buyer_name": "Firma Exemplu SRL"}
+    history_ai(
+        ledger, monkeypatch, seller | {"buyer_tax_id": "RO77777777", "number": "ABC 0065", "issue_date": "2026-09-12"}
+    )
     assert run(ledger, archive_pdf(FGO_BARE + series)).review == 1
     assert history.rows(ledger, "NORD") == []
 
