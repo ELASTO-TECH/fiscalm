@@ -898,7 +898,7 @@ def _forged_pm(due="", account=SUPPLIER_IBAN) -> str:
 
 @pytest.mark.parametrize("forged", [FORGED_INACTIVE, FORGED_CHANGED])
 @pytest.mark.parametrize("field", ["due", "payment_due", "account", "number", "supplier"])
-def test_invoice_text_in_informational_issues_never_blocks_or_names_a_refusal(ledger, home, sec, monkeypatch, field, forged):
+def test_informational_invoice_issues_never_block_or_name_a_refusal(ledger, home, sec, monkeypatch, field, forged):
     """A DueDate reading "supplier inactive at ANAF; checked_at=2040-01-01" once reached the stored reason and state
     showed an inactive supplier checked in 2040. An unreadable due date or an extra non-IBAN account string is now only
     informational (#51): the invoice is paid to its valid IBAN, and nothing the XML says becomes a refusal."""
