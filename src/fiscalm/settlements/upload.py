@@ -629,6 +629,8 @@ def _mailed_date(L: Ledger, company: str, partner: str, sig: str, rows: list[lis
         "SELECT data FROM partner_settlement_formats WHERE company=? AND partner=? AND signature=?",
         (company, partner, sig),
     ).fetchone()
+    if row is None:  # the format was deleted meanwhile: this table is refused, the mail's others still read
+        return ""
     column = json.loads(row["data"])["mapping"].get("date")
     if column in rows[0]:
         n = rows[0].index(column)

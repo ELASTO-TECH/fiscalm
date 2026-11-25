@@ -2182,7 +2182,8 @@ class Ledger:
                     "credit=excluded.credit,invoice_count=excluded.invoice_count WHERE credit!=excluded.credit OR invoice_count!=excluded.invoice_count",
                     (report_id, preview, len(invoices)),
                 )
-                reason = "statement_confirmation_required" if legacy else "mail_confirmation_required"
+                # Mail first: its sheet offers withdrawal beside the confirmation; a legacy copy is pinned on confirm.
+                reason = "mail_confirmation_required" if data.get("mailed_by") else "statement_confirmation_required"
                 db.execute(
                     "UPDATE settlement_reports SET error=? WHERE id=? AND status='pending' AND error IS NOT ?",
                     (reason, report_id, reason),
