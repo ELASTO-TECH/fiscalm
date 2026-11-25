@@ -559,12 +559,15 @@ def authenticated_domain(msg, authserv: str) -> str:
     local, at, domain = addresses[0][1].rpartition("@")
     if not (local and at and re.fullmatch(r"[a-z0-9.-]+", domain := domain.lower())):
         return ""
-    plain = re.sub(r'"(?:[^"\\]|\\.)*"|\([^()]*\)', " ", str(own[0]))
+    plain, prev = re.sub(r'"(?:[^"\\]|\\.)*"', " ", str(own[0])), ""
+    while plain != prev:  # nested comments, innermost first
+        plain, prev = re.sub(r"\([^()]*\)", " ", plain), plain
     clauses = [c.split() for c in plain.split(";")[1:]]
     dmarc = [c for c in clauses if c and c[0].lower().startswith("dmarc=")]
-    if len(dmarc) != 1 or dmarc[0][0].lower() != "dmarc=pass":
+    if "(" in plain or ")" in plain or len(dmarc) != 1 or dmarc[0][0].lower() != "dmarc=pass":
         return ""
-    return domain if f"header.from={domain}" in (w.lower() for w in dmarc[0][1:]) else ""
+    senders = [w.lower().removeprefix("header.from=") for w in dmarc[0][1:] if w.lower().startswith("header.from=")]
+    return domain if senders == [domain] else ""
 
 
 def _bodies(part) -> int:

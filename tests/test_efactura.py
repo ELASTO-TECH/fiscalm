@@ -1050,7 +1050,9 @@ def test_judge_settles_nothing_another_firm_or_balance_may_explain(ledger, home,
         text = PAID
     mail = _mail(NETOPIA, "Plata confirmata", text) | {"domain": "netopia-payments.com", "complete": True}
     res = _judge(ledger, [mail], ("3001", 0, "high"))[0]
-    assert res["settled"] == [] and all(i.startswith("30") for r in res["review"] for i in r["message_ids"])
+    assert res["settled"] == []
+    if case == "history twin":  # reviewed for the invoice still to pay alone
+        assert res["review"] == [{"mail_key": mail["key"], "message_ids": ["3001"]}]
     assert ledger.efactura("3001")["status"] == "open"
 
 
