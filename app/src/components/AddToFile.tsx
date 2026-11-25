@@ -55,7 +55,10 @@ export function AddToFile({ s, invoices, left = [], onDone }: { s: State; invoic
   const send = async () => {
     const invoice_ids = invoices.map((r) => r.id);
     if (lost || unpicked) return;
-    const accounts = asked.length ? { accounts: Object.fromEntries(asked.map((r) => [r.id, picks[r.id]])) } : {};
+    // Every pick the person made is sent, also for an invoice a refresh no longer asks about: what they chose is paid,
+    // never a default that arrived while the sheet was open (the engine still pays only an account the invoice lists).
+    const chosenAccounts = invoices.filter((r) => picks[r.id] !== undefined).map((r) => [r.id, picks[r.id]]);
+    const accounts = chosenAccounts.length ? { accounts: Object.fromEntries(chosenAccounts) } : {};
     const body: FileAction = fresh || !chosen ? { action: "payment_file_create", co: s.co as Co, name: name.trim(), invoice_ids, ...accounts }
       : { action: "payment_file_add", file_id: chosen.id, invoice_ids, ...accounts };
     setSending(true);
@@ -98,7 +101,7 @@ export function AddToFile({ s, invoices, left = [], onDone }: { s: State; invoic
           {r.accounts.map((a) => <label key={a.index} className={optionStyle}>
             <Input type="radio" name={`${ids}-acct-${r.id}`} className="mt-1" checked={picks[r.id] === a.index}
               onChange={() => setPicks((p) => ({ ...p, [r.id]: a.index }))} />
-            <span className="min-w-0">{a.bank} {maskedIban(a.last4)}</span>
+            <span className="min-w-0">{a.bank} {maskedIban(a.ending)}</span>
           </label>)}
         </div>
       </fieldset>)}

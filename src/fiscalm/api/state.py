@@ -382,7 +382,7 @@ def _approval(L: Ledger, r, facts: efactura.PaymentFacts, eligible: bool) -> dic
     n = next(n for n in range(4, 35) if len({i[-n:] for i in choices}) == len(choices))
     ibans = json.loads(r["ibans"] or "[]")
     accounts = [{"index": k, "bank": i[4:8], "ending": i[-n:]} for k, i in enumerate(ibans) if i in choices]
-    return {"can_approve": eligible and (refusal is None or bool(accounts)), "accounts": accounts}
+    return {"accounts": accounts, "can_approve": eligible and (refusal is None or bool(accounts))}
 
 
 def _payee(r, facts: efactura.PaymentFacts) -> str:

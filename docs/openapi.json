@@ -10697,14 +10697,14 @@
                 "bank": {
                   "type": "string"
                 },
-                "last4": {
+                "ending": {
                   "type": "string"
                 }
               },
               "required": [
                 "index",
                 "bank",
-                "last4"
+                "ending"
               ]
             }
           },
@@ -12820,14 +12820,14 @@
                       "bank": {
                         "type": "string"
                       },
-                      "last4": {
+                      "ending": {
                         "type": "string"
                       }
                     },
                     "required": [
                       "index",
                       "bank",
-                      "last4"
+                      "ending"
                     ]
                   }
                 },
@@ -17136,14 +17136,14 @@
                                   "bank": {
                                     "type": "string"
                                   },
-                                  "last4": {
+                                  "ending": {
                                     "type": "string"
                                   }
                                 },
                                 "required": [
                                   "index",
                                   "bank",
-                                  "last4"
+                                  "ending"
                                 ]
                               }
                             },
@@ -17651,14 +17651,14 @@
                                           "bank": {
                                             "type": "string"
                                           },
-                                          "last4": {
+                                          "ending": {
                                             "type": "string"
                                           }
                                         },
                                         "required": [
                                           "index",
                                           "bank",
-                                          "last4"
+                                          "ending"
                                         ]
                                       }
                                     },
