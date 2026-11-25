@@ -608,9 +608,19 @@ def test_a_stored_copy_ingested_again_is_its_own_duplicate(ledger, tmp_path, sha
     docs = ledger.documents(kind="statement")
     ledger.db.execute("DELETE FROM statement_txs")  # as a parser that read no line left them
     ledger.db.commit()
-    (again,) = recon.ingest_files(ledger, [Path(d["path"]) for d in docs], password_lookup=lambda co: "synthetic")
+    copies = [tmp_path / f"copy-{n}.pdf" for n in range(len(docs))]  # e.g. a backup of the stored copies
+    for doc, copy in zip(docs, copies, strict=True):
+        copy.write_bytes(Path(doc["path"]).read_bytes())
+    (again,) = recon.ingest_files(ledger, copies, password_lookup=lambda co: "synthetic")
     assert again["status"] == "duplicate" and ledger.documents(kind="statement") == docs
     assert ledger.db.execute("SELECT COUNT(*) FROM statement_txs").fetchone()[0] == 2
+    # the copy also kept as a receipt, or the stored file no longer the copy: nothing is matched
+    ledger.add_document(recon.sha256(copies[0]), "NORD", "2026-10", "receipt", "/x/r.pdf", source="links:1")
+    assert recon.ingest_files(ledger, copies[:1], password_lookup=lambda co: "synthetic")[0]["status"] == "refused"
+    ledger.db.execute("DELETE FROM documents WHERE kind='receipt'")
+    ledger.db.commit()
+    Path(docs[0]["path"]).write_bytes(b"%PDF-1.4 changed")
+    assert recon.ingest_files(ledger, copies[:1], password_lookup=lambda co: "synthetic")[0]["status"] == "error"
 
 
 @pytest.mark.parametrize(

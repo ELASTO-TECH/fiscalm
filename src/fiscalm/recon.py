@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import secrets
@@ -28,6 +29,7 @@ from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import Ledger, finance_home
 from fiscalm.payments.orders import parse_payment_pdf
 from fiscalm.pdftext import pdf_text, sha256
+from fiscalm.storage import read_file
 
 MATCH_DAYS = 12
 
@@ -216,8 +218,13 @@ def ingest_statements(
                     failed.append(o)
                 else:
                     opened.extend(o)
-            for o in opened:  # a stored copy read again is the document it was stored for: a duplicate
-                o.digest = ledger.statement_of_copy(o.digest) or o.digest
+            for o in list(opened):  # a stored copy read again is the document it was stored for: a duplicate
+                copy = _stored_copy(ledger, o)
+                if isinstance(copy, dict):
+                    opened.remove(o)
+                    failed.append(copy)
+                elif copy:
+                    o.digest = copy
             groups: dict[tuple[str, str], list[_Opened]] = {}
             for o in opened:
                 groups.setdefault((o.company, o.month), []).append(o)
@@ -275,6 +282,19 @@ def _checked(groups: dict[tuple[str, str], list[_Opened]], check) -> list[statem
             continue
         out.append(st)
     return out
+
+
+def _stored_copy(ledger: Ledger, o: _Opened) -> str | dict | None:
+    """The statement document `o`'s bytes are the stored copy of, when they name no document of their own and that
+    document's stored file, read inside its firm's storage, still has exactly these bytes; a dict when it doesn't."""
+    sha = None if ledger.document(o.digest) else ledger.statement_of_copy(o.digest)
+    if sha is None:
+        return None
+    doc = ledger.document(sha)
+    data = read_file(doc["path"], [finance_home().resolve() / doc["company"]], 32 * 1024 * 1024)
+    if not data or hashlib.sha256(data[1]).hexdigest() != o.digest:
+        return _refused([o], "Cannot read a stored statement; restore the stored document and retry", "error")
+    return sha
 
 
 def _refused(parts: list[_Opened], error: str, status: str = "refused", **extra) -> dict:
