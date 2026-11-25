@@ -200,8 +200,11 @@ def printed_id(token: str, text: str) -> bool:
     prefix = r"(?:RO[ \t]*)?" if token.isdigit() else ""
     text = text.upper()
     for m in re.finditer(rf"(?<![A-Z0-9]){prefix}{body}(?![A-Z0-9]|[ \t]*\d)", text):
-        if not (m.group(0)[0].isdigit() and re.search(r"\d[ \t]*$", text[: m.start()])):
-            return True  # no digit runs into it, spaced or not
+        before = text[: m.start()]
+        foreign = re.search(r"(?<![A-Z])([A-Z]{2})[ \t]*$", before)  # DE 77777777 is DE77777777, never 77777777
+        runs_into = re.search(r"\d[ \t]*$", before) or (foreign and foreign[1] != "RO")
+        if not (m.group(0)[0].isdigit() and runs_into):
+            return True  # no digit or foreign prefix runs into it, spaced or not
     return False
 
 
