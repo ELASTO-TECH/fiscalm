@@ -105,6 +105,23 @@ def test_xlsx_sheets_with_one_header_read_as_one_table():
         with pytest.raises(ReportError):
             table(named.getvalue(), "xlsx")
 
+    def declared(*targets):  # a workbook declaring Sales and Refunds, with relationships for `targets` only
+        out, rid = io.BytesIO(), 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+        with zipfile.ZipFile(out, "w") as z:
+            sheet = f"<worksheet {NS}><sheetData>{{}}</sheetData></worksheet>"
+            for n in (1, 2):
+                z.writestr(f"xl/worksheets/sheet{n}.xml", sheet.format(cells(header, [f"T{n}", "1", "0"])))
+            sheets = '<sheet name="Sales" r:id="rId1"/><sheet name="Refunds" r:id="rId2"/>'
+            z.writestr("xl/workbook.xml", f"<workbook {NS} {rid}><sheets>{sheets}</sheets></workbook>")
+            links = "".join(f'<Relationship Id="rId{n}" Type="x/worksheet" Target="{t}"/>' for n, t in targets)
+            z.writestr("xl/_rels/workbook.xml.rels", rels.format(links))
+        return out.getvalue()
+
+    both = declared((1, "worksheets/sheet1.xml"), (2, "worksheets/sheet2.xml"))
+    assert [r[0] for r in table(both, "xlsx")] == ["Ref", "T1", "T2"]
+    with pytest.raises(ReportError):  # Refunds declared, its relationship gone
+        table(declared((1, "worksheets/sheet1.xml")), "xlsx")
+
 
 @pytest.mark.parametrize("data", [b"a,a\n1,2", b"a,b\n1", b"a,b\n1,2,3"])
 def test_bad_tables(data):
