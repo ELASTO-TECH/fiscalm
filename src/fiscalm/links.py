@@ -437,7 +437,7 @@ def receipt(L: Ledger, company: str, key: str, sha: str, by: str | None = None) 
 
     def build() -> dict:
         t, _ = _transaction(L, company, key)
-        item, amount = "receipt " + sha, t.orig_amount or t.amount
+        item, amount = "receipt " + sha, t.amount if t.orig_amount is None else t.orig_amount
         # the file itself, read under the same lock as the write: this firm's upload, with no data of its own yet
         mine = L.db.execute(
             "SELECT 1 FROM documents WHERE sha=? AND company=? AND kind='receipt' AND source LIKE 'upload:%' "

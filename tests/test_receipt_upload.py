@@ -935,6 +935,28 @@ def test_a_bon_already_uploaded_is_named_for_its_card_payment(ledger):
     assert not actions.act("tx-receipt", "NORD", body)["ok"]  # one debit, one bon
 
 
+def test_a_debit_with_no_original_amount_takes_no_bon(ledger):
+    t = statements.Tx(
+        date(2026, 10, 6),
+        "POS",
+        "Plata",
+        "debit",
+        Decimal("42.00"),
+        "RON",
+        "",
+        ref="Z",
+        card_last4="1234",
+        orig_amount=Decimal("0.00"),
+        orig_currency="EUR",
+    )
+    ledger.record_statement(statements.Statement("NORD", None, None, [statements.Account("x", "RON", [t])]))
+    key = statements.tx_key(t)
+    ledger.card_owner("NORD", "1234") or ledger.assign_card("NORD", key, "NORD")
+    (stored,) = intake.accept_member(ledger, intake.member("NORD", "u_member"), [("jpg", JPEG)])
+    assert not actions.act("tx-receipt", "NORD", {"tx": key, "id": stored["sha"]})["ok"]
+    assert ledger.document(stored["sha"])["amount"] is None and not ledger.linked_receipts("NORD")
+
+
 def test_two_connections_naming_one_bon_for_two_debits_have_one_winner(ledger):
     keys = [card_debit(ledger, n=n) for n in (1, 2)]
     (stored,) = intake.accept_member(ledger, intake.member("NORD", "u_member"), [("jpg", JPEG)])
