@@ -7,43 +7,31 @@ from ubl_fake import ubl
 
 from fiscalm import companies
 from fiscalm.api import state as api
-from fiscalm.bank import statements
+from fiscalm.bank import coverage, statements
 from fiscalm.invoicing import engine as i
 from fiscalm.mail import reminders as r
 
 TODAY = date(2026, 12, 7)
 
 
-def cover_accounts(st):
-    from fiscalm import companies
-    from fiscalm.bank import statements
-
-    st.period_start = date(2026, 10, 1)
-    txs = st.txs
-    st.accounts = [
-        statements.Account(iban, currency, txs if currency == "RON" else [])
-        for currency, iban in companies.get("NORD").ibans.items()
-    ]
+def cover(L, last=TODAY, first=date(2026, 10, 1)):
+    """A stored statement covering every NORD current account from `first` to `last` (bank.coverage)."""
+    L.db.execute("DELETE FROM documents WHERE kind='statement'")
+    L.db.commit()
+    L.add_document("coverage", "NORD", "2026-10", "statement", "NORD/2026-10/statement.pdf")
+    days = [first.isoformat(), last.isoformat(), True]
+    coverage.record(
+        L, "coverage", {companies.normalize_iban(a.iban): days for a in companies.get("NORD", L=L).current_accounts}
+    )
 
 
 @pytest.fixture
-def reminder(setup_invoice, home, monkeypatch, mail_account):
+def reminder(setup_invoice, home, mail_account):
     L, _ = setup_invoice
     iid = draft(setup_invoice)
     i.issue(L, iid, "2026-10-31", company="NORD", version=1)
     (home / "state" / "LIVE").touch()
-    from test_issued import _st
-
-    from fiscalm.bank import statements
-
-    st = _st()
-    cover_accounts(st)
-    st.period_end = TODAY
-    statement = home / "NORD" / "2026-10" / "statement.pdf"
-    statement.parent.mkdir(parents=True, exist_ok=True)
-    statement.write_bytes(b"%PDF-synthetic-" + iid.encode())
-    L.add_document("coverage", "NORD", "2026-10", "statement", str(statement))
-    monkeypatch.setattr(statements, "parse", lambda *args: st)
+    cover(L)
     return L, iid
 
 
@@ -73,11 +61,26 @@ def test_reminder_keeps_money_and_company_refusals(reminder, change):
         r.eligible(L, co, iid, today, rows=rows)
 
 
-def test_missing_or_stale_statement_refuses_text(reminder):
+# A person sends the text, so statements behind (monthly ones, mid-month) or missing warn on the card instead of
+# hiding the reminder; current ones (up to STATEMENT_MAX_AGE_DAYS behind) say nothing.
+@pytest.mark.parametrize(
+    "last, warning",
+    [
+        (TODAY, None),
+        (date(2026, 11, 30), None),
+        (date(2026, 10, 31), r.STALE.format(date="31.10.2026")),
+        (None, r.NO_STATEMENTS),
+    ],
+)
+def test_statements_behind_or_missing_warn_on_the_text(reminder, last, warning):
     L, iid = reminder
-    L.db.execute("DELETE FROM documents WHERE kind='statement'")
-    with pytest.raises(r.Refused, match=r.STATEMENTS):
-        r.eligible(L, "NORD", iid, TODAY)
+    if last:
+        cover(L, last)
+    else:
+        L.db.execute("DELETE FROM documents WHERE kind='statement'")
+        L.db.commit()
+    tasks = r.tasks(L, "NORD", TODAY, api._issued(L, "NORD", TODAY, True))
+    assert [(t["id"], t["warning"]) for t in tasks] == [(i.import_id("local", iid), warning)]
 
 
 @pytest.mark.parametrize("known", [False, True])
@@ -85,13 +88,10 @@ def test_reminder_bank_reads_do_not_scale_with_invoices(reminder, monkeypatch, k
     L, iid = reminder
     invoice = i.invoice(L, iid, company="NORD")
     st = _st(_credit("121.00", TODAY, counterparty=invoice["data"]["client"]["name"]))
-    cover_accounts(st)
-    st.period_end = TODAY
     L.record_statement(st)
     if known:
         L.db.execute("UPDATE issued SET collected_from_iban=? WHERE company='NORD'", (st.txs[0].counterparty_iban,))
         L.db.commit()
-    monkeypatch.setattr(statements, "parse", lambda *args: st)
     rows = api._issued(L, "NORD", TODAY, True)
     counts = []
     for n in (10, 100):
@@ -104,7 +104,8 @@ def test_reminder_bank_reads_do_not_scale_with_invoices(reminder, monkeypatch, k
         finally:
             L.db.set_trace_callback(None)
         counts.append(len(queries))
-    assert counts[0] == counts[1] <= 4
+    accounts = len(companies.get("NORD", L=L).current_accounts)  # bank.coverage reads each account once
+    assert counts[0] == counts[1] <= 3 + accounts
 
 
 def _client_credit(L, iid, day=date(2026, 11, 10), **kw):
@@ -120,32 +121,20 @@ def _reserve(L, tx, what):
 
 
 # A repeat client's credit already settled to another invoice says nothing about this one; a conflict, a twin
-# whose copy explains nothing, a credit not on record yet or one without its details may still be this payment.
+# whose copy explains nothing or one without its details may still be this payment.
 @pytest.mark.parametrize(
     "case, reminded",
     [
         ("unexplained", False),
         ("explained", True),
         ("conflict", False),
-        ("not_recorded", False),
-        ("recorded_blank", False),  # on record without the payer the stored statement names
         ("no_details", False),
     ],
 )
 def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, case, reminded):
     L, iid = reminder
     credit = _client_credit(L, iid)
-    if case == "recorded_blank":
-        blank = _client_credit(L, iid, counterparty="", iban="", desc=credit.description)
-        assert statements.tx_key(blank) == statements.tx_key(credit)
-        L.record_statement(_st(blank))
-    if case in ("not_recorded", "recorded_blank"):  # the stored statement's lines are not (all) on record
-        st = _st(credit)
-        cover_accounts(st)
-        st.period_end = TODAY
-        monkeypatch.setattr(statements, "parse", lambda *args: st)
-    else:
-        L.record_statement(_st(credit))
+    L.record_statement(_st(credit))
     if case in ("explained", "conflict"):
         _reserve(L, credit, "issued other" if case == "explained" else "bank reference conflict")
     if case == "no_details":

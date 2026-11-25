@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from contextlib import suppress
 from datetime import date, timedelta
 from decimal import Decimal
 from functools import cached_property
-from pathlib import Path
 
 from fiscalm import companies, history_invoices, storage
-from fiscalm.bank import statements
+from fiscalm.bank import coverage, statements
 from fiscalm.efactura import inbox as efactura
 from fiscalm.identity import firm_id, tax_token
 from fiscalm.invoicing import engine as invoicing, issued
@@ -30,7 +28,10 @@ Dacă plata a fost efectuată, vă rugăm să ne transmiteți dovada plății.
 Vă mulțumim."""
 
 CLOSED = "Factura nu mai este eligibilă. Verifică încasarea și corecțiile."
-STATEMENTS = "Extrasele lipsesc, nu sunt actualizate sau nu pot fi verificate. Sunt necesare extrase recente care pot fi verificate."
+STATEMENTS = "Un credit din extras nu poate fi citit. Verifică extrasul înainte să pregătești textul de reamintire."
+# A person sends the text, so statements behind by more than STATEMENT_MAX_AGE_DAYS only warn on the card.
+STALE = "Extrasele de cont acoperă încasările doar până pe {date}. Verifică în bancă dacă clientul a plătit înainte să trimiți textul."
+NO_STATEMENTS = "Lipsesc extrasele de cont de la emiterea facturii. Verifică în bancă dacă clientul a plătit înainte să trimiți textul."
 CONFIG = "Configurarea reamintirilor nu este validă."
 SETTINGS_BAD = "Numărul de zile poate fi între 1 și 365."
 SETTINGS_SAVED = "Setările reamintirilor au fost salvate."
@@ -54,7 +55,7 @@ class Refused(ValueError):
 SETTINGS = ("after_days",)
 DEFAULTS = {"after_days": 7}
 LIMITS = {"after_days": 365}
-# A reminder needs a statement this recent: an older one could miss the payment that makes it wrong.
+# Statements this recent count as current: an older one could miss the payment that makes the text wrong.
 STATEMENT_MAX_AGE_DAYS = 7
 MAX_ZIP = 20 * 1024 * 1024  # a stored SPV message read back to prove ownership
 DAYS = (date(1900, 1, 1), date(9000, 1, 1))  # the invoice days a reminder works with
@@ -107,15 +108,15 @@ def policy(L: Ledger, co: str) -> tuple[int, int]:
 
 
 class StatementView:
-    """Request-local, lazy statement snapshot; no subprocesses under the write lock."""
+    """Request-local snapshot of what the ledger holds of the firm's bank: its credit lines and the days each current
+    account is covered (bank.coverage: statements, CSVs and the feed), each read once."""
 
     def __init__(self, L: Ledger, co: str, since: date | None = None):
-        """`since`: the earliest day any caller will ask credits from, so the account lines are read once."""
+        """`since`: the earliest day any caller will ask about, so the ledger is read once."""
         self.L, self.co, self.since = L, co, since
-        self.parsed: dict[str, statements.Statement] = {}
-        self.versions: dict[str, tuple] = {}
         self._policy: tuple[int, int] | None = None
-        self._lines: tuple[date, list, set] | None = None  # (since, credit lines, explained keys): read once
+        self._lines: tuple[date, list, set] | None = None  # (since, credit lines, explained keys)
+        self._gaps: tuple[date, date, list] | None = None  # (since, today, every account's uncovered days)
 
     def policy(self) -> tuple[int, int]:
         """The firm's policy, read once per request."""
@@ -137,25 +138,11 @@ class StatementView:
                 accounts.setdefault(row["collected_from_iban"], set()).add(cui)
         return accounts
 
-    def documents(self, since: date) -> list[dict]:
-        # Statements may span months; use parsed periods for coverage.
-        return [dict(d) for d in self.L.documents(company=self.co, kind="statement")]
-
-    def version(self, doc: dict) -> tuple:
-        path = Path(doc["path"])
-        root = finance_home().resolve() / self.co
-        if not path.resolve().is_relative_to(root):
-            raise Refused(STATEMENTS)
-        stat = path.stat()
-        return tuple(sorted(doc.items())), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
-
-    def credits(self, since: date, today: date, max_age: int) -> list[statements.Tx]:
-        """Every representation, from `since` to `today`, of a credit that may still be this firm's client paying,
-        once its statements cover every current account: the lines on record (statements, CSV and the bank feed
-        alike) and the lines of the stored statements just parsed, since copies of one payment may name its payer
-        differently. A payment is left out only when proved to be something else (`_explained`). A credit on record
-        without its details refuses: it could be the client's."""
-        self.coverage(since, today, max_age)
+    def credits(self, since: date, today: date) -> list[statements.Tx]:
+        """Every representation, from `since` to `today`, of a credit on record that may still be this firm's client
+        paying: statements, CSVs and the bank feed alike, since copies of one payment may name its payer differently.
+        A payment is left out only when proved to be something else (`_explained`). A credit on record without its
+        details refuses: it could be the client's."""
         self.load(since)
         explained = self._lines[2]
         out = []
@@ -165,12 +152,6 @@ class StatementView:
             if not r["tx"]:
                 raise Refused(STATEMENTS)
             out.append(statements.Tx.from_dict(json.loads(r["tx"])))
-        for st in self.parsed.values():
-            out += [
-                t
-                for t in st.settlement_txs
-                if t.direction == "credit" and since <= t.date <= today and statements.tx_key(t) not in explained
-            ]
         return out
 
     def load(self, since: date) -> None:
@@ -181,54 +162,16 @@ class StatementView:
             lines = self.L.credit_lines(self.co, lo.isoformat())
             self._lines = (start, lines, _explained(lines))
 
-    def coverage(self, since: date, today: date, max_age: int) -> None:
-        """Refuse (STATEMENTS) unless stored statements cover every current account from `since` to `max_age` days
-        before `today`."""
-        docs = self.documents(since)
-        # Every current account must be covered, not one per currency: a payment into any of them would be missed.
-        coverage: dict[str, list[tuple[date, date]]] = {
-            a.iban: [] for a in companies.get(self.co, L=self.L).current_accounts
-        }
-        try:
-            for doc in docs:
-                key = doc["sha"]
-                version = self.version(doc)
-                if key not in self.parsed:
-                    with Path(doc["path"]).open("rb") as stream:
-                        opened = Path(f"/proc/{os.getpid()}/fd/{stream.fileno()}")
-                        if not opened.resolve().is_relative_to(finance_home().resolve() / self.co):
-                            raise Refused(STATEMENTS)
-                        # Share the content cache with the rest of api/state, after checking the opened file.
-                        from fiscalm.api.state import _statement
-
-                        self.parsed[key] = _statement(opened, self.co)
-                    self.versions[key] = version
-                if self.versions[key] != version:
-                    raise Refused(STATEMENTS)
-                st = self.parsed[key]
-                if st.company != self.co or not st.accounts or any(not a.trustworthy for a in st.accounts):
-                    raise Refused(STATEMENTS)
-                if not st.period_start or not st.period_end or st.period_start > st.period_end:
-                    raise Refused(STATEMENTS)
-                for account in st.accounts:
-                    iban = re.sub(r"\s+", "", account.iban).upper()
-                    if iban in coverage:
-                        coverage[iban].append((st.period_start, st.period_end))
-        except (OSError, ValueError):
-            raise Refused(STATEMENTS) from None
-        if not coverage:
-            raise Refused(STATEMENTS)
-        until = max(since, today - timedelta(days=max_age))
-        for periods in coverage.values():
-            covered = since - timedelta(days=1)
-            for start, end in sorted(periods):
-                if start > covered + timedelta(days=1):
-                    break
-                covered = max(covered, end)
-                if covered >= until:
-                    break
-            if covered < until:
-                raise Refused(STATEMENTS)
+    def covered_until(self, since: date, today: date) -> date | None:
+        """The last day before which every current account is covered without a gap from `since`; None when they are
+        covered through `today`. A firm without a current account has nothing covered."""
+        if self._gaps is None or since < self._gaps[0] or today != self._gaps[1]:
+            start = min(since, self.since or since)
+            accounts = companies.get(self.co, L=self.L).current_accounts
+            holes = [g for a in accounts for g in coverage.gaps(self.L, self.co, a.iban, start, today)]
+            self._gaps = (start, today, holes if accounts else [(start, today)])
+        starts = [max(first, since) for first, last in self._gaps[2] if last >= since]
+        return min(starts) - timedelta(days=1) if starts else None
 
 
 def _explained(rows: list) -> set[str]:
@@ -360,10 +303,13 @@ def eligible(
             raise Refused(CLOSED)  # not proved this firm's to claim
     row = row | {"due_date": due_date}
     since = _lookback(row["issue_date"], due_date)
-    for tx in view.credits(since, today, max_age):
+    for tx in view.credits(since, today):
         if issued.credit_from_client(L, co, name, cui, tx, accounts=view.client_accounts):
             raise Refused(PARTIAL)
-    return row
+    until = view.covered_until(since, today)
+    stale = until is not None and (until < since or until < today - timedelta(days=max_age))
+    warning = (NO_STATEMENTS if until < since else STALE.format(date=ro(until))) if stale else None
+    return row | {"warning": warning}
 
 
 def tasks(L: Ledger, co: str, today: date, rows: list[dict], *, invoices: dict[str, dict] | None = None) -> list[dict]:
@@ -376,6 +322,7 @@ def tasks(L: Ledger, co: str, today: date, rows: list[dict], *, invoices: dict[s
     out, view = [], StatementView(L, co, since)
     if since:  # one read per firm with an open invoice, however many of them reach the credit check
         view.load(since)
+        view.covered_until(since, today)
     row_index: dict = {}
     for row in rows:
         for ident in (row["id"], row.get("local_id")):
@@ -398,6 +345,7 @@ def tasks(L: Ledger, co: str, today: date, rows: list[dict], *, invoices: dict[s
                 id=row["id"],
                 label=LABEL,
                 subject=SUBJECT.format(**fields),
+                warning=row["warning"],
                 body=BODY.format(**fields),
             )
         )

@@ -1099,8 +1099,8 @@ def recurring_rules(L, patch, today: date, data: dict) -> None:
 
 def client_reminders(L, patch, today: date, data: dict) -> None:
     """Two overdue invoices issued in fiscalm, each a Sarcină: one with a reminder ready to prepare, one whose last attempt
-    left no answer (pending, sequence 1). The statements here are fakes, so their coverage is taken as complete and without
-    a credit from the client; everything else is fiscalm's own eligibility check."""
+    left no answer (pending, sequence 1). The statements here are fakes without recorded coverage, so each card warns that
+    they are missing, and hold no credit from the client; everything else is fiscalm's own eligibility check."""
     from fiscalm.invoicing import engine as i
     from fiscalm.mail import reminders
 
@@ -1120,7 +1120,7 @@ def client_reminders(L, patch, today: date, data: dict) -> None:
             ),
         )
         i.issue(L, iid, issue.isoformat(), company="NORD", version=1)
-    patch(reminders.StatementView, "credits", lambda self, since, today, max_age, locked=False: [])
+    patch(reminders.StatementView, "credits", lambda self, since, today: [])
     reminders.eligible(L, "NORD", "local-reminded", today)
 
 

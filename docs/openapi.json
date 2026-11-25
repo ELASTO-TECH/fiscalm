@@ -14295,6 +14295,12 @@
                 },
                 "body": {
                   "type": "string"
+                },
+                "warning": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -14302,7 +14308,8 @@
                 "id",
                 "label",
                 "subject",
-                "body"
+                "body",
+                "warning"
               ]
             }
           },

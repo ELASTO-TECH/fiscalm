@@ -641,7 +641,8 @@ def schemas() -> dict:
                 }
             )
         ),
-        "reminder_tasks": array(obj(strings("kind", "id", "label", "subject", "body"))),
+        # warning: null, or why to check the bank before sending (statements behind or missing; engine words).
+        "reminder_tasks": array(obj({**strings("kind", "id", "label", "subject", "body"), **nullable("warning")})),
         "partner_tasks": array(
             obj(
                 {

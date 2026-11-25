@@ -149,6 +149,8 @@ export type Expense = {
 
 export type ReminderTask = {
   kind: "client_reminder"; id: string; label: string; subject: string; body: string;
+  /** Why to check the bank before sending: the statements are behind or missing (engine words); null when current. */
+  warning: string | null;
 };
 
 export type PartnerTask = {
