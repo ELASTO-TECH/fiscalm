@@ -229,14 +229,14 @@ def _open_statement(path: Path, out_dir: Path, kw: dict) -> _Opened | dict:
         return {"file": str(path), "status": "error", "errors": [str(e)]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "not_ours", "errors": [str(e)]}
-    except ValueError:  # a date that isn't one, in the printed period
-        return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement period"]}
+    except (ValueError, ArithmeticError):  # a printed date or amount that isn't one
+        return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement"]}
     try:
         st = statements.parse(out, company)
         if st.month and st.month != month:  # the month comes from what the bank printed, never from a file name
             raise statements.StatementError("Statement file name names another month than its period")
-    except ValueError:
-        return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement period"]}
+    except (ValueError, ArithmeticError):
+        return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement"]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "refused", "errors": [str(e)]}
     return _Opened(path, company, month, out, st, sha256(path))

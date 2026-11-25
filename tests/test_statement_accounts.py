@@ -311,9 +311,11 @@ def test_the_operator_imports_a_plain_bt_pdf_under_any_name_and_a_csv_is_refused
         raise AssertionError("a plain PDF needs no password")
 
     bad = bt_statement(tmp_path / "Extras.pdf", co.cui, ("31/02/2026", "31/03/2026"), accounts, password=None)
-    csv, damaged, pdf = recon.ingest_files(ledger, [wise, bad, plain], password_lookup=no_password)
+    amount = [(c, i, o, [(d, "X valoare tranzactie: 1.2.3 RON", a) for d, _, a in m]) for c, i, o, m in accounts]
+    worse = bt_statement(tmp_path / "Extras2.pdf", co.cui, ("01/10/2026", "31/10/2026"), amount, password=None)
+    csv, date_, amount_, pdf = recon.ingest_files(ledger, [wise, bad, worse, plain], password_lookup=no_password)
     assert (csv["status"], csv["errors"]) == ("refused", [recon._NOT_ACCOUNT_CSV])
-    assert damaged["status"] == "refused"  # an impossible date: that file alone
+    assert date_["status"] == amount_["status"] == "refused"  # an impossible date or amount: that file alone
     assert (pdf["status"], pdf["company"], pdf["month"]) == ("added", firm, "2026-10")
     assert not ledger.payments()  # never read as a payment order
 
