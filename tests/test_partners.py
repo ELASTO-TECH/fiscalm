@@ -709,13 +709,12 @@ def test_imported_private_invoices_never_merge_by_placeholder_or_name(ledger):
 
 
 @pytest.mark.parametrize("cui", ["0000000000000", ""])
-def test_private_credit_needs_human_evidence_not_placeholder_name_or_shared_iban(ledger, cui):
+def test_private_credit_collects_without_learning_a_shared_iban(ledger, cui):
     tx = _tx(1, counterparty="Persoană Exemplu", description="0000000000000 TEST-8801")
     scenario._issued(ledger, "8803", "NORD", "TEST-8801", "Persoană Exemplu", cui, date(2026, 10, 1), None, "100.00")
     st = statements.Statement("NORD", None, None, [statements.Account("x", "RON", [tx])])
-    assert issued.match_statement(ledger, st) == []
-    assert ledger.issued("8803")["status"] == "open"
-    # A possible payment still suppresses reminder text, even though it cannot settle automatically.
+    assert issued.match_statement(ledger, st) == ["8803"]  # maintainer decision, 2026-11-25
+    assert ledger.issued("8803")["collected_from_iban"] is None  # a private buyer's account proves no client later
     assert issued.credit_from_client(ledger, "NORD", "Persoană Exemplu", cui, tx) == "name"
     assert api.partner_id("NORD", cui, "Persoană Exemplu") == "NORD.n-persoana-exemplu"
 

@@ -277,6 +277,35 @@ def test_ambiguous_credit_settles_nothing(ledger, home, sec, monkeypatch):
     assert {r["status"] for r in issued.issued(ledger, "NORD")["rows"]} == {"neincasata"}
 
 
+@pytest.mark.parametrize(
+    "client,cui,counterparty,desc,how",
+    [
+        ("ION POPESCU", "", "POPESCU ION", "plata NRD 0010", "ref"),  # a private buyer, the invoice named
+        ("ION POPESCU", "", "ION POPESCU", "", "name"),  # a private buyer by name
+        ("BETA SOFTWARE SRL", "RO66666666", "BETA SOFTW", "servicii", "amount"),  # abbreviated, one of its amount
+        ("BETA SOFTWARE SRL", "RO66666666", "MAMA HOLDING SRL", "Plata factura NRD 0010", "ref"),  # someone else pays
+    ],
+)
+def test_a_credit_collects_the_one_invoice_it_fits(
+    ledger, home, sec, monkeypatch, client, cui, counterparty, desc, how
+):
+    _stored(ledger, monkeypatch, **{"7001": ubl(number="NRD 0010", total="350.00", client=client, client_cui=cui)})
+    _stored(ledger, monkeypatch, **{"7002": ubl(number="NRD 0011", total="1200.00", client="GAMMA SRL")})
+    t = _credit("350.00", date(2026, 10, 20), counterparty=counterparty, iban=OTHER_IBAN, desc=desc)
+    assert issued.match_statement(ledger, _st(t)) == ["7001"]
+    row = ledger.issued("7001")
+    assert f" {how} " in row["collected_note"] and row["collected_from_iban"] is None  # no client CUI shown
+
+
+def test_two_credits_of_one_amount_collect_nothing_by_amount(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"7001": ubl()})
+    a = _credit("1190.00", date(2026, 10, 20), counterparty="ALFA", iban=OTHER_IBAN, desc="x")
+    b = _credit("1190.00", date(2026, 10, 21), counterparty="OMEGA", iban=OTHER_IBAN, desc="y")
+    assert issued.match_statement(ledger, _st(a, b)) == []
+    assert issued.match_statement(ledger, _st(a, _credit("1190.00", date(2026, 10, 22)))) == ["7001"]  # the client's
+    assert "name" in ledger.issued("7001")["collected_note"]
+
+
 def test_cui_on_credit_and_then_the_learned_iban(ledger, home, sec, monkeypatch):
     _stored(
         ledger,
@@ -296,27 +325,25 @@ def test_cui_on_credit_and_then_the_learned_iban(ledger, home, sec, monkeypatch)
 
 
 def test_wrong_client_amount_debit_or_own_transfer_never_collects(ledger, home, sec, monkeypatch):
-    _stored(ledger, monkeypatch, **{"7001": ubl()})
-    other = _credit(
-        "1190.00",
-        date(2026, 10, 20),
-        counterparty="DELTA SOFTWARE SRL",
-        iban=OTHER_IBAN,
-        desc="Incasare;DELTA SOFTWARE SRL;" + OTHER_IBAN + ";",
+    _stored(
+        ledger,
+        monkeypatch,
+        **{"7001": ubl(), "7002": ubl(number="NRD 0043", client="GAMMA LABS SRL", client_cui="RO77777777")},
     )
-    partial_name = _credit(
-        "1190.00",
-        date(2026, 10, 20),
-        counterparty="BETA CONSTRUCT SRL",
-        iban=OTHER_IBAN,
-        desc="Incasare;BETA CONSTRUCT SRL;" + OTHER_IBAN + ";",
+    gamma = _credit(
+        "1190.00", date(2026, 10, 11), iban=OTHER_IBAN, desc="Incasare;GMLABS;CUI 77777777", counterparty="X"
     )
+    assert issued.match_statement(ledger, _st(gamma)) == ["7002"]  # OTHER_IBAN is now GAMMA's account
+    other = _credit("1190.00", date(2026, 10, 20), counterparty="DELTA SOFTWARE SRL", iban=OTHER_IBAN, desc="servicii")
+    card_refund = _credit("1190.00", date(2026, 10, 20), counterparty="SHOP", iban="", desc="RETUR POS")
+    card_refund.card_last4 = "4242"
     amount = _credit("1189.99", date(2026, 10, 20))
     early = _credit("1190.00", date(2026, 9, 1))
     debit = _credit("1190.00", date(2026, 10, 20))
     debit.direction = "debit"
     own = _credit("1190.00", date(2026, 10, 20), iban="RO71BTRLEURCRT0000000001")
-    assert issued.match_statement(ledger, _st(other, partial_name, amount, early, debit, own)) == []
+    for t in (other, card_refund, amount, early, debit, own):
+        assert issued.match_statement(ledger, _st(t)) == []
     assert ledger.issued("7001")["status"] == "open"
 
 
@@ -456,17 +483,12 @@ def test_shared_first_word_is_not_the_same_client(ledger, home, sec, monkeypatch
         iban=OTHER_IBAN,
         desc="Incasare;BETA TECHNOLOGIES SRL;" + OTHER_IBAN + ";servicii BETA SERVICES",
     )
-    assert issued.match_statement(ledger, _st(other)) == []
-    assert ledger.issued("7001")["status"] == "open"
-    # the exact name (legal forms aside) still collects
-    same = _credit(
-        "1190.00",
-        date(2026, 10, 21),
-        counterparty="S.C. BETA SERVICES S.R.L.",
-        iban=OTHER_IBAN,
-        desc="Incasare;S.C. BETA SERVICES S.R.L.;" + OTHER_IBAN + ";",
-    )
-    assert issued.match_statement(ledger, _st(same)) == ["7001"]
+    # not the client: it collects only as the one invoice of its amount, and its account is not learned
+    assert issued.match_statement(ledger, _st(other)) == ["7001"]
+    assert "amount" in ledger.issued("7001")["collected_note"] and not ledger.issued("7001")["collected_from_iban"]
+    # the exact name (legal forms aside) is the client
+    same = _credit("1190.00", date(2026, 10, 21), counterparty="S.C. BETA SERVICES S.R.L.", iban=OTHER_IBAN)
+    assert issued.credit_from_client(ledger, "NORD", "BETA SERVICES SRL", "RO77777777", same) == "name"
 
 
 def test_credit_naming_a_closed_short_number_settles_nothing(ledger, home, sec, monkeypatch):
@@ -671,7 +693,7 @@ def test_a_lone_initial_is_part_of_the_name_not_a_legal_form(ledger, home, sec, 
         iban=OTHER_IBAN,
         desc="Incasare;ALPHA L CONSULTING SRL;" + OTHER_IBAN + ";",
     )
-    assert issued.match_statement(ledger, _st(t)) == []
+    assert issued.credit_from_client(ledger, "NORD", "ALPHA R CONSULTING SRL", "", t) == ""
 
 
 @pytest.mark.parametrize("bad", ["²", "1" * 31, "٣", "0x1", "1e3"])
