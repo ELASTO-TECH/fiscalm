@@ -339,13 +339,13 @@ function PartnerBody({ s, p, initial, status, onClose }: { s: State; p: Partner;
             <RememberedList s={s} partner={p.id} first={pages.remembered!} />
           </section>
         ) : null}
-        {pages.report_formats!.total ? <PartnerHistory s={s} partner={p.id} collection="report_formats" first={pages.report_formats!} cls="card pad" heading={<h2>Formate de raport salvate</h2>}>
-          {(f) => <div key={f.signature} className="flex flex-wrap items-center justify-between gap-3 py-2">
+        {pages.report_formats!.total ? <Company s={s}><PartnerHistory s={s} partner={p.id} collection="report_formats" first={pages.report_formats!} cls="card pad" heading={<h2>Formate de raport salvate</h2>}>
+          {(f) => <div key={`${p.id}:${f.signature}`} className="flex flex-wrap items-center justify-between gap-3 py-2">
             <p className="m-0 min-w-0 flex-1 basis-56 wrap-anywhere">{Object.entries(f.mapping).map(([k, v]) => `${REPORT_FIELDS.find(([key]) => key === k)?.[1] ?? "Coloană"}: ${v}`).join(", ")}</p>
             <Act action="settlement-format-delete" body={{ partner: p.id, signature: f.signature }} label="Șterge formatul" cls="btn g"
               confirm={{ text: "Ștergi formatul? La următorul raport alegi din nou coloanele.", yes: "Șterge formatul", danger: true }} />
-            <FormatSenders partner={p.id} signature={f.signature} saved={f.senders} />
-          </div>}</PartnerHistory> : null}
+            <FormatSenders key={`${p.id}:${f.signature}:${f.senders.join(",")}`} partner={p.id} signature={f.signature} saved={f.senders} />
+          </div>}</PartnerHistory></Company> : null}
         {pages.transactions!.total ? (
           <section aria-labelledby="p-tx">
             <div className={sectionHeadingStyle}><h2 id="p-tx">Tranzacții asociate</h2></div>

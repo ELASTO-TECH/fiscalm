@@ -413,6 +413,7 @@ def accept_report(
     today: date | None = None,
     mailed_by: str = "",
     still_allowed=None,
+    day_from_file: bool = False,
 ) -> dict:
     """Store one uploaded settlement report for `company` and match it. Who sent it is always said by the request:
     `partner` selects an exact saved format; `description` defines a new one. Shared headers never select a partner."""
@@ -422,6 +423,8 @@ def accept_report(
     header = rows[0]
     sig = _signature(kind, delimiter, header)
     described = _choose(L, company, sig, rows, partner, description)
+    if day_from_file:  # read from the very description the lines are read with (checked again under the lock)
+        report_date = _file_day(described["mapping"], rows)
     when = _report_date(report_date, today)
     spec, lines = _report_spec(data, kind, delimiter, described, when, today)
     if mailed_by:
@@ -559,7 +562,7 @@ def set_senders(L: Ledger, company: str, partner: str, signature: str, senders: 
     """The exact addresses whose mailed reports in this format are imported for this payer (one per line, at most
     ten, none to stop). A person names them; a report's content never does."""
     addresses = list(dict.fromkeys(a.strip().lower() for a in senders.splitlines() if a.strip()))
-    if len(addresses) > 10 or not all(accountant.EMAIL.fullmatch(a) for a in addresses):
+    if len(addresses) > 10 or not all(len(a) <= 254 and accountant.EMAIL.fullmatch(a) for a in addresses):
         raise ValueError("Scrie cel mult zece adrese de e-mail, câte una pe rând.")
     with L.tx() as db:
         row = db.execute(
@@ -637,6 +640,7 @@ def _mailed_table(L: Ledger, attached, formats: list, address: str, firms, today
             today=today,
             mailed_by=address,
             still_allowed=still_allowed,
+            day_from_file=True,
         )["status"]
     except Refused:
         return "refused"
@@ -651,7 +655,11 @@ def _mailed_date(L: Ledger, company: str, partner: str, sig: str, rows: list[lis
     ).fetchone()
     if row is None:  # the format was deleted meanwhile: this table is refused, the mail's others still read
         return ""
-    column = json.loads(row["data"])["mapping"].get("date")
+    return _file_day(json.loads(row["data"])["mapping"], rows)
+
+
+def _file_day(mapping: dict, rows: list[list[str]]) -> str:
+    column = mapping.get("date")
     if column in rows[0]:
         n = rows[0].index(column)
         days = [day(r[n]) if len(r) > n else None for r in rows[1:]]

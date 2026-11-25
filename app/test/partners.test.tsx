@@ -216,3 +216,18 @@ it("names the addresses whose mailed reports in a saved format are imported, pos
   await waitFor(() => expect(api.posts()).toHaveLength(1));
   expect(api.posts()[0].body).toEqual({ co: "NORD", partner: p.id, signature: "f".repeat(64), senders: "rapoarte@curier.example" });
 });
+
+it("under Toate firmele the saved format's actions post the partner's own firm, each partner its own senders", async () => {
+  const full = fixtureAll(), [a, b] = full.parts.find((x) => x.co === "NORD")!.partners;
+  const format = { signature: "f".repeat(64), source: "fan", mapping: { reference: "Factura", gross: "Ramburs", fee: "Comision" }, courier: "" };
+  a.report_formats = [{ ...format, senders: ["a@curier.example"] }];
+  b.report_formats = [{ ...format, senders: [] }];
+  at(`?co=ALL&tab=parteneri&p=${encodeURIComponent(a.id)}`);
+  const api = renderApp({ partnerPages: (url) => json(partnerResult(full, Object.fromEntries(new URL(url, "http://local").searchParams))) });
+  await userEvent.click(await screen.findByText("Rapoarte primite pe mail (1)"));
+  expect(screen.getByLabelText("Adresele de la care vine raportul")).toHaveValue("a@curier.example");
+  await userEvent.type(screen.getByLabelText("Adresele de la care vine raportul"), "\nb@curier.example");
+  await userEvent.click(screen.getByRole("button", { name: "Salvează adresele" }));
+  await waitFor(() => expect(api.posts()).toHaveLength(1));
+  expect(api.posts()[0].body).toEqual({ co: "NORD", partner: a.id, signature: "f".repeat(64), senders: "a@curier.example\nb@curier.example" });
+});

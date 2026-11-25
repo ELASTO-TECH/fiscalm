@@ -760,16 +760,16 @@ def test_a_sender_naming_two_payers_imports_nothing_and_invoices_still_read(ledg
 def test_mailed_payer_is_decided_again_under_the_write_lock(ledger, mail_account, monkeypatch):
     """The sender named on a second payer while a mail is read: the report is not filed under the first one. A request
     naming a saved payer and a new description together is refused (it could write back an old sender list)."""
-    header = b"Factura;Ramburs;Comision\n"
+    header = b"Factura;Ramburs;Comision;Data plata\n"
     for name in ("Synthetic Processor SRL", "Other Processor SRL"):
         described = NETOPIA | dict(name=name, mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
-        data = header + name.encode()[:5] + b";100,00;2,00\n"
+        data = header + name.encode()[:5] + b";100,00;2,00;10.10.2026\n"
         bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
     (first, sig), (second, _) = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchall()
     bank_upload.set_senders(ledger, "NORD", first, sig, "rapoarte@curier.example")
     with pytest.raises(bank_upload.Refused):
         bank_upload.accept_report(
-            ledger, "NORD", header + b"T;1,00;0\n", "text/csv", partner=first, description=NETOPIA
+            ledger, "NORD", header + b"T;1,00;0;10.10.2026\n", "text/csv", partner=first, description=NETOPIA
         )
     original = bank_upload._report_spec
 
@@ -782,10 +782,9 @@ def test_mailed_payer_is_decided_again_under_the_write_lock(ledger, mail_account
         return original(*args)
 
     monkeypatch.setattr(bank_upload, "_report_spec", named_twice_meanwhile)
-    monkeypatch.setattr(bank_upload, "_mailed_date", lambda *args: UPLOAD["report_date"])
     mail = EmailMessage()
     mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<twice>"
-    mail.add_attachment(header + b"TEST-7;100,00;2,00\n", "text", "csv", filename="r.csv")
+    mail.add_attachment(header + b"TEST-7;100,00;2,00;10.10.2026\n", "text", "csv", filename="r.csv")
     msg = imap.parse(mail_account["id"], bytes(mail), date.today())
     assert settlement_from_mail(ledger, msg) == "settlement:refused:1"
 
@@ -827,15 +826,16 @@ def test_an_unreadable_workbook_never_stops_the_mails_invoices(ledger, mail_acco
 def test_mailed_report_read_with_a_changed_format_or_a_busy_ledger(ledger, mail_account, monkeypatch):
     """Columns corrected while a mail is read: nothing is stored with the old reading. A ledger that can't write
     raises, so the mail is read again later instead of being counted as an unreadable table."""
-    header = b"Factura;Ramburs;Comision;Ref\n"
+    header = b"Factura;Ramburs;Comision;Ref;Data plata\n"
     described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
-    bank_upload.accept_report(ledger, "NORD", header + b"T;1,00;0;R\n", "text/csv", description=described, **UPLOAD)
+    bank_upload.accept_report(
+        ledger, "NORD", header + b"T;1,00;0;R;10.10.2026\n", "text/csv", description=described, **UPLOAD
+    )
     partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
     bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
-    monkeypatch.setattr(bank_upload, "_mailed_date", lambda *args: UPLOAD["report_date"])
     mail = EmailMessage()
     mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<changed>"
-    mail.add_attachment(header + b"TEST-1;100,00;2,00;TEST-2\n", "text", "csv", filename="r.csv")
+    mail.add_attachment(header + b"TEST-1;100,00;2,00;TEST-2;10.10.2026\n", "text", "csv", filename="r.csv")
     msg = imap.parse(mail_account["id"], bytes(mail), date.today())
     original = bank_upload._report_spec
 
@@ -860,3 +860,31 @@ def test_mailed_report_read_with_a_changed_format_or_a_busy_ledger(ledger, mail_
     monkeypatch.setattr(bank_upload.settlements, "import_payouts", busy)
     with pytest.raises(sqlite3.OperationalError):
         settlement_from_mail(ledger, msg)
+
+
+def test_mailed_day_comes_from_the_format_the_lines_are_read_with(ledger, mail_account, monkeypatch):
+    """The payout-day column removed while a mail is read: no day is taken from the reading before; with two date
+    columns and none mapped the file names no day, so nothing is stored."""
+    header = b"Factura;Ramburs;Comision;Data plata;Data decont\n"
+    mapping = dict(reference="Factura", gross="Ramburs", fee="Comision", date="Data plata")
+    described = NETOPIA | dict(mapping=mapping)
+    first = header + b"T;1,00;0;10.10.2026;09.10.2026\n"
+    bank_upload.accept_report(ledger, "NORD", first, "text/csv", description=described, **UPLOAD)
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    original = bank_upload._choose
+
+    def changed_meanwhile(*args):
+        with ledger.tx() as db:
+            data = json.loads(db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])
+            del data["mapping"]["date"]
+            db.execute("UPDATE partner_settlement_formats SET data=?", (json.dumps(data),))
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_choose", changed_meanwhile)
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<day>"
+    mail.add_attachment(header + b"TEST-1;100,00;2,00;10.10.2026;09.10.2026\n", "text", "csv", filename="r.csv")
+    msg = imap.parse(mail_account["id"], bytes(mail), date.today())
+    assert settlement_from_mail(ledger, msg) == "settlement:refused:1"
+    assert len(settlements.state(ledger, "NORD")) == 1

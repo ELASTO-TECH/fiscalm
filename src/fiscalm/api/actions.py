@@ -391,6 +391,8 @@ def _settlement_format_delete(L: Ledger, co: str, args: dict, ctx: Context) -> d
 
 
 def _settlement_format_senders(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    if set(args) != {"co", "partner", "signature", "senders"}:
+        return _res(False, BAD)  # a missing list never clears the senders by accident
     try:
         with L.tx():
             ctx.authorize()
