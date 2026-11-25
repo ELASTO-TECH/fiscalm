@@ -591,7 +591,8 @@ of one account: pass all of a month's files to one `fiscalm ingest FILE...`, or 
 whole calendar month, every account the firm held at BT that month, each day once, no gap, balances chaining from
 file to file) and stored together, or none is stored. A BT PDF is recognised by "allmerge" in its name,
 by its password, or by its text (an unprotected BT statement under any name, whose header CUI names the firm; no
-password is read for it). `fiscalm ingest` refuses a CSV on its own: it is uploaded on its account. A BT account's
+password is read for it). `fiscalm ingest` refuses a CSV on its own: it is uploaded on its account. A stored statement copy passed to `fiscalm ingest` again
+(after a parser fix) is its own document: `duplicate`, its lines recorded and matched again, nothing new stored. A BT account's
 month may start after the 1st, as older statements print it, only when no day with movements is left out: the days
 before are no banking day (weekends and Romanian legal holidays, Orthodox Easter included, `bank.banking_days`), or
 the account opened on that day (`fiscalm company opened --month YYYY-MM-DD`; a month alone is not enough) at a zero

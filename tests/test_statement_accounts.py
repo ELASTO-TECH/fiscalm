@@ -592,6 +592,61 @@ def test_a_final_balance_after_a_page_break_still_proves_the_month(ledger, tmp_p
     assert lines == (4 if trusted else 0)
 
 
+@pytest.mark.parametrize("shape", ["one file", "a month set"])
+def test_a_stored_copy_ingested_again_is_its_own_duplicate(ledger, tmp_path, shape):
+    """An encrypted PDF is stored decrypted, under the digest of what arrived: the stored copy read again (after a
+    parser fix) is that document, so its lines are recorded again and nothing new is stored."""
+    nord = companies.get("NORD")
+    if shape == "one file":
+        sections = [
+            (c, i, Decimal("100.00"), [("05/10/2026", f"S-{c}", Decimal("10.00"))]) for c, i in nord.ibans.items()
+        ]
+        files = [bt_statement(tmp_path / "oct.pdf", nord.cui, ("01/10/2026", "31/10/2026"), sections)]
+    else:
+        files = bt_files(tmp_path)
+    assert recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")[0]["status"] == "added"
+    docs = ledger.documents(kind="statement")
+    ledger.db.execute("DELETE FROM statement_txs")  # as a parser that read no line left them
+    ledger.db.commit()
+    copies = [tmp_path / f"copy-{n}.pdf" for n in range(len(docs))]  # e.g. a backup of the stored copies
+    for doc, copy in zip(docs, copies, strict=True):
+        copy.write_bytes(Path(doc["path"]).read_bytes())
+    (again,) = recon.ingest_files(ledger, copies, password_lookup=lambda co: "synthetic")
+    assert again["status"] == "duplicate" and ledger.documents(kind="statement") == docs
+    assert ledger.db.execute("SELECT COUNT(*) FROM statement_txs").fetchone()[0] == 2
+    # the copy also kept as a receipt, or the stored file no longer the copy: nothing is matched
+    ledger.add_document(recon.sha256(copies[0]), "NORD", "2026-10", "receipt", "/x/r.pdf", source="links:1")
+    assert recon.ingest_files(ledger, copies[:1], password_lookup=lambda co: "synthetic")[0]["status"] == "refused"
+    ledger.db.execute("DELETE FROM documents WHERE kind='receipt'")
+    ledger.db.commit()
+    Path(docs[0]["path"]).write_bytes(b"%PDF-1.4 changed")
+    assert recon.ingest_files(ledger, copies[:1], password_lookup=lambda co: "synthetic")[0]["status"] == "error"
+
+
+def test_a_stored_copy_is_read_once_under_the_imports_own_home(ledger, tmp_path, monkeypatch):
+    """Review: the copy is identified by the bytes that were parsed, not by the file read again later; and an import
+    into another data directory finds its stored copies there."""
+    home, (ron, eur) = tmp_path / "home", bt_files(tmp_path)
+    assert recon.ingest_files(ledger, [ron, eur], home, lambda co: "synthetic")[0]["status"] == "added"
+    copies = []
+    for n, doc in enumerate(ledger.documents(kind="statement")):
+        copies.append(tmp_path / f"copy-{n}.pdf")
+        copies[-1].write_bytes(Path(doc["path"]).read_bytes())
+    decrypt = statements.decrypt_to
+
+    def then_swapped(path, *a, **kw):  # the source replaced right after it was read
+        out = decrypt(path, *a, **kw)
+        next(c for c in copies if c.name == Path(path).name).write_bytes(b"%PDF-1.4 another file")
+        return out
+
+    monkeypatch.setattr(statements, "decrypt_to", then_swapped)
+    assert recon.ingest_files(ledger, copies, home, lambda co: "synthetic")[0]["status"] == "duplicate"
+    linked = tmp_path / "linked.pdf"  # a source that became a symlink after it was routed: never followed
+    linked.symlink_to(Path(ledger.documents(kind="statement")[0]["path"]))
+    (result,) = recon.ingest_statements(ledger, [linked], home, lambda co: "synthetic")
+    assert result["status"] == "error" and not ledger.used_txs()
+
+
 @pytest.mark.parametrize(
     "case,refusal",
     [
