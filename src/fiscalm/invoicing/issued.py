@@ -523,7 +523,8 @@ def _sets(mine: list, names: set[str], kind: str) -> list[tuple]:
     that is closed, unknown or another client's: none for sure), else every 2 to BATCH_MAX of them, and all."""
     if names:
         named = tuple(c for c in mine if c[0]["message_id"] in names)
-        return [named] if kind == "series" and len(named) == len(names) else []
+        written = {_series_number(c[0]["number"]) for c in named}  # 'NRD-050' and 'NRD-0050' read the same
+        return [named] if kind == "series" and len(named) == len(names) == len(written) else []
     sets = [c for k in range(2, min(BATCH_MAX, len(mine)) + 1) for c in combinations(mine, k)]
     return sets + ([tuple(mine)] if len(mine) > BATCH_MAX else [])
 
@@ -535,16 +536,29 @@ def _full_tax_id(r) -> str:
     return (full[2:] if re.fullmatch(r"RO\d+", full) else full) or tax_token(r["client_cui"]) or ""
 
 
+_COUNTRIES = frozenset(
+    {"AT", "BE", "BG", "CH", "CY", "CZ", "DE", "DK", "EE", "EL", "ES", "FI", "FR", "GB", "HR"}
+    | {"HU", "IE", "IT", "LT", "LU", "LV", "MT", "NL", "NO", "PL", "PT", "SE", "SI", "SK", "XI"}
+)  # VAT prefixes that make the digits after them another country's id, never a Romanian CUI
+
+
 def _bare_cui_on(cui: str, text: str) -> bool:
-    """A Romanian CUI written alone or as RO<cui>, never inside another country's VAT id ('DE<cui>')."""
-    return len(cui) >= 6 and re.search(rf"(?<![A-Z0-9])(?:RO)?{cui}(?!\d)", text.upper()) is not None
+    """A Romanian CUI written alone or as RO<cui>, never another country's VAT id ('DE<cui>', 'DE <cui>')."""
+    found = re.finditer(rf"(?<![A-Z0-9])(?:([A-Z]{{2}}) ?)?{cui}(?!\d)", text.upper()) if len(cui) >= 6 else ()
+    return any(m[1] not in _COUNTRIES for m in found)
+
+
+def _series_number(number: str | None) -> tuple | str:
+    m = _SERIES_NUMBER.fullmatch(_norm(number))
+    return (m[1].replace(" ", ""), int(m[2])) if m else _norm(number)
 
 
 def _client_key(r) -> str:
     """The client an invoice is for: its firm's full tax id, or a private buyer's name and personal id if any."""
     token = tax_token(r["client_cui"]) or ""
     if not firm_id(token):
-        personal = "" if re.fullmatch(r"0*", token) else f"|{token}"
+        # a private buyer without a personal id may share a name with another: each invoice stands alone
+        personal = f"|invoice:{r['message_id']}" if re.fullmatch(r"0*", token) else f"|{token}"
         return "name:" + " ".join(efactura.firm_core(r["client_name"])) + personal
     return "tax:" + _full_tax_id(r)
 
@@ -630,7 +644,7 @@ class _Pool:
                 # the account, and also the words: a known account never hides another client named on the line
                 if credit_from_client(self.L, self.company, name, cui, t, accounts=self.accounts) == "iban"
                 or same_firm(name, t.counterparty)
-                or (full in text if not full.isdigit() else _bare_cui_on(full, said))
+                or (bool(full) and (full in text if not full.isdigit() else _bare_cui_on(full, said)))
             }
         return self._who[id(t)]
 
