@@ -412,6 +412,7 @@ def _owed(*totals):
         (("400.00", "600.00", "300.00", "700.00"), "0050 0051", []),  # digits alone pick no set
         (("100.00",) * 6 + ("400.00",), "plata", ["7001", "7002", "7003", "7004", "7005", "7006", "7007"]),  # all
         (("1000.00", "400.00", "600.00"), "plata", ["7001"]),  # one invoice of the amount comes first
+        (("400.00", "600.00"), "Plata factura NRD 0099", []),  # it pays an invoice the firm doesn't have yet
     ],
 )
 def test_one_credit_collects_the_one_exact_set_of_its_clients_invoices(
@@ -431,6 +432,39 @@ def test_a_set_needs_its_client_and_one_credit(ledger, home, sec, monkeypatch):
     assert issued.match_statement(ledger, _st(anonymous)) == []
     twins = [_credit("1000.00", date(2026, 10, d)) for d in (20, 21)]  # both would pay the same pair: neither does
     assert issued.match_statement(ledger, _st(*twins)) == []
+
+
+def _gamma(mid, number, total):
+    return {mid: ubl(number=number, total=total, client="GAMMA LABS SRL", client_cui="RO77777777", issue="2026-10-11")}
+
+
+@pytest.mark.parametrize("case", ["two firms one name", "a cash mark", "an ambiguous rival", "one account two clients"])
+def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec, monkeypatch, case):
+    def c(amount, desc="x", **kw):
+        return _credit(amount, date(2026, 10, 20), desc=desc, **kw)
+
+    if case == "two firms one name":
+        _stored(
+            ledger,
+            monkeypatch,
+            **_owed("400.00") | {"7002": ubl(number="NRD 0051", total="600.00", client_cui="RO77777777")},
+        )
+        credits = [c("1000.00")]
+    elif case == "a cash mark":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+        assert issued.mark_collected(ledger, "7001", "cash")
+        credits = [c("1000.00")]
+    elif case == "an ambiguous rival":  # 110 is 40+70 or 60+50: both reach the pair the 100 names
+        _stored(ledger, monkeypatch, **_owed("40.00", "60.00", "50.00", "70.00"))
+        credits = [c("100.00", "NRD 0050 NRD 0051"), c("110.00")]
+    else:
+        _stored(
+            ledger,
+            monkeypatch,
+            **_owed("400.00", "600.00") | _gamma("7003", "NRD 0060", "300.00") | _gamma("7004", "NRD 0061", "700.00"),
+        )
+        credits = [c("1000.00", iban=OTHER_IBAN), c("1000.00", "y", counterparty="GAMMA LABS SRL", iban=OTHER_IBAN)]
+    assert issued.match_statement(ledger, _st(*credits)) == []
 
 
 def test_a_set_is_collected_whole_or_not_at_all(ledger, home, sec, monkeypatch):

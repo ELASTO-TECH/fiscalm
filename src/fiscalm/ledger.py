@@ -2309,12 +2309,14 @@ class Ledger:
                     return False
                 if not all(self._card_proof("issued", m, tx) for m in mids):
                     return False
+                states = "('open','marked')" if len(mids) == 1 else "('open')"  # a set confirms no one's mark
                 if not self._reserve(db, tx, "issued " + " ".join(mids)):
                     return False
                 for m in mids:
                     if not db.execute(
                         "UPDATE issued SET status='collected', collected_at=?, collected_note=?, collected_tx=?, "
-                        "collected_from_iban=?, collected_into_iban=? WHERE message_id=? AND status IN ('open','marked') "
+                        "collected_from_iban=?, collected_into_iban=? WHERE message_id=? "
+                        f"AND status IN {states} "
                         f"AND parse_error IS NULL AND {unlinked('issued')}",
                         (now(), note, tx, from_iban or None, into_iban or None, m),
                     ).rowcount:
