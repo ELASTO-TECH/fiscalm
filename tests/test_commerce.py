@@ -158,6 +158,20 @@ def test_shop_never_overwrites_saved_client(shop):
     assert L.db.execute("SELECT data FROM invoice_clients WHERE id=?", (cid,)).fetchone()[0] == before
 
 
+@pytest.mark.parametrize(
+    "saved,typed,same",
+    [
+        ("Firma Fictivă SRL", "S.C. FIRMA FICTIVA S.R.L.", True),
+        ("Spa SRL", "spa s.r.l.", True),
+        ("Atelier Spa Design SRL", "Atelier Design SRL", False),
+        ("...", "!!!", False),
+    ],
+)
+def test_same_firm_names(saved, typed, same):
+    assert c.same_firm(dict(name=saved), dict(name=typed)) is same
+    assert not c.same_firm(dict(name=saved), dict(name=saved, private=True))
+
+
 @pytest.mark.parametrize("name", ["S.C. FIRMA FICTIVA S.R.L.", "firma fictivă"])
 def test_returning_firm_accepts_address_and_email_drift(shop, name):
     L, body = shop

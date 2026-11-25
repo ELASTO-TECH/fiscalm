@@ -99,10 +99,20 @@ LEGAL_FORMS = frozenset(
 )
 
 
-def same_firm(saved: str, typed: str) -> bool:
-    """One firm under the same tax id: case, accents, punctuation and the legal form don't count, the words do."""
-    words = [[w for w in firm_name(n).split("-") if w not in LEGAL_FORMS] for n in (saved, typed)]
-    return bool(words[0]) and words[0] == words[1]
+def _name_words(name: str) -> list[str]:
+    words = [w for w in firm_name(name).split("-") if w]
+    while len(words) > 1 and words[-1] in LEGAL_FORMS:  # only a trailing legal form; 'Spa Design SRL' keeps 'spa'
+        words.pop()
+    return words
+
+
+def same_firm(saved: dict, buyer: dict) -> bool:
+    """A company buyer is the saved company under its tax id when the names agree: case, accents, punctuation and
+    a trailing legal form don't count, the words do. A person or a saved private client never matches this way."""
+    if buyer.get("private") or saved.get("private"):
+        return False
+    words = _name_words(saved["name"])
+    return bool(words) and words == _name_words(buyer["name"])
 
 
 def channel(L: Ledger, co: str, iid: str) -> integrations.Instance:
@@ -214,7 +224,7 @@ def _intake(
         if matches:
             if len(matches) != 1:
                 fail(409, "client_conflict", "Resolve duplicate saved client identities first.")
-            if not same_firm(json.loads(matches[0]["data"])["name"], normalized["name"]):
+            if not same_firm(json.loads(matches[0]["data"]), normalized):
                 fail(
                     409,
                     "client_conflict",
