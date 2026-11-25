@@ -2613,6 +2613,15 @@ class Ledger:
     def document(self, sha: str):
         return self.db.execute("SELECT * FROM documents WHERE sha=?", (sha,)).fetchone()
 
+    def statement_of_copy(self, digest: str) -> str | None:
+        """The statement document whose stored copy (a PDF's decrypted copy) has these bytes, when exactly one has."""
+        rows = self.db.execute(
+            "SELECT d.sha FROM meta m JOIN documents d ON m.key='statement_stored_sha:'||d.sha "
+            "WHERE m.value=? AND d.kind='statement'",
+            (digest,),
+        ).fetchall()
+        return rows[0]["sha"] if len(rows) == 1 else None
+
     def add_document(self, sha: str, company: str, month: str, kind: str, path: str, **kw) -> bool:
         issues = json.dumps(kw.pop("issues", []) or [])
         with self.tx(immediate=True) as db:

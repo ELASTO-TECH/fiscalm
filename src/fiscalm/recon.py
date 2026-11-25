@@ -216,6 +216,8 @@ def ingest_statements(
                     failed.append(o)
                 else:
                     opened.extend(o)
+            for o in opened:  # a stored copy read again is the document it was stored for: a duplicate
+                o.digest = ledger.statement_of_copy(o.digest) or o.digest
             groups: dict[tuple[str, str], list[_Opened]] = {}
             for o in opened:
                 groups.setdefault((o.company, o.month), []).append(o)

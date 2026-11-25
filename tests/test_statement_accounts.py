@@ -592,6 +592,27 @@ def test_a_final_balance_after_a_page_break_still_proves_the_month(ledger, tmp_p
     assert lines == (4 if trusted else 0)
 
 
+@pytest.mark.parametrize("shape", ["one file", "a month set"])
+def test_a_stored_copy_ingested_again_is_its_own_duplicate(ledger, tmp_path, shape):
+    """An encrypted PDF is stored decrypted, under the digest of what arrived: the stored copy read again (after a
+    parser fix) is that document, so its lines are recorded again and nothing new is stored."""
+    nord = companies.get("NORD")
+    if shape == "one file":
+        sections = [
+            (c, i, Decimal("100.00"), [("05/10/2026", f"S-{c}", Decimal("10.00"))]) for c, i in nord.ibans.items()
+        ]
+        files = [bt_statement(tmp_path / "oct.pdf", nord.cui, ("01/10/2026", "31/10/2026"), sections)]
+    else:
+        files = bt_files(tmp_path)
+    assert recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")[0]["status"] == "added"
+    docs = ledger.documents(kind="statement")
+    ledger.db.execute("DELETE FROM statement_txs")  # as a parser that read no line left them
+    ledger.db.commit()
+    (again,) = recon.ingest_files(ledger, [Path(d["path"]) for d in docs], password_lookup=lambda co: "synthetic")
+    assert again["status"] == "duplicate" and ledger.documents(kind="statement") == docs
+    assert ledger.db.execute("SELECT COUNT(*) FROM statement_txs").fetchone()[0] == 2
+
+
 @pytest.mark.parametrize(
     "case,refusal",
     [
