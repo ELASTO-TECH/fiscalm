@@ -1956,7 +1956,7 @@ def payment_file_detail(L: Ledger, file_id: int) -> dict | None:
     open_ = summary["status"] == "open"
     path = pay.named_path(file)
     missing = bool(file["path"]) and not path.exists() and open_
-    questions = _named_file_questions(summary, file_id, rows, downloads, missing, open_, path)
+    questions = _named_file_questions(summary, rows, missing, path)
     payments = _named_file_payments(L, co, rows, downloads, downloaded, invoices, proofs, file, missing)
     active = [r for r in rows if r["status"] in ("pending", "exported")]
     _, waiting = pay.statement_waits(L, co, active, clock().date())
@@ -1974,7 +1974,7 @@ def payment_file_detail(L: Ledger, file_id: int) -> dict | None:
     }
 
 
-def _named_file_questions(summary, file_id, rows, downloads, missing, open_, path) -> list[dict]:
+def _named_file_questions(summary, rows, missing, path) -> list[dict]:
     questions = []
     if missing:
         questions.append(
@@ -1982,23 +1982,6 @@ def _named_file_questions(summary, file_id, rows, downloads, missing, open_, pat
                 "kind": "missing",
                 "count": len(rows),
                 "version": pay.version(r["item_id"] for r in rows if r["status"] in ("pending", "exported")),
-            }
-        )
-    if open_ and summary["question"] == "downloads":
-        amounts = {r["item_id"]: Decimal(r["amount"]) for r in rows}
-        questions.append(
-            {
-                "kind": "downloads",
-                "versions": [
-                    {
-                        "id": d["id"],
-                        "version": d["version"],
-                        "at": d["created_at"],
-                        "count": len(d["items"]),
-                        "total": f"{sum((amounts.get(i, Decimal(0)) for i in d['items']), Decimal(0)):.2f}",
-                    }
-                    for d in downloads
-                ],
             }
         )
     if summary["question"] == "orphan":

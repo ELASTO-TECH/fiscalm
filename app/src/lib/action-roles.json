@@ -26,7 +26,6 @@
   "order-discard": "member",
   "emag-refund": "member",
   "emag-resolve": "member",
-  "payment_file_not_imported": "member",
   "payment_file_restore": "member",
   "payment_file_missing_import": "member",
   "payment_file_create": "member",

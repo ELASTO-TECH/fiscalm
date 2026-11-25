@@ -266,21 +266,23 @@ def test_two_connections_import_only_once(ledger, live):
     assert not ledger.get_meta(f"payment_import:{ident}")
 
 
-def test_question_raised_by_another_connection_blocks_edits_until_answered(ledger, world):
-    ident = pay.add_invoices(ledger, "NORD", ["101"], name="Question", approve_invoice=efactura.approve)
-    pay.download_file(ledger, ident, "NORD", D0, lambda: None)
+def test_a_file_downloaded_twice_stays_editable_and_imports_its_latest_download(ledger, world):
+    ident = pay.add_invoices(ledger, "NORD", ["101"], name="Twice", approve_invoice=efactura.approve)
+    first = pay.download_file(ledger, ident, "NORD", D0, lambda: None)
     with closing(Ledger(ledger.path)) as other:
         latest = pay.download_file(other, ident, "NORD", D0 + timedelta(days=1), lambda: None)
-    with pytest.raises(PaymentFileError):
-        pay.add_invoices(ledger, "NORD", ["102"], file_id=ident, approve_invoice=efactura.approve)
     detail = state.payment_file_detail(ledger, ident)
-    assert detail["question"] == "downloads" and not detail["can_add"] and not detail["can_remove"]
-    assert state.payment_file_defaults(ledger, "NORD", D0, pay.named_files(ledger, "NORD"))[0]["open_file_id"] != ident
-    assert pay.mark_not_imported(ledger, ident, "NORD", latest["download_id"])
-    assert state.payment_file_detail(ledger, ident)["question"] is None
+    assert detail["question"] is None and detail["questions"] == [] and detail["can_add"] and detail["can_import"]
+    assert [d["id"] for d in detail["downloads"]] == [latest["download_id"], first["download_id"]]
+    assert state.payment_file_defaults(ledger, "NORD", D0, pay.named_files(ledger, "NORD"))[0]["open_file_id"] == ident
+    pay.add_invoices(ledger, "NORD", ["102"], file_id=ident, approve_invoice=efactura.approve)
+    assert state.payment_file_detail(ledger, ident)["changed_since_download"]
+    with pytest.raises(PaymentFileError):  # the edit came after both downloads: import needs a new one
+        pay.import_file(ledger, ident, "NORD", latest["download_id"], D0)
+    again = pay.download_file(ledger, ident, "NORD", D0 + timedelta(days=1), lambda: None)
     with pytest.raises(PaymentFileError):
         pay.import_file(ledger, ident, "NORD", latest["download_id"], D0)
-    pay.add_invoices(ledger, "NORD", ["102"], file_id=ident, approve_invoice=efactura.approve)
+    assert pay.import_file(ledger, ident, "NORD", again["download_id"], D0)
 
 
 def test_all_skipped_is_never_confirmed_and_can_be_emptied(ledger, live):
@@ -296,14 +298,14 @@ def test_all_skipped_is_never_confirmed_and_can_be_emptied(ledger, live):
     assert pay.delete_file(ledger, ident, "NORD")
 
 
-def test_invoice_undo_mark_respects_question_freeze(ledger, world):
-    ident = pay.add_invoices(ledger, "NORD", ["101", "102"], name="Question undo", approve_invoice=efactura.approve)
+def test_invoice_undo_mark_requeues_into_a_file_downloaded_twice_and_flags_the_change(ledger, world):
+    ident = pay.add_invoices(ledger, "NORD", ["101", "102"], name="Undo", approve_invoice=efactura.approve)
     assert efactura.withdraw(ledger, "102", "user: already paid", ("bank", "")) is None
     pay.download_file(ledger, ident, "NORD", D0, lambda: None)
     pay.download_file(ledger, ident, "NORD", D0 + timedelta(days=1), lambda: None)
-    assert efactura.reopen(ledger, "102") is None
-    assert ledger.efactura("102")["status"] == "paid"
-    assert ledger.payment(ledger.efactura("102")["item_id"])["status"] == "skipped"
+    assert efactura.reopen(ledger, "102") == "queued"
+    assert ledger.payment(ledger.efactura("102")["item_id"])["status"] == "pending"
+    assert state.payment_file_detail(ledger, ident)["changed_since_download"]
 
 
 def test_missing_file_with_only_skipped_payments_can_be_resolved_without_bank_bytes(ledger, live):

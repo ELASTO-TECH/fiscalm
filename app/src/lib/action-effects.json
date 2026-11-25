@@ -26,7 +26,6 @@
   "order-discard": "local",
   "emag-refund": "local",
   "emag-resolve": "local",
-  "payment_file_not_imported": "local",
   "payment_file_restore": "payment_file",
   "payment_file_missing_import": "payment_file",
   "payment_file_create": "local",

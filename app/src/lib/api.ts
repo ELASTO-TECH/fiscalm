@@ -280,7 +280,6 @@ export type FileAction =
   | { action: "payment_file_delete"; file_id: number }
   | { action: "payment_file_download"; file_id: number }
   | { action: "payment_file_import"; file_id: number; download_id: number }
-  | { action: "payment_file_not_imported"; file_id: number; download_id: number }
   | { action: "payment_file_restore" | "payment_file_missing_import"; file_id: number; version: string };
 export type FileActionName = FileAction["action"];
 /** create answers with the new file; download with the file's bytes, which the app saves and never sends again. */

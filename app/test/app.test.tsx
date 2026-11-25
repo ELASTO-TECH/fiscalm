@@ -716,17 +716,14 @@ describe("Fișiere de plăți", () => {
     expect(api.posts()).toEqual([]);
   });
 
-  it("asks which download was imported, or that none was, with the file and the download it names", async () => {
-    const versions = [{ id: 32, version: "v32", at: "2026-10-27T09:30:00", count: 3, total: "1250.40" }, { id: 31, version: "v31", at: DL, count: 2, total: "300.00" }];
-    const detail = paymentFileDetail({ id: 9, name: "NORD plăți 27 oct 2026", questions: [{ kind: "downloads", versions }], can_import: true,
-      downloads: versions.map(({ id, version, at }) => ({ id, version, at })) });
+  it("shows every download of a file downloaded twice and imports the latest, with no question", async () => {
+    const downloads = [{ id: 32, version: "v32", at: "2026-10-27T09:30:00" }, { id: 31, version: "v31", at: DL }];
+    const detail = paymentFileDetail({ id: 9, name: "NORD plăți 27 oct 2026", downloaded_at: downloads[0].at, downloads, can_import: true });
     const { api, sheet } = await sheetOf(detail);
-    await userEvent.click(within(sheet).getByRole("button", { name: "26 oct, 15:20: 2 plăți, 300,00 lei" }));
-    await waitFor(() => expect(api.posts()).toHaveLength(1));
-    await userEvent.click(await within(sheet).findByRole("button", { name: "Nu am importat niciuna" }));
+    expect(within(sheet).getByText(/Descărcat de 2 ori/)).toBeVisible();
+    await userEvent.click(within(sheet).getByRole("button", { name: "Am importat în bancă" }));
     await waitFor(() => expect(filePosts(api)).toEqual([
-      ["/web/api/payment-files", { action: "payment_file_import", file_id: 9, download_id: 31 }],
-      ["/web/api/payment-files", { action: "payment_file_not_imported", file_id: 9, download_id: 32 }],
+      ["/web/api/payment-files", { action: "payment_file_import", file_id: 9, download_id: 32 }],
     ]));
   });
 
