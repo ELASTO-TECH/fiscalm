@@ -2166,7 +2166,9 @@ class Ledger:
 
                 if _confirmation is not _HUMAN_CONFIRMATION or not confirmed_by.strip() or expected_tx != key:
                     raise settlements.SettlementError("confirmation_refused")
-            elif legacy:  # an unpinned legacy PDF copy needs a person; every other verified batch settles on its own
+            elif legacy or data.get("mailed_by"):
+                # A person confirms an unpinned legacy PDF copy, and a report that came by mail (a From header is no
+                # proof of who sent it); every other verified batch settles on its own.
                 preview = json.dumps(
                     {
                         "id": key,
@@ -2180,7 +2182,7 @@ class Ledger:
                     "credit=excluded.credit,invoice_count=excluded.invoice_count WHERE credit!=excluded.credit OR invoice_count!=excluded.invoice_count",
                     (report_id, preview, len(invoices)),
                 )
-                reason = "statement_confirmation_required"
+                reason = "statement_confirmation_required" if legacy else "mail_confirmation_required"
                 db.execute(
                     "UPDATE settlement_reports SET error=? WHERE id=? AND status='pending' AND error IS NOT ?",
                     (reason, report_id, reason),

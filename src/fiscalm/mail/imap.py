@@ -349,9 +349,10 @@ def parse(account: str, raw: bytes, today: date) -> Message:
     found: list[Attachment] = []
     tables: list[Attachment] = []
     for part in msg.walk():
-        if len(found) + len(tables) >= ATTACHMENTS_MAX:
+        if len(found) >= ATTACHMENTS_MAX and len(tables) >= ATTACHMENTS_MAX:
             break
-        if part.is_multipart() or part.get_content_type() in ("text/plain", "text/html"):
+        named_csv = (part.get_filename() or "").lower().endswith(".csv")
+        if part.is_multipart() or (part.get_content_type() in ("text/plain", "text/html") and not named_csv):
             continue
         try:
             data = part.get_payload(decode=True)
@@ -360,9 +361,9 @@ def parse(account: str, raw: bytes, today: date) -> Message:
         if not isinstance(data, bytes) or not data or len(data) > ATTACHMENT_MAX:
             continue
         kind = _kind(part, data)
-        if kind:
+        if kind and len(found) < ATTACHMENTS_MAX:  # invoices and tables each keep their own allowance
             found.append(Attachment(kind, data, _plain(part.get_filename())[:120]))
-        elif table := _table(part, data):
+        elif (table := _table(part, data)) and len(tables) < ATTACHMENTS_MAX:
             tables.append(Attachment(table, data, _plain(part.get_filename())[:120]))
     try:
         sender = _plain(msg.get("From"))

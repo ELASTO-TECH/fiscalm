@@ -82,6 +82,7 @@ COLLECTED = "Raportul de decontare a fost încărcat. Facturile din el sunt înc
 TO_CONFIRM = "Raportul de decontare a fost încărcat. Confirmă decontarea în Sarcini."
 WAITING = "Raportul de decontare a fost încărcat. Se asociază cu încasarea când plata apare în extras."
 DUPLICATE = "Raportul de decontare era deja încărcat."
+REVOKED = "Expeditorul sau căsuța de mail nu mai este acceptat pentru acest partener."
 SAID = (TO_CHECK, TO_CONFIRM, WAITING, COLLECTED)  # from least to most settled
 NOT_KNOWN = "Fișierul nu este un extras de cont sau un raport de decontare pe care fiscalm îl poate citi."
 TOO_BIG = "Fișierul este prea mare pentru un raport de decontare."
@@ -409,6 +410,8 @@ def accept_report(
     description: object = None,
     partner: str = "",
     today: date | None = None,
+    mailed_by: str = "",
+    still_allowed=None,
 ) -> dict:
     """Store one uploaded settlement report for `company` and match it. Who sent it is always said by the request:
     `partner` selects an exact saved format; `description` defines a new one. Shared headers never select a partner."""
@@ -420,7 +423,9 @@ def accept_report(
     described = _choose(L, company, sig, rows, partner, description)
     when = _report_date(report_date, today)
     spec, lines = _report_spec(data, kind, delimiter, described, when, today)
-    stored = _store(L, company, data, spec, described, sig)
+    if mailed_by:
+        spec["mailed_by"] = mailed_by  # it waits for a person's confirmation (ledger.settle_report)
+    stored = _store(L, company, data, spec, described, sig, new=description is not None, still_allowed=still_allowed)
     if isinstance(stored, dict):
         return stored
     # Only this company's pending reports, against its own stored statements read through the checked evidence
@@ -447,19 +452,19 @@ def _said(row) -> str:
     return WAITING if row["error"] in (None, "credit_missing_or_ambiguous") else TO_CHECK
 
 
-def _store(L: Ledger, company: str, data: bytes, spec: dict, described: dict, sig: str) -> list[str] | dict:
+def _store(
+    L: Ledger, company: str, data: bytes, spec: dict, described: dict, sig: str, *, new: bool, still_allowed=None
+) -> list[str] | dict:
     try:
         with L.tx() as db:  # the payer is saved with its first report or not at all
-            db.execute(
-                "INSERT INTO partner_settlement_formats VALUES(?,?,?,?) "
-                "ON CONFLICT(company,partner,signature) DO UPDATE SET data=excluded.data",
-                (
-                    company,
-                    described["partner"],
-                    sig,
-                    json.dumps(described, ensure_ascii=False),
-                ),
-            )
+            if still_allowed is not None and not still_allowed(db):
+                raise Refused(409, REVOKED)  # rechecked under the write lock: a person may have just changed it
+            if new:  # a saved format is used as it is now, never written back from what was read before
+                db.execute(
+                    "INSERT INTO partner_settlement_formats VALUES(?,?,?,?) "
+                    "ON CONFLICT(company,partner,signature) DO UPDATE SET data=excluded.data",
+                    (company, described["partner"], sig, json.dumps(described, ensure_ascii=False)),
+                )
             return settlements.import_payouts(L, company, data, spec)
     except sqlite3.IntegrityError:
         digest = hashlib.sha256(data).hexdigest()
@@ -554,41 +559,60 @@ def set_senders(L: Ledger, company: str, partner: str, signature: str, senders: 
     return addresses
 
 
-def from_mail(L: Ledger, address: str, tables: tuple, firms: list[str], today: date | None = None) -> str | None:
-    """Settlement reports attached by a sender a person named on a saved format of one of `firms` (the mailbox's).
-    None when the sender names no format: the mail is read the invoice way. Each table goes through `accept_report`
-    with that payer; it must have that exact format, and its payment day comes from its own date column."""
+def from_mail(L: Ledger, address: str, tables: tuple, firms, today: date | None = None) -> str | None:
+    """Settlement reports attached by a sender a person named on a saved format of one of `firms()` (the mailbox's
+    firms, read again when storing). None when the sender names no format or there is no table: the mail is read the
+    invoice way. The sender must name one payer of one firm; the table's header then picks that payer's format, and its
+    payment day comes from the file. Mailed reports settle only after a person confirms them."""
     formats = [
         (co, r["partner"], r["signature"])
-        for co in firms
+        for co in firms()
         for r in L.db.execute("SELECT partner,signature,data FROM partner_settlement_formats WHERE company=?", (co,))
         if address and address in json.loads(r["data"]).get("senders", [])
     ]
-    if not formats:
+    if not formats or not tables:
         return None
+    if len({(co, partner) for co, partner, _ in formats}) != 1:
+        return "settlement:ambiguous-sender"  # the attachment never chooses between firms or payers
     counts: dict[str, int] = {}
     for attached in tables:
-        result = _mailed_table(L, attached, formats, today or date.today())
+        result = _mailed_table(L, attached, formats, address, firms, today or date.today())
         counts[result] = counts.get(result, 0) + 1
-    return ",".join(f"settlement:{k}:{v}" for k, v in sorted(counts.items())) or "settlement:none"
+    return ",".join(f"settlement:{k}:{v}" for k, v in sorted(counts.items()))
 
 
-def _mailed_table(L: Ledger, attached, formats: list[tuple[str, str, str]], today: date) -> str:
+def _mailed_table(L: Ledger, attached, formats: list, address: str, firms, today: date) -> str:
     try:
         kind, delimiter, rows = _format(attached.data, MAIL_CONTENT[attached.kind])
     except Refused:
         return "unreadable"
     sig = _signature(kind, delimiter, rows[0])
-    found = [(co, partner) for co, partner, s in formats if s == sig]
-    if len(found) != 1:
+    co, partner = formats[0][:2]
+    if sig not in {s for _, _, s in formats}:
         return "unknown-format"
-    co, partner = found[0]
     when = _mailed_date(L, co, partner, sig, rows)
     if not when:
         return "no-date"
+
+    def still_allowed(db) -> bool:  # under the write lock: the mailbox still covers the firm, the sender still named
+        row = db.execute(
+            "SELECT data FROM partner_settlement_formats WHERE company=? AND partner=? AND signature=?",
+            (co, partner, sig),
+        ).fetchone()
+        return bool(row) and address in json.loads(row["data"]).get("senders", []) and co in firms()
+
     try:
+        content = MAIL_CONTENT[attached.kind]
         return accept_report(
-            L, co, attached.data, MAIL_CONTENT[attached.kind], report_date=when, partner=partner, today=today
+            L,
+            co,
+            attached.data,
+            content,
+            report_date=when,
+            partner=partner,
+            today=today,
+            mailed_by=address,
+            still_allowed=still_allowed,
         )["status"]
     except Refused:
         return "refused"

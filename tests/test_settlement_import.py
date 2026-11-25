@@ -14,6 +14,7 @@ from test_settlements import collect, setup, statement, store_bank
 
 from fiscalm import companies
 from fiscalm.api import actions
+from fiscalm.ledger import Ledger
 from fiscalm.mail import imap, invoices
 from fiscalm.settlements import engine as settlements, upload as bank_upload
 from fiscalm.settlements.reports import SOURCES, STRIPE, ReportError, money, parse, table
@@ -655,15 +656,27 @@ def test_first_fan_borderou_settles_on_its_own(ledger):
     assert ledger.db.execute("SELECT count(*) FROM settlement_confirmations").fetchone()[0] == 0
 
 
-def test_mailed_report_from_a_named_sender_is_imported(ledger, mail_account):
+def test_mailed_report_from_a_named_sender_is_imported(ledger, mail_account, monkeypatch):
     """Read-only intake: a CSV in the saved format from an address a person named is imported with that payer and
     the day the file says; another format, or another sender, imports nothing."""
-    for n in (1, 2):
-        ledger.add_issued(dict(message_id=f"m{n}", company="NORD", number=f"TEST-{n}", status="open", raw_path=""))
     day = date.today() - timedelta(days=5)
+    for n, total in ((1, "50.00"), (2, "100.00")):
+        ledger.add_issued(
+            dict(
+                message_id=f"m{n}",
+                company="NORD",
+                number=f"TEST-{n}",
+                status="open",
+                raw_path="",
+                total=total,
+                currency="RON",
+                doc_type="invoice",
+                issue_date=(day - timedelta(days=9)).isoformat(),
+            )
+        )
     header = "Factura;Ramburs;Comision;Data plata\n"
     described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
-    first = (header + f"TEST-1;100,00;2,00;{day:%d.%m.%Y}\n").encode()
+    first = (header + f"TEST-1;50,00;1,00;{day:%d.%m.%Y}\n").encode()
     bank_upload.accept_report(ledger, "NORD", first, "text/csv", description=described, report_date=day.isoformat())
     partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
     with pytest.raises(ValueError):
@@ -681,7 +694,56 @@ def test_mailed_report_from_a_named_sender_is_imported(ledger, mail_account):
 
     msg = mailed("rapoarte@curier.example")
     assert (len(msg.tables), msg.attachments) == (2, ())
+    store_bank(ledger, statement(date=day + timedelta(days=2), amount=Decimal("98.00"), counterparty=NETOPIA["name"]))
     assert invoices.handle(ledger, msg) == "settlement:added:1,settlement:unknown-format:1"
     assert invoices.handle(ledger, mailed("someone@curier.example")) == "no-documents"
     rows = settlements.state(ledger, "NORD")
     assert len(rows) == 2 and {r["date"] for r in rows} == {day.isoformat()}
+    # Verified against the credit, the mailed report still waits: a From header is no proof of who sent it.
+    mailed_row = next(r for r in rows if r["lines"][0]["reference"] == "TEST-2")
+    assert (mailed_row["error"], mailed_row["can_confirm"]) == ("mail_confirmation_required", True)
+    body = {"id": mailed_row["id"], "tx": mailed_row["credit"]["id"], "confirmed": "yes"}
+    assert settlements.perform(ledger, "NORD", body, "synthetic person")["ok"]
+    assert ledger.issued("m2")["status"] == "collected"
+    # Withdrawn, the same file mailed again stays out; a revoked sender's mail in flight stores nothing.
+    other = next(r for r in rows if r["id"] != mailed_row["id"])
+    assert ledger.withdraw_report(other["id"], "NORD")
+    first_mail = EmailMessage()
+    first_mail["From"], first_mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<again>"
+    first_mail.add_attachment(first, "text", "csv", filename="r.csv")
+    again = imap.parse(mail_account["id"], bytes(first_mail), date.today())
+    assert invoices.handle(ledger, again) == "settlement:refused:1"  # the withdrawn report stays withdrawn
+    late = EmailMessage()
+    late["From"], late["Message-ID"] = "Curier <rapoarte@curier.example>", "<late>"
+    late.add_attachment((header + f"TEST-9;5,00;0;{day:%d.%m.%Y}\n").encode(), "text", "csv", filename="r.csv")
+    original = bank_upload._report_spec
+
+    def revoked_meanwhile(*args):  # another connection removes the sender between reading and storing
+        other_connection = Ledger()
+        try:
+            bank_upload.set_senders(other_connection, "NORD", partner, sig, "")
+        finally:
+            other_connection.close()
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_report_spec", revoked_meanwhile)
+    assert invoices.handle(ledger, imap.parse(mail_account["id"], bytes(late), date.today())) == "settlement:refused:1"
+    data = json.loads(ledger.db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])
+    assert data["senders"] == [] and len(settlements.state(ledger, "NORD")) == 1
+
+
+def test_a_sender_naming_two_payers_imports_nothing_and_invoices_still_read(ledger, mail_account):
+    """One address on two payers' formats: the attachment never chooses; the mail's PDFs are read the invoice way."""
+    header = b"Factura;Ramburs;Comision\n"
+    for name in ("Synthetic Processor SRL", "Other Processor SRL"):
+        described = NETOPIA | dict(name=name, mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+        data = header + name.encode()[:5] + b";100,00;2,00\n"
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    for partner, sig in ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchall():
+        bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<two>"
+    mail.add_attachment(header + b"TEST-1;100,00;2,00\n", "text", "csv", filename="r.csv")
+    mail.add_attachment(b"%PDF-1.4 synthetic", "application", "pdf", filename="factura.pdf")
+    result = invoices.handle(ledger, imap.parse(mail_account["id"], bytes(mail), date.today()))
+    assert result.startswith("settlement:ambiguous-sender,") and len(result.split(",")) == 2
