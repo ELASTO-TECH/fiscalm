@@ -11,7 +11,7 @@ from decimal import Decimal
 from functools import cached_property
 from pathlib import Path
 
-from fiscalm import companies, history_invoices
+from fiscalm import companies, history_invoices, storage
 from fiscalm.bank import statements
 from fiscalm.efactura import inbox as efactura
 from fiscalm.identity import firm_id, tax_token
@@ -56,6 +56,7 @@ DEFAULTS = {"after_days": 7}
 LIMITS = {"after_days": 365}
 # A reminder needs a statement this recent: an older one could miss the payment that makes it wrong.
 STATEMENT_MAX_AGE_DAYS = 7
+MAX_ZIP = 20 * 1024 * 1024  # a stored SPV message read back to prove ownership
 DAYS = (date(1900, 1, 1), date(9000, 1, 1))  # the invoice days a reminder works with
 # The settled_tx reservation that keeps a credit from settling though it paid nothing yet.
 UNEXPLAINED = "bank reference conflict"
@@ -114,7 +115,7 @@ class StatementView:
         self.parsed: dict[str, statements.Statement] = {}
         self.versions: dict[str, tuple] = {}
         self._policy: tuple[int, int] | None = None
-        self._lines: tuple[date, list] | None = None  # (since, account_lines from since): one read per request
+        self._lines: tuple[date, list, set] | None = None  # (since, credit lines, explained keys): read once
 
     def policy(self) -> tuple[int, int]:
         """The firm's policy, read once per request."""
@@ -158,8 +159,9 @@ class StatementView:
         if self._lines is None or since < self._lines[0]:
             start = min(since, self.since or since)
             lo = start - timedelta(days=BOUNDARY_DAYS)  # an explained copy can sit just before
-            self._lines = (start, self.L.credit_lines(self.co, lo.isoformat()))
-        explained = _explained(self._lines[1])
+            lines = self.L.credit_lines(self.co, lo.isoformat())
+            self._lines = (start, lines, _explained(lines))
+        explained = self._lines[2]
         out = []
         for r in self._lines[1]:
             if r["tx_key"] in explained or not since.isoformat() <= r["day"] <= today.isoformat():
@@ -251,25 +253,29 @@ def _explained(rows: list) -> set[str]:
 
 
 def _copy(twin, line) -> bool:
-    """`line` could be the other source's copy of `twin`: same amount, same account (or one unknown), days apart at
-    most BOUNDARY_DAYS (Ledger.account_lines pairs twins the same way)."""
+    """`line` could be the other source's copy of `twin`: brought by another source (two lines of one source are two
+    payments), same amount, same account (or one unknown), days apart at most BOUNDARY_DAYS (Ledger.account_lines
+    pairs twins the same way)."""
     apart = abs((date.fromisoformat(twin["day"]) - date.fromisoformat(line["day"])).days)
     same_account = not twin["iban"] or not line["iban"] or twin["iban"] == line["iban"]
-    return twin["amount"] == line["amount"] and same_account and apart <= BOUNDARY_DAYS
+    other_source = twin["source"] != line["source"]
+    return other_source and twin["amount"] == line["amount"] and same_account and apart <= BOUNDARY_DAYS
 
 
 def _ours(L: Ledger, co: str, stored: dict) -> bool:
     """An invoice synced from SPV is the firm's only when its stored XML says so: the very document the row was
     read from (xml_sha) names the firm as supplier (history_invoices.direction: country-aware tax ids, so neither a
     missing supplier nor a foreign VAT id with the same digits passes). The path is rebuilt from the numeric message
-    id, and the opened file must stay inside the firm's own e-Factura directory."""
+    id and read only inside the firm's own e-Factura directory (storage.read_file: checked on the opened file)."""
+    root = (finance_home() / "efactura").resolve() / co  # the firm's own name, never a link to another firm's
     try:
         path = issued.raw_path(co, stored["message_id"], stored["listed_at"] or "")
-        root = (finance_home() / "efactura" / co).resolve()
-        with path.open("rb") as stream:
-            if not Path(f"/proc/{os.getpid()}/fd/{stream.fileno()}").resolve().is_relative_to(root):
-                return False
-            inv, sha = efactura.invoice_from_zip(stream.read(efactura.MAX_XML + 1))
+    except ValueError:
+        return False
+    if not (read := storage.read_file(path, [root], MAX_ZIP)):
+        return False
+    try:
+        inv, sha = efactura.invoice_from_zip(read[1])
     except efactura.UNREADABLE:  # UblError is a ValueError
         return False
     return sha == stored["xml_sha"] and history_invoices.direction(companies.get(co, L=L), inv) == "issued"
@@ -314,8 +320,9 @@ def eligible(
     if Decimal(row["owed"]) != Decimal(row["total"]) or Decimal(row["credited"]) or row.get("reversed_by"):
         raise Refused(PARTIAL)
     view = view or StatementView(L, co)
-    if not firm_id(row["client_cui"]) and not (row["client"] or "").strip():
-        raise Refused(CLOSED)  # no buyer to tell a payment from: in doubt, no text
+    name = row["client"] or ""
+    if not firm_id(row["client_cui"]) and not efactura.same_firm(name, name):
+        raise Refused(CLOSED)  # no buyer a payment could be told from (the payer matcher's own rule): no text
     after, max_age = view.policy()
     due_date = row.get("due_date")
     if iid := row.get("local_id"):  # authored in fiscalm: its own record must still agree with the row

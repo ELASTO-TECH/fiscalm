@@ -114,6 +114,8 @@ def _client_credit(L, iid, day=date(2026, 11, 10), **kw):
 
 def _reserve(L, tx, what):
     L.db.execute("INSERT INTO settled_tx VALUES(?,?,?)", (statements.tx_key(tx), what, "x"))
+    if what.startswith("twin "):  # brought by the other source, the bank feed
+        L.db.execute("UPDATE statement_txs SET source='ob' WHERE tx_key=?", (statements.tx_key(tx),))
     L.db.commit()
 
 
@@ -161,6 +163,7 @@ def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, c
     [
         ("twin", False),
         ("twin_of_explained", True),
+        ("twin_and_explained_line_of_one_source", False),  # two lines of one source are two payments
         ("two_twins_one_explained", False),
         ("explained_and_unexplained_copy", False),
         ("two_twins_original_and_its_duplicate", False),
@@ -182,8 +185,11 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
     _reserve(L, named, "duplicate:" + statements.tx_key(blank) if case == "duplicate" else "twin feed")
     if second in extra:
         _reserve(L, second, "twin feed")
-    if case in ("twin_of_explained", "two_twins_one_explained"):
+    if case in ("twin_of_explained", "two_twins_one_explained", "twin_and_explained_line_of_one_source"):
         _reserve(L, blank, "issued other")
+    if case == "twin_and_explained_line_of_one_source":
+        L.db.execute("UPDATE statement_txs SET source='ob'")
+        L.db.commit()
     if settled in extra:  # a settled line the twin could be a copy of; `blank` is unexplained, or its duplicate
         _reserve(L, settled, "issued other")
         if case == "two_twins_original_and_its_duplicate":
@@ -193,25 +199,30 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
 
 
 @pytest.mark.parametrize(
-    "invoice, storno, reminded",
+    "invoice, change, reminded",
     [
-        (dict(), False, True),
-        (dict(), True, False),  # a credit note against it: no longer the full amount owed
-        (dict(supplier_cui="RO12345678"), False, False),  # another supplier's invoice under this firm's SPV
-        (dict(supplier_cui=""), False, False),  # nothing says the supplier is this firm (stored unflagged)
-        (dict(supplier_cui="DE11111111"), False, False),  # this firm's digits, another country's VAT id
-        (dict(client="", client_cui=""), False, False),  # no buyer to tell a payment from
+        (dict(), None, True),
+        (dict(), "storno", False),  # a credit note against it: no longer the full amount owed
+        (dict(), "linked", False),  # the firm's e-Factura directory links to another firm's
+        (dict(supplier_cui="RO12345678"), None, False),  # another supplier's invoice under this firm's SPV
+        (dict(supplier_cui=""), None, False),  # nothing says the supplier is this firm (stored unflagged)
+        (dict(supplier_cui="DE11111111"), None, False),  # this firm's digits, another country's VAT id
+        (dict(client="", client_cui=""), None, False),  # no buyer to tell a payment from
+        (dict(client="ABC SRL", client_cui=""), None, False),  # a name too short for the payer matcher
     ],
 )
-def test_spv_synced_invoice_gets_reminder_text(reminder, sec, monkeypatch, invoice, storno, reminded):
+def test_spv_synced_invoice_gets_reminder_text(reminder, home, sec, monkeypatch, invoice, change, reminded):
     L, _ = reminder
     L.db.execute("DELETE FROM issued WHERE company='NORD'")  # only the invoice synced from SPV is left
     L.db.commit()
     blobs = {"9001": ubl(**dict(number="EXT 7", issue="2026-11-01", due="2026-11-08") | invoice)}
-    if storno:
+    if change == "storno":
         blobs["9002"] = ubl(root="CreditNote", number="EXT 9", total="190.00", ref="EXT 7", issue="2026-11-05")
     blobs["9003"] = ubl(number="EXT 8", issue="0001-01-08", due="")  # an impossible window refuses only itself
     _stored(L, monkeypatch, **blobs)
+    if change == "linked":
+        (home / "efactura" / "NORD").rename(home / "efactura" / "OTHER")
+        (home / "efactura" / "NORD").symlink_to(home / "efactura" / "OTHER")
     today = date(2026, 11, 18)
     tasks = r.tasks(L, "NORD", today, api._issued(L, "NORD", today, True))
     assert [t["id"] for t in tasks] == (["9001"] if reminded else [])
