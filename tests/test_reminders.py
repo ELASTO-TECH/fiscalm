@@ -86,6 +86,7 @@ def test_reminder_bank_reads_do_not_scale_with_invoices(reminder, monkeypatch, k
     st = _st(_credit("121.00", TODAY, counterparty=invoice["data"]["client"]["name"]))
     cover_accounts(st)
     st.period_end = TODAY
+    L.record_statement(st)
     if known:
         L.db.execute("UPDATE issued SET collected_from_iban=? WHERE company='NORD'", (st.txs[0].counterparty_iban,))
         L.db.commit()
@@ -102,4 +103,41 @@ def test_reminder_bank_reads_do_not_scale_with_invoices(reminder, monkeypatch, k
         finally:
             L.db.set_trace_callback(None)
         counts.append(len(queries))
-    assert counts[0] == counts[1] <= 3
+    assert counts[0] == counts[1] <= 4
+
+
+@pytest.mark.parametrize("explained", [False, True])
+def test_only_an_unexplained_client_credit_refuses_text(reminder, explained):
+    # A repeat client's credit already settled to another invoice says nothing about this one.
+    L, iid = reminder
+    client = i.invoice(L, iid, company="NORD")["data"]["client"]["name"]
+    credit = _credit("50.00", date(2026, 11, 10), counterparty=client)
+    L.record_statement(_st(credit))
+    if explained:
+        L.db.execute("INSERT INTO settled_tx VALUES(?,?,?)", (statements.tx_key(credit), "issued other", "x"))
+        L.db.commit()
+    rows = api._issued(L, "NORD", TODAY, True)
+    assert [t["id"] for t in r.tasks(L, "NORD", TODAY, rows)] == ([i.import_id("local", iid)] if explained else [])
+
+
+def test_spv_synced_invoice_gets_reminder_text(reminder):
+    L, iid = reminder
+    L.db.execute("DELETE FROM issued WHERE company='NORD'")  # only the invoice synced from SPV is left
+    L.add_issued(
+        dict(
+            message_id="9001",
+            company="NORD",
+            doc_type="380",
+            number="EXT 7",
+            issue_date="2026-11-01",
+            due_date="2026-11-08",
+            currency="RON",
+            total="300.00",
+            client_name="Gamma Test SRL",
+            client_cui="RO123456",
+            raw_path="spv/9001.zip",
+            status="open",
+        )
+    )
+    tasks = r.tasks(L, "NORD", date(2026, 11, 18), api._issued(L, "NORD", date(2026, 11, 18), True))
+    assert [t["id"] for t in tasks] == ["9001"] and "EXT 7" in tasks[0]["subject"]

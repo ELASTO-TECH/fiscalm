@@ -12,6 +12,7 @@ from pathlib import Path
 
 from fiscalm import companies
 from fiscalm.bank import statements
+from fiscalm.identity import tax_token
 from fiscalm.invoicing import engine as invoicing, issued
 from fiscalm.ledger import Ledger, finance_home, is_live
 
@@ -102,11 +103,13 @@ def policy(L: Ledger, co: str) -> tuple[int, int]:
 class StatementView:
     """Request-local, lazy statement snapshot; no subprocesses under the write lock."""
 
-    def __init__(self, L: Ledger, co: str):
-        self.L, self.co = L, co
+    def __init__(self, L: Ledger, co: str, since: date | None = None):
+        """`since`: the earliest day any caller will ask credits from, so the account lines are read once."""
+        self.L, self.co, self.since = L, co, since
         self.parsed: dict[str, statements.Statement] = {}
         self.versions: dict[str, tuple] = {}
         self._policy: tuple[int, int] | None = None
+        self._lines: tuple[date, list] | None = None  # (since, account_lines from since): one read per request
 
     def policy(self) -> tuple[int, int]:
         """The firm's policy, read once per request."""
@@ -118,8 +121,9 @@ class StatementView:
     def client_accounts(self) -> dict[str, set[str]]:
         accounts: dict[str, set[str]] = {}
         for row in self.L.issued_rows(company=self.co):
-            if row["collected_from_iban"]:
-                accounts.setdefault(row["collected_from_iban"], set()).add(row["client_cui"] or "")
+            if row["collected_from_iban"]:  # the CUI as the reminder rows carry it (api.state.tax_id)
+                cui = tax_token(row["client_tax_id"] or row["client_cui"])
+                accounts.setdefault(row["collected_from_iban"], set()).add(cui)
         return accounts
 
     def documents(self, since: date) -> list[dict]:
@@ -135,8 +139,27 @@ class StatementView:
         return tuple(sorted(doc.items())), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
     def credits(self, since: date, today: date, max_age: int) -> list[statements.Tx]:
+        """The firm's unexplained credits from `since` to `today`, once its statements cover every current account.
+        The credits come from the ledger's account lines (statements, CSV and the bank feed alike); a credit already
+        in `settled_tx` collected or explains something else, so it says nothing about this invoice. A twin line
+        (the other source's copy of a payment) is left out by `account_lines` when its copy is there."""
+        self.coverage(since, today, max_age)
+        if self._lines is None or since < self._lines[0]:
+            start = min(since, self.since or since)
+            self._lines = (start, self.L.account_lines(self.co, start.isoformat()))
+        return [
+            statements.Tx.from_dict(json.loads(r["tx"]))
+            for r in self._lines[1]
+            if r["direction"] == "credit"
+            and r["tx"]
+            and since.isoformat() <= r["day"] <= today.isoformat()
+            and (r["what"] is None or r["what"].startswith("twin "))
+        ]
+
+    def coverage(self, since: date, today: date, max_age: int) -> None:
+        """Refuse (STATEMENTS) unless stored statements cover every current account from `since` to `max_age` days
+        before `today`."""
         docs = self.documents(since)
-        txs: list[statements.Tx] = []
         # Every current account must be covered, not one per currency: a payment into any of them would be missed.
         coverage: dict[str, list[tuple[date, date]]] = {
             a.iban: [] for a in companies.get(self.co, L=self.L).current_accounts
@@ -166,7 +189,6 @@ class StatementView:
                     iban = re.sub(r"\s+", "", account.iban).upper()
                     if iban in coverage:
                         coverage[iban].append((st.period_start, st.period_end))
-                txs.extend(t for t in st.settlement_txs if since <= t.date <= today)
         except (OSError, ValueError):
             raise Refused(STATEMENTS) from None
         if not coverage:
@@ -182,7 +204,6 @@ class StatementView:
                     break
             if covered < until:
                 raise Refused(STATEMENTS)
-        return txs
 
 
 def eligible(
@@ -195,8 +216,10 @@ def eligible(
     view: StatementView | None = None,
     row_index: dict | None = None,
     invoices: dict[str, dict] | None = None,
-) -> tuple[dict, dict]:
-    """Cheap ledger refusals precede parsing; a caller may reuse one statement snapshot."""
+) -> dict:
+    """The open, unpaid, overdue issued invoice `ident` (authored in fiscalm, or synced from SPV) a reminder may be
+    prepared for, with its due date; refuses one a client credit not yet explained could have paid. Cheap ledger
+    refusals precede the bank reads; a caller may reuse one statement snapshot."""
     from fiscalm.api import state as api
 
     rows = rows if rows is not None else api._issued(L, co, today, is_live())
@@ -209,40 +232,37 @@ def eligible(
         raise Refused(CLOSED)
     if Decimal(row["owed"]) != Decimal(row["total"]) or Decimal(row["credited"]) or row.get("reversed_by"):
         raise Refused(PARTIAL)
-    iid = row.get("local_id")
-    if not iid:
-        raise Refused(CLOSED)
     after, max_age = view.policy() if view else policy(L, co)
-    inv = invoices.get(iid) if invoices is not None else invoicing.invoice(L, iid, company=co)
-    if inv is None:
-        raise Refused(CLOSED)
-    due_date = row.get("due_date") or inv["data"].get("due_date")
-    if not due_date:
+    due_date = row.get("due_date")
+    if iid := row.get("local_id"):  # authored in fiscalm: its own record must still agree with the row
+        inv = invoices.get(iid) if invoices is not None else invoicing.invoice(L, iid, company=co)
+        if inv is None or inv["status"] != "issued" or inv["data"]["totals"]["total"] != row["total"]:
+            raise Refused(CLOSED)
+        due_date = due_date or inv["data"].get("due_date")
+    if not due_date or today < date.fromisoformat(due_date) + timedelta(days=after):
         raise Refused(CLOSED)
     row = row | {"due_date": due_date}
-    next_date = date.fromisoformat(due_date) + timedelta(days=after)
-    if today < next_date:
-        raise Refused(CLOSED)
-    if inv["status"] != "issued" or inv["data"]["totals"]["total"] != row["total"]:
-        raise Refused(CLOSED)
-    client = inv["data"]["client"]
     since = date.fromisoformat(row["issue_date"]) - timedelta(days=issued.COLLECT_DAYS_BEFORE)
     view = view or StatementView(L, co)
     for tx in view.credits(since, today, max_age):
-        if issued.credit_from_client(L, co, client["name"], client.get("cui", ""), tx, accounts=view.client_accounts):
+        if issued.credit_from_client(
+            L, co, row["client"] or "", row["client_cui"] or "", tx, accounts=view.client_accounts
+        ):
             raise Refused(PARTIAL)
-    return row, inv
+    return row
 
 
 def tasks(L: Ledger, co: str, today: date, rows: list[dict], *, invoices: dict[str, dict] | None = None) -> list[dict]:
-    out, view = [], StatementView(L, co)
+    issue_days = [date.fromisoformat(r["issue_date"]) for r in rows if r.get("issue_date")]
+    since = min(issue_days) - timedelta(days=issued.COLLECT_DAYS_BEFORE) if issue_days else None
+    out, view = [], StatementView(L, co, since)
     row_index: dict = {}
     for row in rows:
         for ident in (row["id"], row.get("local_id")):
             row_index.setdefault(ident, row)
     for row in rows:
         try:
-            row, inv = eligible(L, co, row["id"], today, rows=rows, view=view, row_index=row_index, invoices=invoices)
+            row = eligible(L, co, row["id"], today, rows=rows, view=view, row_index=row_index, invoices=invoices)
         except ValueError:
             continue
         fields = dict(
