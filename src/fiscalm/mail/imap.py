@@ -560,7 +560,7 @@ def authenticated_domain(msg, authserv: str) -> str:
     if not (local and at and re.fullmatch(r"[a-z0-9.-]+", domain := domain.lower())):
         return ""
     clauses = _clauses(str(own[0]))
-    dmarc = [c for c in clauses or [] if c and c[0].startswith("dmarc=")]
+    dmarc = [c for c in clauses or [] if c and c[0].startswith("dmarc")]  # "dmarc/1=" too: any second verdict refuses
     if not dmarc or len(dmarc) != 1 or dmarc[0][0] != "dmarc=pass":
         return ""
     senders = [w.removeprefix("header.from=") for w in dmarc[0][1:] if w.startswith("header.from=")]
@@ -569,7 +569,8 @@ def authenticated_domain(msg, authserv: str) -> str:
 
 def _clauses(header: str) -> list[list[str]] | None:
     """The results of an Authentication-Results header after its authserv-id, each as lowercase tokens: comments (nested,
-    with escapes) and quoted strings read in one pass and dropped, spaces around "=" and "." closed (RFC 8601 2.2).
+    with escapes) and quoted strings read in one pass and dropped, spaces closed around "=" and in "header . from"
+    (RFC 8601 2.2).
     None when the syntax doesn't close: nothing is read from it."""
     out, depth, quoted, escaped = [], 0, False, False
     for ch in header:
@@ -581,6 +582,7 @@ def _clauses(header: str) -> list[list[str]] | None:
             quoted = ch != '"'
         elif ch == "(":
             depth += 1
+            out.append(" ")  # a comment still separates tokens
         elif ch == ")":
             if not depth:
                 return None
@@ -590,7 +592,7 @@ def _clauses(header: str) -> list[list[str]] | None:
             out.append(" " if quoted else ch)
     if depth or quoted or escaped:
         return None
-    text = re.sub(r"\s*([=.])\s*", r"\1", "".join(out).lower())
+    text = re.sub(r"\bheader\s*\.\s*from\b", "header.from", re.sub(r"\s*=\s*", "=", "".join(out).lower()))
     return [c.split() for c in text.split(";")[1:]]
 
 

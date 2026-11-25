@@ -480,6 +480,9 @@ def test_texts_and_sent_are_read_only_searches(ledger, fake):
         ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=pay.example; dmarc = fail"], ""),
         ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=pay.example header . from = x.example"], ""),
         ("Pay <no@pay.example>", ["mx.own.example; dmarc = pass header . from = pay.example"], "pay.example"),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=pay.example; dmarc/1=fail"], ""),
+        ("Pay <no@pay.example>", ["mx.own.example; dm(x)arc=pass header.from=pay.example"], ""),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=pay . example"], ""),
     ],
 )
 def test_only_the_mailbox_providers_dmarc_pass_authenticates_a_sender(sender, results, domain):
