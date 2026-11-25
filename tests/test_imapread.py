@@ -437,6 +437,33 @@ def test_texts_and_sent_are_read_only_searches(ledger, fake):
     fake.add(rel.as_bytes(), TODAY)
     got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
     assert {m["key"]: m["complete"] for m in got}["imap:rel@lumen.example"] is False
+    fake.add(mail(sender="Lumen <shop@lumen.example>", subject="Plata", body="Lumen plata anulata"), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    first = next(m for m in got if m["key"] == "imap:inv-1@cloud.example")  # another mail under the same id
+    assert first["collides"] and not first["complete"]
+    for html in ("", "<p>Lumen plata confirmata</p><p>Payment reversed</p>"):  # one text, then the same + more HTML
+        copy = EmailMessage()
+        copy["From"], copy["Subject"], copy["Date"] = two["From"], "Plata", two["Date"]
+        copy["Message-ID"] = "<copy@lumen.example>"
+        copy.set_content("Lumen plata confirmata")
+        if html:
+            copy.add_alternative(html, subtype="html")
+        fake.add(copy.as_bytes(), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    copy_of = {m["key"]: m for m in got}["imap:copy@lumen.example"]
+    assert copy_of["collides"] and not copy_of["complete"]  # one copy says more: never proof, its review spoilt
+    for html in ("<p>Lumen plata confirmata</p><p>reversed</p>", "<p>Lumen plata confirmata</p><p>another payee</p>"):
+        both = EmailMessage()  # two incomplete copies, each saying something else in HTML
+        both["From"], both["Subject"], both["Date"] = two["From"], "Plata", two["Date"]
+        both["Message-ID"] = "<both@lumen.example>"
+        both.set_content("Lumen plata confirmata")
+        both.add_alternative(html, subtype="html")
+        fake.add(both.as_bytes(), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    assert {m["key"]: m.get("collides") for m in got}["imap:both@lumen.example"]
+    account(ledger, fake, name="Copy")  # the same mails through a second account: one each, the same flags
+    again = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    assert [(m["key"], m["complete"]) for m in again] == [(m["key"], m["complete"]) for m in got]
     assert fake.verbs() <= ALLOWED
 
 

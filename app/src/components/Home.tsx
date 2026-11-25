@@ -6,7 +6,7 @@ import { useCallback, useState, type ReactElement, type ReactNode } from "react"
 import { FIXTURES, actionRole, getCandidates, packFile, post } from "@/lib/api";
 import { cap, curOf, daysTo, dm, dmt, lei, luna, lunaName, nOf, weekday } from "@/lib/format";
 import { FirmStatementUpload } from "./Accounts";
-import { coName, isAll, parts, type Ambiguous, type Invoice, type PartnerTask, type PaymentFile, type ReminderTask, type Report, type State, type TaskEntry, type View } from "@/lib/types";
+import { coName, isAll, parts, type Ambiguous, type Invoice, type MailProof, type PartnerTask, type PaymentFile, type ReminderTask, type Report, type State, type TaskEntry, type View } from "@/lib/types";
 import { Company, useApp, useCan, useCompany } from "./context";
 import { anafExpiringSoon, findIssued, openInvoices, refusalReason, REPORT_LABEL } from "./derive";
 import { ANAF_PORTAL } from "./AnafConnect";
@@ -95,6 +95,29 @@ export function ResolveBtns({ a, today }: { a: Ambiguous; today: string }) {
   return <div className="grid w-full gap-2">
     {(a.candidate_count ?? a.candidates.length) > 50 ? <CandidatePages a={a} today={today} />
       : <CandidateButtons candidates={a.candidates} tx={a.tx} today={today} />}
+  </div>;
+}
+
+/** "Plată găsită în e-mail": a payment mail the AI read that proved nothing on its own. One button per invoice it may
+ * prove (the pick makes the mail its proof), and one to say it is no payment. */
+const mailProofBody = (m: MailProof, today: string) => `${m.from}, ${dm(m.date, today)}${m.subject ? `: „${m.subject}”` : ""}. ${tooMany(m)
+  ? `Se potrivește cu ${nOf(m.candidate_count, "o factură", "facturi")}. Marchează factura ca plătită din fișa ei.`
+  : m.candidate_count > 1 ? "Se potrivește cu mai multe facturi. Alege factura plătită." : "Confirmă dacă este plata facturii."}`;
+/** A task page carries at most 50 candidates: never a choice among some of them. */
+const tooMany = (m: MailProof) => m.candidate_count > m.candidates.length;
+
+/** What a choice says: the supplier too, and the invoice's id when two choices would still read the same. */
+function choiceLabel(c: MailProof["candidates"][number], all: MailProof["candidates"], today: string) {
+  const say = (x: typeof c) => `${x.supplier}, factura ${x.number}, ${lei(x.amount)} ${curOf(x.currency)}, din ${dm(x.date, today)}`;
+  return all.filter((x) => say(x) === say(c)).length > 1 ? `${say(c)} (nr. intern ${c.id})` : say(c);
+}
+
+function MailProofButtons({ m, today }: { m: MailProof; today: string }) {
+  return <div className="grid w-full gap-2">
+    {tooMany(m) ? null : m.candidates.map((c) => <Act key={c.id} action="mail-proof" body={{ id: m.id, target: c.id }} cls="btn g"
+      label={choiceLabel(c, m.candidates, today)}
+      confirm={{ text: `E-mailul devine dovada plății pentru ${choiceLabel(c, m.candidates, today)}?`, yes: "Confirmă plata" }} />)}
+    <Act action="mail-proof" body={{ id: m.id, target: "" }} cls="btn g" label="Nu este o plată" />
   </div>;
 }
 
@@ -211,6 +234,11 @@ export function taskCards(s: State, { tag = false }: TaskOpts = {}): Card[] {
         {a.can_resolve ? <ResolveBtns a={a} today={today} /> : null}
       </Task>,
     );
+  }
+  for (const m of s.mail_proofs ?? []) {
+    add(<Task co={own} key={`${co}mp${m.id}`} icon="envelope-simple" title="Plată găsită în e-mail" body={mailProofBody(m, today)}>
+      <MailProofButtons m={m} today={today} />
+    </Task>);
   }
   for (const r of s.invoices.filter((r) => r.credit_question?.length)) add(creditQuestionCard(s, r, own));
   for (const r of s.invoices.filter((r) => r.amount_changed)) {

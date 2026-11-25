@@ -1150,6 +1150,11 @@ class Ledger:
             )
         return True
 
+    def meta_values(self, prefix: str) -> list[str]:
+        """The values of every meta key starting with `prefix`, by key."""
+        rows = self.db.execute("SELECT value FROM meta WHERE substr(key, 1, ?)=? ORDER BY key", (len(prefix), prefix))
+        return [r[0] for r in rows]
+
     def get_meta(self, key: str, default: str | None = None) -> str | None:
         r = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return r["value"] if r else default

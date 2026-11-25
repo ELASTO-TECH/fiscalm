@@ -1147,6 +1147,9 @@ def evidence(L: Ledger, read=None) -> list[dict]:
         amounts = _amount_texts(r["total"])
         number = _norm(r["number"])
         for m in found:
+            shown = _shown(m)
+            if _collides(L, m["key"], [shown]):  # before the read filter: a review of this key stops being answerable
+                _conflict(L, m["key"])
             if L.get_meta(_judged_key(r["message_id"], m["key"])):
                 continue
             if imapread.is_own_sender(m["sender"], L) or not _covers(m.get("firms", "all"), r["company"]):
@@ -1161,19 +1164,7 @@ def evidence(L: Ledger, read=None) -> list[dict]:
                 or (len(number.replace(" ", "")) >= 4 and f" {number} " in body)
             ):
                 continue
-            mails.append(
-                {
-                    "key": m["key"],
-                    "from": m["sender"],
-                    "date": str(m["date"]),
-                    "subject": m["subject"],
-                    "text": m["text"][:MAIL_TEXT],
-                    # a cut mail may hide another firm or a refund; an undated one, the day it came
-                    "whole": len(m["text"]) <= MAIL_TEXT and m.get("complete", False),
-                    "domain": m.get("domain", ""),
-                    "firms": m.get("firms", "all"),
-                }
-            )
+            mails.append(shown)
         mails.sort(key=lambda m: abs((date.fromisoformat(m["date"]) - issued).days))  # closest to the invoice first
         if mails:
             out.append(
@@ -1193,6 +1184,23 @@ def evidence(L: Ledger, read=None) -> list[dict]:
                 | {"mails": mails[:MAILS_PER_INVOICE]}
             )
     return out
+
+
+def _shown(m: dict) -> dict:
+    """A mail as the AI and the decision read it."""
+    return {
+        "key": m["key"],
+        "from": m["sender"],
+        "date": str(m["date"]),
+        "subject": m["subject"],
+        "text": m["text"][:MAIL_TEXT],
+        # a cut mail may hide another firm or a refund; an undated one, the day it came
+        "whole": len(m["text"]) <= MAIL_TEXT and m.get("complete", False),
+        "domain": m.get("domain", ""),
+        "firms": m.get("firms", "all"),
+        "collides": m.get("collides", False),
+        "digest": m.get("digest", ""),
+    }
 
 
 def _covers(firms: str | list[str], company: str) -> bool:
@@ -1283,7 +1291,10 @@ def judge(L: Ledger, ask: Callable | None = None, read: Callable | None = None) 
     ev = evidence(L, read=read)
     if not ev:
         return {"invoices": 0, "settled": [], "review": []}
-    shown = [e | {"mails": [{k: m[k] for k in m if k not in ("firms", "whole")} for m in e["mails"]]} for e in ev]
+    shown = [
+        e | {"mails": [{k: m[k] for k in m if k not in ("firms", "whole", "collides", "digest")} for m in e["mails"]]}
+        for e in ev
+    ]
     data = json.dumps(shown, ensure_ascii=False, default=str)
     answer = ask(JUDGE_PROMPT + data) if ask else ai.ask_json(L, JUDGE_PROMPT, data, JUDGE_SCHEMA)
     ai.check(answer, JUDGE_SCHEMA)
@@ -1323,11 +1334,17 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], l
     mail (_fits_mail) and the mailbox's own provider authenticated a payment processor's domain (_trusted);
     otherwise the mail and every invoice of its mailbox's firms it fits wait for a person (set_review)."""
     mails = {(e["message_id"], m["key"]): m for e in ev for m in e["mails"]}
+    for key in {k for _, k in mails}:  # every mail read, paid or not: one key, two different mails proves nothing
+        if _collides(L, key, [m for (_, k), m in mails.items() if k == key]):
+            _conflict(L, key)
     paid = [d for d in decisions if d["paid"] and d["confidence"] in ("high", "medium") and _key(d) in mails]
-    unpaid, eligible = _rivals(L), {r["message_id"]: r["company"] for r in _unpaid(L)}
+    unpaid, open_to = _rivals(L), {r["message_id"]: r["company"] for r in _unpaid(L)}
     settled, review = [], []
     for key in dict.fromkeys(d["mail_key"] for d in paid):
+        eligible = {i: c for i, c in open_to.items() if not L.get_meta(_dismissed_key(c, key))}  # a firm said no
         named = [d for d in paid if d["mail_key"] == key]
+        if _conflicted(L, key):  # marked above, or before
+            continue
         mail, one = mails[_key(named[0])], named[0]
         fits = [r for r in unpaid if _fits_mail(r, mail)]  # any firm's: a twin elsewhere is doubt too
         if len(named) == 1 and one["message_id"] in eligible and _sure(one, fits, mail) and _settle(L, one):
@@ -1335,8 +1352,8 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], l
         elif not _mail_used(L, key):  # a person answers for the invoices still to pay of the mailbox's firms
             ids = {d["message_id"] for d in named} | {r["message_id"] for r in fits}
             ids = {i for i in ids if i in eligible and _covers(mail["firms"], eligible[i])}
-            if ids:
-                review.append(set_review(L, mail, sorted(ids), one["reason"]))
+            if ids and not (item := set_review(L, mail, sorted(ids), one["reason"]))["conflict"]:
+                review.append(item)
     return settled, review
 
 
@@ -1426,28 +1443,87 @@ def _review_key(mail_key: str) -> str:
     return f"ef-review:{mail_key}"
 
 
+def _print(mail: dict) -> str:
+    """What a mail says, as one value: two mails under one Message-ID that say different things are two mails."""
+    said = [str(mail.get(k, "")) for k in ("from", "subject", "date", "text", "digest")]
+    return hashlib.sha256(json.dumps(said, ensure_ascii=False).encode()).hexdigest()
+
+
+def _collides(L: Ledger, mail_key: str, read: list[dict]) -> bool:
+    """The mails read under this key now, and the one a review recorded before, are not all the same mail."""
+    before = json.loads(L.get_meta(_review_key(mail_key)) or "{}")
+    prints = {_print(m) for m in read} | ({before["print"]} if before.get("print") else set())
+    return before.get("conflict", False) or len(prints) > 1 or any(m.get("collides") for m in read)
+
+
+def _conflict(L: Ledger, mail_key: str) -> None:
+    """Two different mails under one key: the review stays, unanswerable, and the key proves nothing (confirm_by_mail)."""
+    before = json.loads(L.get_meta(_review_key(mail_key)) or "{}")
+    item = {"mail_key": mail_key, "message_ids": [], "reason": "", "from": "", "subject": "", "date": ""}
+    L.set_meta(_review_key(mail_key), json.dumps(item | before | {"conflict": True}, ensure_ascii=False))
+
+
+def _conflicted(L: Ledger, mail_key: str) -> bool:
+    return json.loads(L.get_meta(_review_key(mail_key)) or "{}").get("conflict", False)
+
+
 def set_review(L: Ledger, mail: dict, message_ids: list[str], reason: str) -> dict:
     """A payment mail the AI read as proof that settled nothing on its own: kept with the invoices it may prove, for a
     person to confirm one (confirm_by_mail) or dismiss it. Mail text stays out: a person opens the mail."""
-    kept = json.loads(L.get_meta(_review_key(mail["key"])) or "{}").get("message_ids", [])  # still to answer
-    ids = sorted(set(kept) | set(message_ids))
-    item = {"mail_key": mail["key"], "message_ids": ids, "reason": reason[:200]}
-    item |= {k: mail[k][:200] for k in ("from", "subject", "date")}
+    before = json.loads(L.get_meta(_review_key(mail["key"])) or "{}")
+    ids = sorted(set(before.get("message_ids", [])) | set(message_ids))  # still to answer
+    said = {k: str(mail[k])[:200] for k in ("from", "subject", "date")} | {"print": _print(mail)}
+    # two different mails under one Message-ID: neither is shown, neither proves anything (one mail, one proof)
+    conflict = before.get("conflict", False) or bool(before) and before.get("print") != said["print"]
+    item = {"mail_key": mail["key"], "message_ids": ids, "reason": reason[:200], **said, "conflict": conflict}
     L.set_meta(_review_key(mail["key"]), json.dumps(item, ensure_ascii=False))
     return item
+
+
+def _dismissed_key(company: str, mail_key: str) -> str:
+    return f"ef-review-no:{company}:{mail_key}"
+
+
+def review_id(mail_key: str) -> str:
+    """What the app and the API call a review: the mail's own id (imap:<Message-ID>) is the sender's text."""
+    return hashlib.sha256(mail_key.encode()).hexdigest()[:20]
 
 
 def reviews(L: Ledger, company: str) -> list[dict]:
     """The payment mails waiting for a person, with the invoices of `company` they may still prove (unpaid, or marked);
     one whose mail proved something since, or none of whose invoices are still unpaid, is left out."""
+    stored = [json.loads(v) for v in L.meta_values("ef-review:")]
+    if not any(item["message_ids"] and not item.get("conflict") for item in stored):
+        return []  # nothing waits: no invoice read
     unpaid = {r["message_id"] for r in _unpaid(L) if r["company"] == company}
     out = []
-    for (value,) in L.db.execute("SELECT value FROM meta WHERE key LIKE 'ef-review:%' ORDER BY key"):
-        item = json.loads(value)
+    for item in stored:
         ids = [m for m in item["message_ids"] if m in unpaid]
-        if ids and not _mail_used(L, item["mail_key"]):
-            out.append(item | {"message_ids": ids})
+        dismissed = L.get_meta(_dismissed_key(company, item["mail_key"]))  # this firm said no once: it stays no
+        if ids and not dismissed and not item.get("conflict") and not _mail_used(L, item["mail_key"]):
+            out.append(item | {"message_ids": ids, "id": review_id(item["mail_key"])})
     return out
+
+
+def resolve_review(L: Ledger, company: str, rid: str, target: str) -> str | None:
+    """A person answers a payment mail waiting for review: `target`, one of its invoices of `company`, was paid (the
+    mail becomes its proof, through the same guarded write as judge), or "" (it is no payment: it leaves this firm's
+    Sarcini, and the judge never offers or settles it for this firm again). `rid`: its review_id. Returns the invoice
+    confirmed, "" when dismissed, None when the mail no longer waits for that answer."""
+    with L.tx():  # read and answer in one view: two people answering at once settle at most one invoice
+        item = next((r for r in reviews(L, company) if r["id"] == rid), None)
+        if item is None or (target and target not in item["message_ids"]):
+            return None
+        mail_key = item["mail_key"]
+        if target:
+            judged(L, target, [mail_key])  # the proof's record (ledger _PROOFS)
+            note = "mail: payment confirmed by a person"  # fiscalm's words: the AI's never reach the invoice
+            return target if confirm_by_mail(L, target, mail_key, note) else None
+        L.set_meta(_dismissed_key(company, mail_key), now())
+        stored = json.loads(L.get_meta(_review_key(mail_key)))  # kept, emptied or not: its fingerprint still counts
+        kept = [m for m in stored["message_ids"] if m not in item["message_ids"]]
+        L.set_meta(_review_key(mail_key), json.dumps(stored | {"message_ids": kept}, ensure_ascii=False))
+        return ""
 
 
 def _proof_key(mail_key: str) -> str:
@@ -1461,7 +1537,7 @@ def _mail_used(L: Ledger, mail_key: str) -> bool:
 
 def confirm_by_mail(L: Ledger, message_id: str, mail_key: str, note: str) -> bool:
     """The user says this mail proves this one invoice paid: one mail reserves proof for one invoice."""
-    if _mail_used(L, mail_key):
+    if _mail_used(L, mail_key) or _conflicted(L, mail_key):  # another mail used the same key: proves nothing
         return False
     return L.mark_efactura_paid(message_id, note, tx=_proof_key(mail_key))
 

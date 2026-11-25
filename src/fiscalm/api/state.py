@@ -294,6 +294,31 @@ def _redact(line: str) -> str:
     return _PATH.sub(lambda m: m.group(0).rstrip("/").rsplit("/", 1)[-1] or "…", line)
 
 
+def mail_proofs(L: Ledger, co: str) -> list[dict]:
+    """Payment mails the AI read as proof that settled nothing on their own (efactura.reviews): the mail's sender,
+    date and subject (IBANs and cards masked), and the invoices of this company it may prove, for a
+    person to pick one or dismiss it."""
+    out = []
+    for r in efactura.reviews(L, co):
+        rows = [x for m in r["message_ids"] if (x := L.efactura(m))]
+        cands = [
+            {
+                "id": x["message_id"],
+                "number": x["number"],
+                "supplier": x["supplier_name"],
+                "amount": money(x["total"]),
+                "currency": x["currency"] or "RON",
+                "date": x["issue_date"],
+            }
+            for x in rows
+        ]
+        said = {
+            k: statements.masked(r[k]) for k in ("from", "subject", "date")
+        }  # the AI's reason may name another firm's
+        out.append({"id": r["id"], **said, "candidates": cands, "candidate_count": len(cands)})
+    return out
+
+
 def ambiguous(L: Ledger, co: str, live: bool = False) -> list[dict]:
     """Statement debits that settled none and wait for a person (efactura.note_ambiguous), with their candidates."""
     used, fits_of, out = L.used_txs(), efactura.candidates(L, co), []
@@ -1620,6 +1645,7 @@ def _company(L: Ledger, co: str, now: datetime, registry: dict, entries: list[di
             if r["company"] == co
         ],
         "ambiguous": unclear,
+        "mail_proofs": mail_proofs(L, co),
         "transactions": txs,
     }
     for r in out["reports"]:  # a prepared pack is checked against the summary preparing it now would write
@@ -1689,6 +1715,7 @@ class _StateReads:
             "card_owners",
             "sent_invoice_links",
             "issued_client_links",
+            "meta_values",
         ):
             setattr(self, name, lru_cache(maxsize=None)(getattr(ledger, name)))
 

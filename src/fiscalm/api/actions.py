@@ -542,6 +542,23 @@ def credit_pick(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     return _res(ok, "Răspunsul a fost salvat." if ok else "Stornarea nu mai așteaptă un răspuns.")
 
 
+def mail_proof(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    """A payment mail waiting for review: the person picks the invoice it paid, or says it is no payment."""
+    if not isinstance(args.get("target"), str) or not re.fullmatch(r"[0-9a-f]{20}", ctx.get("id")):
+        return _res(False, BAD)  # "" says it is no payment: never assumed from a missing field
+    done = efactura.resolve_review(L, co, ctx.get("id"), ctx.get("target"))
+    number = (L.efactura(done) or {"number": ""})["number"] if done else ""
+    ctx.log(f"web: mail-proof {ctx.get('id')[:20]}: {'nothing' if done is None else done or 'dismissed'}")
+    if done is None:
+        return _res(False, "E-mailul nu mai așteaptă un răspuns.")
+    return _res(
+        True,
+        f"Factura {number} este confirmată ca plătită, cu e-mailul ca dovadă."
+        if done
+        else "E-mailul nu mai apare în sarcini.",
+    )
+
+
 def card_owner(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     ok = L.assign_card(co, ctx.get("tx"), ctx.get("owner"), ctx.created_by)
     return _res(
@@ -1261,6 +1278,7 @@ ACTIONS = {
     'issued-unmark': Action(issued_unmark, 'id', public_description='id'),
     'resolve-debit': Action(resolve_debit, 'tx target', public_description='tx, target (one of its candidates[].id)'),
     'credit-pick': Action(credit_pick, 'id target', public_description='id: a received credit note with credit_question; target: one of its credit_question[].id, or "-" when it cancels none of them. The first answer stands; local operation.'),
+    'mail-proof': Action(mail_proof, 'id target', public_description='id (a mail_proofs[].id), target (one of its candidates[].id: the mail proves that invoice paid; "": it is no payment, the mail leaves this company\'s tasks)'),
     'card-owner': Action(card_owner, 'tx owner', public=False, actor=True, description='tx (an observed card transaction), owner (a companies[].key or personal); first answer wins, never confirms payment'),
     'tx-link': Action(tx_link, 'tx kind invoices payment reason note who holder was remember', public=False, actor=True, description='kind (documents, the default; label: Fără document, reason one of bank_fee, interest, personal, other and an optional note for the accountant, required for other, at most 200 characters; transfer: Transfer între conturi; advance: Avans, who the administrator or associate, 1 to 100 characters), tx (a transactions.rows[].id; for an explanation already made, its link.tx), invoices (comma-separated ids: issued[].id for a credit, invoices[].id for a debit) or payment (one payments.*[].item_id, debits only), reason ("" or one of rest, courier_fee, bank_fee, fx, other), note (other only, 1 to 200 characters), was (the row\'s explanation.link.id, "" for none), remember ("", or one of the row\'s remember keys: iban, card for a label only, name; never for a transfer)'),
     'tx-receipt': Action(tx_receipt, 'tx id', public=False, actor=True, description='tx (a card debit in transactions.rows[].id, not explained), id (documents[].id of an upload of this firm whose amount is still null): the upload is this debit\'s bon and takes its amount, day and card. Local bookkeeping; refused when the debit or the upload is already explained or the upload has data of its own.'),
