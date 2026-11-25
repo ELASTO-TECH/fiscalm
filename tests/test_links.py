@@ -636,10 +636,10 @@ def _saved_on(L, day: date) -> None:
     L.db.commit()
 
 
-def test_saved_rules_and_the_banks_own_fee_lines_explain_new_lines_and_an_undo_sticks(ledger, live):
-    """Fără document and Avans rules explain lines dated from the day they were saved, and the bank's own fee line
-    explains itself (the rule kept on the explanation); a line from before the rule, one waiting for its invoice or
-    one a person undid is left alone."""
+def test_saved_rules_and_the_banks_own_fee_lines_explain_their_lines_and_an_undo_sticks(ledger, live):
+    """Fără document and Avans rules explain every line of theirs still to explain, from before the day they were
+    saved too, and the bank's own fee line explains itself (the rule kept on the explanation); a line waiting for its
+    invoice or one a person undid is left alone."""
     iban = "RO49AAAA1B31007593840000"
     first, card, fee, later, card_later, waiting, older = _record(
         ledger,
@@ -657,7 +657,7 @@ def test_saved_rules_and_the_banks_own_fee_lines_explain_new_lines_and_an_undo_s
     _link(ledger, card, kind="label", reason="personal", remember="card")
     assert links.await_invoice(ledger, "NORD", waiting, "")
     _saved_on(ledger, TODAY - timedelta(days=10))
-    assert _apply(ledger) == sorted([fee, later, card_later])
+    assert _apply(ledger) == sorted([fee, later, card_later, older])
     rows = _rows(ledger)
     assert (rows[later]["explanation"]["who"], rows[later]["explanation"]["link"]["rule"]) == (
         "Administrator Exemplu",
@@ -665,7 +665,7 @@ def test_saved_rules_and_the_banks_own_fee_lines_explain_new_lines_and_an_undo_s
     )
     assert (rows[card_later]["explanation"]["label"], rows[fee]["explanation"]["label"]) == ("personal", "bank_fee")
     assert rows[fee]["explanation"]["link"]["rule"] == "bank" and rows[first]["explanation"]["link"]["rule"] is None
-    assert rows[waiting]["explanation"] is None and rows[older]["explanation"] is None
+    assert rows[waiting]["explanation"] is None and rows[older]["explanation"]["link"]["rule"] == "saved"
     links.unlink(ledger, "NORD", fee, rows[fee]["explanation"]["link"]["id"])
     assert _apply(ledger) == [] and _rows(ledger)[fee]["explanation"] is None
 
@@ -684,7 +684,6 @@ def test_a_rule_rechecks_under_the_lock_what_a_person_decided_since_the_rows_wer
         _tx(94, "credit", "43.00", iban=own),
     )
     _link(ledger, first, kind="advance", who="Administrator Exemplu", remember="iban")
-    _saved_on(ledger, TODAY - timedelta(days=10))
     stale = _rows(ledger)
     assert links.await_invoice(ledger, "NORD", waits, "")
     assert _apply(ledger, {k: stale[k] for k in (waits,)}) == []
@@ -707,7 +706,6 @@ def test_a_rule_leaves_a_card_debit_its_receipt_explains(ledger, live):
     )
     assert ledger.assign_card("NORD", card, "NORD")
     _link(ledger, card, kind="label", reason="other", note="abonament", remember="name")
-    _saved_on(ledger, TODAY - timedelta(days=10))
     stale = _rows(ledger)
     assert stale[later]["proposal"]["kind"] == "remembered"
     day = (TODAY - timedelta(days=3)).isoformat()
@@ -737,8 +735,59 @@ def test_a_rule_never_links_or_settles_an_invoice_on_its_own(ledger, live):
     _bill(ledger, "311")
     _bill(ledger, "312")
     _link(ledger, first, invoices=["311"], remember="name")
-    _saved_on(ledger, TODAY - timedelta(days=10))
     assert _apply(ledger) == []
     assert ledger.efactura("312")["status"] == "open"
     assert not ledger.db.execute("SELECT 1 FROM settled_tx WHERE tx_key=?", (later,)).fetchone()
     assert _rows(ledger)[later]["proposal"]["as"]["kind"] == "documents"
+
+
+def test_a_transfer_between_the_firms_accounts_explains_itself_when_one_end_names_the_other(ledger, live):
+    """A debit naming another of the firm's accounts and the credit there, both free: a Transfer între conturi with
+    both ends, made by no person. Two ends that share only the amount, naming no account, are left to people, and so
+    is a transfer a person undid."""
+    eur = "RO71BTRLEURCRT0000000001"
+    out, into, bare_out, bare_in = _record(
+        ledger,
+        "NORD",
+        _tx(60, "debit", "5000.00", counterparty_iban=eur),
+        _tx(61, "credit", "5000.00", iban=eur),
+        _tx(62, "debit", "700.00"),
+        _tx(63, "credit", "700.00", iban=eur),
+    )
+    assert _apply(ledger) == [out]
+    rows = _rows(ledger)
+    assert (rows[into]["explanation"]["other"], rows[out]["explanation"]["link"]["rule"]) == (out, "transfer")
+    assert rows[bare_out]["explanation"] is None and rows[bare_in]["explanation"] is None
+    links.unlink(ledger, "NORD", out, rows[out]["explanation"]["link"]["id"])
+    assert _apply(ledger) == [] and _rows(ledger)[into]["explanation"] is None
+
+
+def test_two_connections_explaining_the_same_transfer_explain_it_once(ledger, live, monkeypatch):
+    """Both read the same rows and race to explain the transfer: the second finds both ends taken."""
+    out, _ = _record(
+        ledger,
+        "NORD",
+        _tx(64, "debit", "900.00", counterparty_iban="RO71BTRLEURCRT0000000001"),
+        _tx(65, "credit", "900.00", iban="RO71BTRLEURCRT0000000001"),
+    )
+    stale, slow, gate, done = list(_rows(ledger).values()), links.other_end, threading.Barrier(2), []
+
+    def other_end(*args, **kw):
+        time.sleep(0.2)
+        return slow(*args, **kw)
+
+    def run() -> None:
+        L = Ledger(timeout=10)
+        gate.wait()
+        try:
+            done.extend(links.apply_rules(L, "NORD", stale))
+        finally:
+            L.close()
+
+    monkeypatch.setattr(links, "other_end", other_end)
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert done == [out] and ledger.db.execute("SELECT count(*) FROM tx_links").fetchone()[0] == 1

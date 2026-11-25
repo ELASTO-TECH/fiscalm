@@ -230,7 +230,7 @@ between them. The transaction list and sheets show those explanations.
 | **Încasare** | a credit: the issued invoices it covers, the difference named | fiscalm (exact rules), a Decontare, or the user |
 | **Plată** | a debit: the payment it confirms, and so the received invoice or tax it pays | fiscalm (the payment's IBAN, amount and reference), or the user |
 | **Bon** | a card debit: the receipt that proves it | fiscalm (the receipt's amount and day) |
-| **Transfer între conturi** | money between two of the firm's own accounts | fiscalm (both ends seen), or the user |
+| **Transfer între conturi** | money between two of the firm's own accounts | fiscalm (both ends seen, one naming the other's account), or the user |
 | **Avans de trezorerie** | the owner's money in or out | the user, or an association the user made |
 | **Fără document** | a bank fee, interest, a personal card spend: a label the user picks, kept for the accountant | the user, or an association the user made |
 
@@ -251,7 +251,9 @@ to it. Every link the user makes can be undone from the same sheet, and the part
 
 From a link the user makes, fiscalm can offer to remember it: "transfers from this IBAN are Client Exemplu SRL",
 "this card is personal" (Card personal). These are associations the user owns and sees on the partner's sheet, the
-transaction's sheet and in Automatizări, removed with `memory-forget`; never regexes or lists in a config file. The
+transaction's sheet and in Automatizări, removed with `memory-forget`; never regexes or lists in a config file. A
+Fără document or Avans association explains on its own the lines of that account, card or merchant still to explain,
+older ones too, unless a person undid that line's explanation. The
 explanations are the `tx-link` and `tx-unlink` actions ([openapi.json](openapi.json)).
 
 ### Couriers and processors hold money for the firm

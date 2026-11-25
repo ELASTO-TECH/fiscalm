@@ -500,19 +500,21 @@ def proposals(company: str, txs: list[statements.Tx], kept: list) -> list[dict |
 
 def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
     """Explain on their own, after the matchers ran, the Tranzacții rows (transactions.view) left De explicat with
-    nothing else proposed for them: by a saved Fără document or Avans rule, on a line dated from the day it was saved
-    ("tranzacțiile viitoare"); else a line the bank's own codes or words call its fee or interest, as Fără document.
-    A row with any other proposal (an exact or named receipt, a settlement, invoices it fits) or waiting for its
-    invoice is left to people. Written by Ledger.link_tx under the write lock, which checks again what a person may
-    have decided since the rows were read (_untouched). Returns the keys explained."""
-    saved = {m["id"]: m["at"][:10] for m in L.memories(company)}
+    nothing else proposed for them: by a saved Fără document or Avans rule, on any line of its card, account or
+    merchant still to explain, older ones too; else a line the bank's own codes or words call its fee or interest, as
+    Fără document; else a debit whose other end on another of the firm's accounts is free too (_own_transfer), as a
+    Transfer între conturi with both ends. A row with any other proposal (an exact or named receipt, a settlement,
+    invoices it fits) or waiting for its invoice is left to people. Written by Ledger.link_tx under the write lock,
+    which checks again what a person may have decided since the rows were read (_untouched). Returns the keys
+    explained."""
+    free = {r["id"] for r in rows if not (r["explanation"] or r["proposal"] or r["awaiting"]) and r["can_link"]}
     done = []
     for r in rows:
         if r["explanation"] or not r["can_link"] or r["awaiting"]:
             continue
         kept = r["proposal"]["as"] if r["proposal"] and r["proposal"]["kind"] == "remembered" else None
         memory = r["proposal"]["memory"] if kept else None
-        if kept and kept["kind"] in AUTOMATIC and r["date"] >= saved.get(memory, "9999"):
+        if kept and kept["kind"] in AUTOMATIC:
             words, rule = kept["note"] or "", "saved"
             if kept["kind"] == "label":
                 build = _labelled(L, company, r["id"], kept["reason"] or "", words)
@@ -520,6 +522,8 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
                 build = _advance(L, company, r["id"], words)
         elif not r["proposal"] and r["bank_says"]:
             memory, rule, build = None, "bank", _labelled(L, company, r["id"], r["bank_says"], "")
+        elif not r["proposal"] and r["direction"] == "debit" and _free_other_end(L, company, r["id"], free):
+            memory, rule, build = None, "transfer", _own_transfer(L, company, r["id"], free)
         else:
             continue
         try:
@@ -532,25 +536,63 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
     return done
 
 
-def _untouched(L: Ledger, company: str, key: str, memory: str | None, build: Callable[[], dict]) -> Callable[[], dict]:
-    """A rule's explanation, under the write lock, only while nobody decided otherwise since the rows were read: the
-    line not taken back from an explanation, not waiting for its invoice, not a debit to choose for, not a card debit
-    a receipt could explain (recon.match_receipts, by amount or by name), not a credit a pending settlement report
-    claims, and the saved rule still the same one (a replaced rule has a new id)."""
+def _free_other_end(L: Ledger, company: str, key: str, free: set[str]) -> str | None:
+    """The other end (other_end) of debit `key` when a rule may explain both as a Transfer între conturi: it is one of
+    the rows left free, nobody decided otherwise for it since (_decided), and one of the two names the other's
+    account. Two lines that only share an amount and a few days, naming no account, may be a payment and an unrelated
+    collection: left to people."""
+    t, _ = _transaction(L, company, key)
+    other = other_end(L, company, key, t)
+    if other not in free or _decided(L, other):
+        return None
+    o, _ = _transaction(L, company, other)
+    named = companies.normalize_iban(t.counterparty_iban) or companies.normalize_iban(o.counterparty_iban)
+    return other if named else None
 
-    def build_once() -> dict:
+
+def _own_transfer(L: Ledger, company: str, key: str, free: set[str]) -> Callable[[], dict]:
+    """A Transfer între conturi no person made, both ends together, read again under the write lock."""
+
+    def build() -> dict:
         t, _ = _transaction(L, company, key)
-        decided = L.db.execute(
+        other = _free_other_end(L, company, key, free)
+        if not other:
+            raise LinkRefused("changed")
+        return {"kind": "transfer", "difference": Decimal(0), "items": [("tx " + other, t.amount)]}
+
+    return build
+
+
+def _decided(L: Ledger, key: str) -> bool:
+    """A person decided for the line: took it back from an explanation, waits for its invoice, or must choose for it."""
+    return bool(
+        L.db.execute(
             "SELECT 1 FROM tx_rules_off WHERE tx_key=?1 UNION ALL SELECT 1 FROM tx_awaiting WHERE tx_key=?1 "
             "UNION ALL SELECT 1 FROM ambiguous_tx WHERE tx_key=?1",
             (key,),
         ).fetchone()
+    )
+
+
+def _untouched(L: Ledger, company: str, key: str, memory: str | None, build: Callable[[], dict]) -> Callable[[], dict]:
+    """A rule's explanation, under the write lock, only while nobody decided otherwise since the rows were read: the
+    line not decided by a person (_decided), not a card debit a receipt could explain (recon.match_receipts, by
+    amount or by name), not a credit a pending settlement report claims, and the saved rule still the same one (a
+    replaced rule has a new id)."""
+
+    def build_once() -> dict:
+        t, _ = _transaction(L, company, key)
         gone = (
             memory
             and not L.db.execute("SELECT 1 FROM tx_memory WHERE id=? AND company=?", (memory, company)).fetchone()
         )
         receipt = t.direction == "debit" and t.card_last4 and recon.match_receipts([t], recon._receipts(L, company))
-        if decided or gone or receipt or (t.direction == "credit" and settlements.claimed_credit(L, company, t)):
+        if (
+            _decided(L, key)
+            or gone
+            or receipt
+            or (t.direction == "credit" and settlements.claimed_credit(L, company, t))
+        ):
             raise LinkRefused("changed")
         return build()
 
