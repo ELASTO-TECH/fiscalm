@@ -68,8 +68,9 @@ the rules could not settle (no firm, an unclear buyer, two firms, no single tota
 with its currency, a known currency, and buyer and seller matched to the firms by CUI or name and printed
 on the document. It never overrules the rules: a firm they found must include its buyer, a total they found must
 include its total. A confident reading may file the document; a low-confidence one, a disagreement, or a refusal only the AI sees
-(proforma, credit note, the firm as seller, a Romanian seller) leaves the question open with its number, date and
-supplier filled in. A scan without text is asked about, never silently refused. Only the rules refuse.
+(proforma, credit note, the firm as seller, a Romanian seller, a number the firm issued) leaves the question open. The
+number the AI reads is only shown in the question, never used to refuse or match a document. A scan without text is
+asked about once the AI has read it; without an answer from the AI it stays unreadable. Only the rules refuse.
 
 **In doubt, one question (Sarcini).** No firm on the document, a firm without a clear buyer's role, two firms, a sender tied to another firm, or a total
 that isn't clear: the document waits in Sarcini as one question with the answers to pick (each firm, each total

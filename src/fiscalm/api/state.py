@@ -1346,7 +1346,7 @@ def _to_check(L: Ledger, co: str) -> list[dict]:
                 "month": (d["date"] or q["received"] or "")[:7],
                 "date": d["date"],
                 "supplier": d["supplier"],
-                "number": d["number"] or None,
+                "number": d["number"] or d.get("number_read") or None,
                 "reason": d["reason"],
                 "companies": d["companies"],
                 "totals": [{"amount": money(a), "currency": c} for a, c in d["totals"]],

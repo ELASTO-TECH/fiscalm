@@ -67,6 +67,8 @@ NOT_TOTAL = re.compile(
     r"\bbez[\W_]+DPH\b|без[\W_]+ДДС",
     re.I,
 )
+# A tax amount's own line, unless it also says it is a total (Total incl. VAT).
+TAX_ONLY = re.compile(r"^(?!.*\btotal).*\b(vat|tva|tax|mwst|ust|iva|dph|btw|[áa]fa|ддс)\b", re.I)
 # Generic totals next to a VAT marker are recaps unless explicitly gross/payable.
 VAT_RECAP = tuple(
     tuple(re.compile(pattern, re.I) for pattern in patterns)
@@ -134,7 +136,7 @@ class Doc:
     evidence: docs.Evidence | None = None
     fiscal_type: str = ""  # A verified UBL also establishes the type of its PDF copy.
     text: str = field(default="", repr=False)  # the PDF's text, for the AI helper only
-    number_read: str = ""  # a number the AI read in doubt: shown in the question, never grounds for a decision
+    number_read: str = ""  # the number the AI read: shown in the question, never used to refuse or match a document
 
 
 # ------------------------------------------------------------------ reading a document
@@ -784,7 +786,8 @@ def ask_user(L: Ledger, msg: imapread.Message, att: imapread.Attachment, doc: Do
         "company": out.company or None,
         "totals": [list(t) for t in ([out.total] if out.total else doc.totals[:TOTALS_ASKED])],
         "firms": doc.firms,
-        "number": doc.number or doc.number_read,
+        "number": doc.number,
+        "number_read": doc.number_read,
         "date": doc.date or msg.date,
         "supplier": doc.supplier or _vendor(msg),
         "card_last4": doc.card_last4,
@@ -835,7 +838,7 @@ def _printed(text: str, amount: str, currency: str) -> bool:
     shown = {_currency(m.group(0)) for m in _CUR.finditer(text)}
     for line in text.splitlines():
         curs = {_currency(m.group(0)) for m in _CUR.finditer(line)}
-        if (curs or shown) != {currency} or NOT_TOTAL.search(line) or _vat_recap(line):
+        if (curs or shown) != {currency} or NOT_TOTAL.search(line) or _vat_recap(line) or TAX_ONLY.search(line):
             continue  # another currency, none shown at all, or a subtotal, tax or discount line
         for m in ai_extract.AMOUNT.finditer(line):
             if ai_extract.money(m.group(1), m.group(2)) == Decimal(amount) and not _negative(line, m):
@@ -849,7 +852,7 @@ def _agreed_totals(doc: Doc, x: ai_extract.Extraction) -> list[tuple[str, str]] 
     if not x.total:
         return doc.totals
     if doc.totals:
-        picked = [t for t in doc.totals if t[0] == x.total and t[1] in (x.currency, "")]
+        picked = [t for t in doc.totals if t == (x.total, x.currency) and x.currency]  # the rules showed its currency
         return picked if len(picked) == 1 else None
     return [(x.total, x.currency)] if x.currency and (not doc.text or _printed(doc.text, x.total, x.currency)) else None
 
@@ -859,9 +862,10 @@ def ai_reading(L: Ledger, doc: Doc, data: bytes, *, ask: Callable | None = None)
     its first page's picture when it has no text. None without an AI integration or a usable answer.
 
     The AI never overrules the rules: a firm the rules found must include its buyer, a total they found must include
-    its total. A confident reading adds the buyer's role and the total; anything else (low confidence, a disagreement,
-    a refusal only the AI sees: proforma, credit note, a firm as seller, a Romanian seller) fills only the number, the
-    date and the supplier's name, so the question shows them. Only the rules refuse.
+    its total. A confident reading adds the buyer's role, the total and the date; anything else (low confidence, a
+    disagreement, a refusal only the AI sees: proforma, credit note, a firm as seller, a Romanian seller, a number the
+    firm issued) fills only the supplier's name. The number it reads is only shown (number_read), never used to refuse
+    or match a document. Only the rules refuse.
     """
     image = None
     if not doc.text.strip():
@@ -875,15 +879,15 @@ def ai_reading(L: Ledger, doc: Doc, data: bytes, *, ask: Callable | None = None)
     out = replace(
         doc,
         number_read=x.number,
-        date=doc.date or x.issue_date,
         supplier=doc.supplier or x.seller_name,
         card_last4=doc.card_last4 or x.card_last4,
     )
     out.refused = ""  # read now: a scan without text waits as a question, never as a silent refusal
     totals = _agreed_totals(doc, x)
-    if not x.confident or x.rejected or _ai_would_refuse(L, x) or totals is None:
+    own = bool(x.number and x.buyer and _issued_by(L, x.buyer, x.number))
+    if not x.confident or x.rejected or own or _ai_would_refuse(L, x) or totals is None:
         return out  # in doubt: the question stays, with the fields read
-    out.number, out.totals = doc.number or x.number, totals
+    out.date, out.totals = doc.date or x.issue_date, totals
     if x.buyer and (not doc.firms or x.buyer in doc.firms):
         out.firms = doc.firms or [x.buyer]
         out.roles = doc.roles | {x.buyer: "buyer"}

@@ -5,7 +5,7 @@ document's fields. The answer is a proposal, never a decision: every field is ch
 fails (an unknown field is empty, never guessed):
 
 - the date is an ISO day, the total a positive amount with at most two decimals, the currency a known code;
-- with the document's text at hand, the total, the number and each firm must stand in that text: the AI reads, it
+- with the document's text at hand, the total, the number, the date and each firm must stand in that text: the AI reads, it
   never adds a value the document doesn't carry;
 - the buyer and the seller are matched to the given firms by the engine (CUI first, then legal name or alias), never
   taken from the AI's choice; an id and a name that disagree leave the party unknown.
@@ -111,11 +111,12 @@ def _total(value: str, text: str) -> str:
     return f"{v:.2f}" if v > 0 and (not text or v in amounts(text)) else ""
 
 
-def _day(value: str) -> str:
+def _day(value: str, text: str) -> str:
     try:
-        return value if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) and date.fromisoformat(value) else ""
+        ok = re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) and date.fromisoformat(value)
     except ValueError:
         return ""
+    return value if ok and (not text or value in docs._dates(text)) else ""
 
 
 def _number(value: str, text: str) -> str:
@@ -152,7 +153,7 @@ def check(raw: dict, firms: dict[str, companies.Company], text: str = "") -> Ext
     card = s["card_last4"]
     checked = {
         "number": _number(s["number"], text),
-        "issue_date": _day(s["issue_date"].strip()),
+        "issue_date": _day(s["issue_date"].strip(), text),
         "total": _total(s["total"].strip(), text),
         "currency": currency if currency in docs.CURRENCIES else "",
         "card_last4": card if re.fullmatch(r"\d{4}", card) and card in (text or card) else "",
