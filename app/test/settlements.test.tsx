@@ -78,6 +78,7 @@ it.each([
   ["awb_unknown", "Linia 2: AWB 1000000001 nu corespunde niciunei comenzi."],
   ["order_unknown", "Linia 2: comanda 77 nu există în comenzile firmei."],
   ["invoice_missing_or_ambiguous", "Linia 2: factura NRD 0043 nu există, apare de mai multe ori sau nu e a acestei comenzi."],
+  ["adjustment", "Linia 2: este o rambursare sau o ajustare. Verific-o manual."],
 ])("names the line's real cause (%s) and offers no confirmation without a verified credit", async (reason, text) => {
   const s = fixture(), r = settlement();
   r.lines[1] = { ...r.lines[1], awb: "1000000001", order: "77", invoice: null };

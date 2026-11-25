@@ -6,6 +6,7 @@ import csv
 import io
 import re
 import zipfile
+from datetime import date
 from decimal import Decimal
 from xml.etree import ElementTree as ET
 
@@ -70,9 +71,11 @@ def amount(value: str) -> tuple[Decimal, str]:
     return Decimal(("-" if sign == "-" else "") + digits), currency_code(word) if word else ""
 
 
-def money(value: str) -> Decimal:
-    """A stored or structured amount (a parsed line, a Shopify payout): plain dot decimal, nothing to interpret."""
-    if not isinstance(value, str) or not re.fullmatch(r"\d{1,12}(?:\.\d{1,2})?", value):
+def money(value: str, *, signed: bool = False) -> Decimal:
+    """A stored or structured amount (a parsed line, a Shopify payout): plain dot decimal, nothing to interpret.
+    `signed`: a stored report line, where a refund or adjustment keeps its minus."""
+    pattern = r"-?\d{1,12}(?:\.\d{1,2})?" if signed else r"\d{1,12}(?:\.\d{1,2})?"
+    if not isinstance(value, str) or not re.fullmatch(pattern, value):
         raise ReportError("Invalid amount; use decimal strings with a dot")
     return Decimal(value)
 
@@ -102,36 +105,11 @@ def table(data: bytes, kind: str, delimiter: str = ",") -> list[list[str]]:
                     raise ReportError("Oversized or duplicate XLSX entries")
                 if any("externalLink" in i.filename or "vbaProject" in i.filename for i in infos):
                     raise ReportError("External links and macros refuse")
-                sheets = [i.filename for i in infos if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", i.filename)]
-                if len(sheets) != 1:
-                    raise ReportError("Exactly one worksheet required")
-                ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                names = [i.filename for i in infos if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", i.filename)]
                 strings = []
                 if "xl/sharedStrings.xml" in z.namelist():
-                    strings = ["".join(x.itertext()) for x in _xml(z.read("xl/sharedStrings.xml")).findall("s:si", ns)]
-                rows = []
-                for row in _xml(z.read(sheets[0])).findall("s:sheetData/s:row", ns):
-                    values: list[str] = []
-                    for c in row.findall("s:c", ns):
-                        if c.find("s:f", ns) is not None or c.get("t") in ("e", "b"):
-                            raise ReportError("Formula or unsupported cell")
-                        ref = c.get("r", "")
-                        if not re.fullmatch(r"[A-Z]{1,3}\d+", ref):
-                            raise ReportError("Invalid cell reference")
-                        col = 0
-                        for ch in re.sub(r"\d", "", ref):
-                            col = col * 26 + ord(ch) - 64
-                        if col > 128 or col <= len(values):
-                            raise ReportError("Invalid column ordering")
-                        values.extend([""] * (col - len(values)))
-                        v = c.findtext("s:v", "", ns)
-                        if c.get("t") == "s":
-                            if not v.isdigit() or int(v) >= len(strings):
-                                raise ReportError("Invalid shared string index")
-                            values[-1] = strings[int(v)]
-                        else:
-                            values[-1] = "".join(c.find("s:is", ns).itertext()) if c.get("t") == "inlineStr" else v
-                    rows.append(values)
+                    strings = ["".join(x.itertext()) for x in _xml(z.read("xl/sharedStrings.xml")).findall("s:si", NS)]
+                rows = _one_table([_sheet(z.read(name), strings) for name in sorted(names, key=_sheet_number)])
         else:
             raise ReportError("Use CSV or XLSX")
     except (
@@ -152,6 +130,53 @@ def table(data: bytes, kind: str, delimiter: str = ",") -> list[list[str]]:
     return rows
 
 
+NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+
+def _sheet_number(name: str) -> int:
+    return int(re.sub(r"\D", "", name))
+
+
+def _one_table(sheets: list[list[list[str]]]) -> list[list[str]]:
+    """A workbook's table: its sheets with the same header row read as one, the header once. Several headers (a
+    summary sheet beside the lines) pick the one with the most lines; a tie can't be told and refuses."""
+    tables: dict[tuple[str, ...], list[list[str]]] = {}
+    for rows in sheets:
+        if rows:
+            tables.setdefault(tuple(rows[0]), [list(rows[0])]).extend(rows[1:])
+    ranked = sorted((len(t) for t in tables.values()), reverse=True)
+    if not ranked or (len(ranked) > 1 and ranked[0] == ranked[1]):
+        raise ReportError("Exactly one table required")
+    return max(tables.values(), key=len)
+
+
+def _sheet(xml: bytes, strings: list[str]) -> list[list[str]]:
+    rows = []
+    for row in _xml(xml).findall("s:sheetData/s:row", NS):
+        values: list[str] = []
+        for c in row.findall("s:c", NS):
+            if c.find("s:f", NS) is not None or c.get("t") in ("e", "b"):
+                raise ReportError("Formula or unsupported cell")
+            ref = c.get("r", "")
+            if not re.fullmatch(r"[A-Z]{1,3}\d+", ref):
+                raise ReportError("Invalid cell reference")
+            col = 0
+            for ch in re.sub(r"\d", "", ref):
+                col = col * 26 + ord(ch) - 64
+            if col > 128 or col <= len(values):
+                raise ReportError("Invalid column ordering")
+            values.extend([""] * (col - len(values)))
+            v = c.findtext("s:v", "", NS)
+            if c.get("t") == "s":
+                if not v.isdigit() or int(v) >= len(strings):
+                    raise ReportError("Invalid shared string index")
+                values[-1] = strings[int(v)]
+            else:
+                values[-1] = "".join(c.find("s:is", NS).itertext()) if c.get("t") == "inlineStr" else v
+        rows.append(values)
+    return rows
+
+
 def _money_line(n: int, line: dict[str, str]) -> dict[str, str]:
     """Gross, fee and net as exact cents, one currency per line. A fee written as a deduction (`-2,00`) is the same fee;
     an empty fee is zero."""
@@ -166,11 +191,14 @@ def _money_line(n: int, line: dict[str, str]) -> dict[str, str]:
     if len(currencies) > 1:
         raise ReportError("Mixed currencies")
     total, charge = gross[0], abs(fee[0])
-    if total <= 0 or charge > total or (net is not None and net[0] != total - charge):
+    # A refund, dispute or adjustment (negative amount or a category other than a charge) is kept as written and
+    # flagged: its batch never settles on its own, and the Sarcină names this line.
+    adjustment = total < 0 or line.get("category", "charge") != "charge"
+    if not total or (not adjustment and charge > total) or (net is not None and net[0] != total - charge):
         raise ReportError(f"Line {n}: invalid gross/fee/net")
-    if "category" in line and line["category"] != "charge":
-        raise ReportError(f"Line {n}: refunds, disputes and adjustments require review")
-    out = line | {"gross": f"{total:.2f}", "fee": f"{charge:.2f}"}
+    if not adjustment and not any(line.get(k) for k in ("reference", "awb", "order")):
+        raise ReportError(f"Line {n}: missing reference or control character")
+    out = line | {"gross": f"{total:.2f}", "fee": f"{charge:.2f}"} | ({"adjustment": "1"} if adjustment else {})
     if net is not None:
         out["net"] = f"{total - charge:.2f}"  # equal to the mapped net, written as stored money
     if currencies:
@@ -204,6 +232,7 @@ def parse(
             "net",
             "currency",
             "batch",
+            "date",
             "category",
             "awb",
             "order",
@@ -225,17 +254,40 @@ def parse(
             raise ReportError(f"Line {n}: wrong column count")
         line = {key: row[header.index(col)].strip() for key, col in mapping.items()}
         line = {k: "" if v in PLACEHOLDERS else v for k, v in line.items()}
-        if not any(line.get(k) for k in ("reference", "awb", "order")) or any(
-            ord(c) < 32 for v in line.values() for c in v
-        ):
+        if any(ord(c) < 32 for v in line.values() for c in v) or ("batch" in line and not line["batch"]):
             raise ReportError(f"Line {n}: missing reference or control character")
+        if "date" in line:
+            line["date"] = (day(line["date"]) or _refuse(f"Line {n}: invalid date")).isoformat()
         result.append(_money_line(n, line))
         fee = amount(line["fee"])[0] if line["fee"] else 0
-        if fee:
+        if fee and not result[-1].get("adjustment"):
             signs.add(fee < 0)
     if len(signs) > 1:  # `-5` beside `5`: a rebate or a deduction? One report writes its fees one way.
         raise ReportError("Fee signs differ: invalid gross/fee/net")
-    batches = {r.get("batch") for r in result}
-    if len(batches) != 1:
-        raise ReportError("Exactly one payout required")
     return result
+
+
+def _refuse(message: str):
+    raise ReportError(message)
+
+
+def day(value: str) -> date | None:
+    """A payment day as exports write it: 2026-10-31, 31.10.2026 or 31/10/2026, with an optional time."""
+    m = re.fullmatch(
+        r"(?:(\d{4})-(\d{2})-(\d{2})|(\d{1,2})[./](\d{1,2})[./](\d{4}))(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?", value.strip()
+    )
+    try:
+        return m and date(*map(int, m.group(1, 2, 3) if m[1] else m.group(6, 5, 4)))
+    except ValueError:
+        return None
+
+
+def payouts(lines: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
+    """A report's lines by payout id, in file order ("" when the file has no payout column). With a mapped date
+    column, every line of one payout names the same day."""
+    out: dict[str, list[dict[str, str]]] = {}
+    for line in lines:
+        out.setdefault(line.get("batch", ""), []).append(line)
+    if any(len({x["date"] for x in group}) > 1 for group in out.values() if "date" in group[0]):
+        raise ReportError("Payout dates differ")
+    return out

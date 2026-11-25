@@ -16,7 +16,7 @@ from fiscalm.bank import statements
 from fiscalm.identity import partner_id
 from fiscalm.ledger import Ledger
 from fiscalm.settlements import engine as settlements
-from fiscalm.settlements.reports import LIMIT, SOURCES, STRIPE, ReportError, currency_code, parse, table
+from fiscalm.settlements.reports import LIMIT, SOURCES, STRIPE, ReportError, currency_code, day, parse, table
 from fiscalm.validate import iban_valid
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -30,6 +30,7 @@ FIELDS = (
     "net",
     "currency",
     "batch",
+    "date",
     "category",
     "company_cui",
 )
@@ -58,6 +59,7 @@ COLLECTED = "Raportul de decontare a fost încărcat. Facturile din el sunt înc
 TO_CONFIRM = "Raportul de decontare a fost încărcat. Confirmă decontarea în Sarcini."
 WAITING = "Raportul de decontare a fost încărcat. Se asociază cu încasarea când plata apare în extras."
 DUPLICATE = "Raportul de decontare era deja încărcat."
+SAID = (TO_CHECK, TO_CONFIRM, WAITING, COLLECTED)  # from least to most settled
 NOT_KNOWN = "Fișierul nu este un extras de cont sau un raport de decontare pe care fiscalm îl poate citi."
 TOO_BIG = "Fișierul este prea mare pentru un raport de decontare."
 BAD_DATE = "Alege data raportului: ziua plății, cel mult azi și nu mai veche de un an."
@@ -67,8 +69,7 @@ NOT_READ = "Raportul nu a putut fi citit: {why}"
 # What a refused report says, by what the parser said; anything else reads as the generic message (no data echoed).
 WHY = (
     ("company CUI", "coloana CUI conține o valoare care nu corespunde firmei alese; nu s-a importat nicio linie"),
-    ("refunds, disputes", "are rambursări sau ajustări, care se verifică manual"),
-    ("Exactly one payout", "trebuie să cuprindă o singură plată"),
+    ("Payout dates differ", "o plată are linii cu date diferite"),
     ("Mixed currencies", "are mai multe monede"),
     ("Invalid amount", "o sumă nu poate fi citită exact; scrie-o ca 1.234,56 sau 1234.56"),
     ("invalid gross/fee/net", "o linie are suma, comisionul sau suma netă greșite"),
@@ -202,20 +203,10 @@ def _guess(header: list[str], orders: bool) -> dict[str, str]:
     return guess
 
 
-def _day(value: str) -> date | None:
-    m = re.fullmatch(
-        r"(?:(\d{4})-(\d{2})-(\d{2})|(\d{1,2})[./](\d{1,2})[./](\d{4}))(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?", value.strip()
-    )
-    try:
-        return m and date(*map(int, m.group(1, 2, 3) if m[1] else m.group(6, 5, 4)))
-    except ValueError:
-        return None
-
-
 def _guess_date(rows: list[list[str]]) -> str:
     """The payment day, when one date column names the same day on every line; otherwise the person picks it."""
     found = [n for n, c in enumerate(rows[0]) if _plain(c) in DATE_COLUMNS]
-    days = {_day(r[found[0]]) if len(r) > found[0] else None for r in rows[1:]} if len(found) == 1 else set()
+    days = {day(r[found[0]]) if len(r) > found[0] else None for r in rows[1:]} if len(found) == 1 else set()
     return next(iter(days)).isoformat() if len(days) == 1 and None not in days else ""
 
 
@@ -315,30 +306,31 @@ def accept_report(
     stored = _store(L, company, data, spec, described, sig)
     if isinstance(stored, dict):
         return stored
-    rid = stored
     # Only this company's pending reports, against its own stored statements read through the checked evidence
     # reader: nothing else is matched by an upload.
     settlements.match_statement(L, statements.Statement(company, None, None, []))
-    row = L.db.execute("SELECT status,error FROM settlement_reports WHERE id=?", (rid,)).fetchone()
-    message = (
-        COLLECTED
-        if row["status"] == "collected"
-        else TO_CONFIRM
-        if row["error"] == "statement_confirmation_required"
-        else WAITING
-        if row["error"] in (None, "credit_missing_or_ambiguous")
-        else TO_CHECK
-    )
+    rows = [L.db.execute("SELECT status,error FROM settlement_reports WHERE id=?", (rid,)).fetchone() for rid in stored]
+    # The file's message is its least settled payout's.
+    message = min((_said(row) for row in rows), key=SAID.index)
     return {
         "status": "added",
         "kind": "settlement",
-        "id": rid,
+        "id": stored[0],
+        "ids": stored,
         "lines": len(lines),
         "message": message,
     }
 
 
-def _store(L: Ledger, company: str, data: bytes, spec: dict, described: dict, sig: str) -> str | dict:
+def _said(row) -> str:
+    if row["status"] == "collected":
+        return COLLECTED
+    if row["error"] in ("confirmation_required", "statement_confirmation_required"):
+        return TO_CONFIRM
+    return WAITING if row["error"] in (None, "credit_missing_or_ambiguous") else TO_CHECK
+
+
+def _store(L: Ledger, company: str, data: bytes, spec: dict, described: dict, sig: str) -> list[str] | dict:
     try:
         with L.tx() as db:  # the payer is saved with its first report or not at all
             db.execute(
@@ -351,11 +343,12 @@ def _store(L: Ledger, company: str, data: bytes, spec: dict, described: dict, si
                     json.dumps(described, ensure_ascii=False),
                 ),
             )
-            return settlements.import_report(L, company, data, spec)
+            return settlements.import_payouts(L, company, data, spec)
     except sqlite3.IntegrityError:
+        digest = hashlib.sha256(data).hexdigest()
         if L.db.execute(
-            "SELECT 1 FROM settlement_reports WHERE company=? AND digest=? AND status!='withdrawn'",
-            (company, hashlib.sha256(data).hexdigest()),
+            "SELECT 1 FROM settlement_reports WHERE company=? AND (digest=? OR digest LIKE ?) AND status!='withdrawn'",
+            (company, digest, digest + ":%"),
         ).fetchone():
             return {"status": "duplicate", "kind": "settlement", "message": DUPLICATE}
         raise Refused(409, CONFLICT) from None
@@ -408,12 +401,13 @@ def _report_spec(data: bytes, kind: str, delimiter: str, described: dict, when: 
         lines = parse(data, kind, spec["source"], mapping, delimiter)
     except ReportError as e:
         raise Refused(422, _why(e)) from None
-    batches = {line.get("batch") for line in lines}
-    batch = next(iter(batches)) if len(batches) == 1 else None
-    if "batch" in mapping and not (isinstance(batch, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", batch)):
+    batches = {line.get("batch", "") for line in lines}
+    if "batch" in mapping and not all(re.fullmatch(r"[A-Za-z0-9_-]{1,100}", b) for b in batches):
         raise Refused(422, NOT_READ.format(why="numărul plății nu poate fi citit"))
-    # Without a payout id the report is named by its bytes: the same file twice is the same report.
-    spec["report_key"] = batch if "batch" in mapping else "u" + hashlib.sha256(data).hexdigest()[:24]
+    # Without a payout id the report is named by its bytes: the same file twice is the same report. A file of
+    # several payouts becomes one report per payout, each keyed by its own id (engine.import_payouts).
+    one = next(iter(batches)) if len(batches) == 1 else ""
+    spec["report_key"] = one or "u" + hashlib.sha256(data).hexdigest()[:24]
     return spec, lines
 
 
