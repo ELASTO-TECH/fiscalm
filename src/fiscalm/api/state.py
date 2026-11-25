@@ -296,8 +296,8 @@ def _redact(line: str) -> str:
 
 
 def ambiguous(L: Ledger, co: str, live: bool = False) -> list[dict]:
-    """Statement debits that fit several invoices and settled none (efactura.note_ambiguous), with their candidates."""
-    used, fits_of, out = L.used_txs(), efactura.rivals(L, co), []
+    """Statement debits that settled none and wait for a person (efactura.note_ambiguous), with their candidates."""
+    used, fits_of, out = L.used_txs(), efactura.candidates(L, co), []
     for a in L.ambiguous(co):
         if a["tx_key"] in used:
             continue
@@ -337,8 +337,8 @@ def ambiguous(L: Ledger, co: str, live: bool = False) -> list[dict]:
                 "date": t.date.isoformat(),
                 "amount": money(t.amount),
                 "currency": t.currency,
-                "counterparty": t.counterparty,
-                "description": t.description,
+                "counterparty": statements.masked(t.counterparty),
+                "description": statements.masked(t.description),
                 "month": t.date.isoformat()[:7],
                 "candidates": sorted(cands, key=lambda c: (c["date"] or "", c["number"] or "")),
                 "can_resolve": True,

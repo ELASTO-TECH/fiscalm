@@ -71,12 +71,12 @@ function PackTask({ r, title }: { r: Report; title: string }) {
   return <Task icon="paper-plane-tilt" title={title} body={body}><PackButtons month={r.month} /></Task>;
 }
 
-/** "Plată de lămurit": one button per invoice the debit fits (one when it fits only by the supplier's name, which the
- * answer then remembers); the user's pick settles it with the debit. */
+/** "Plată de lămurit": one button per invoice the debit may have paid (one when nothing on the statement proves it: only
+ * the supplier's name, or only the amount); the user's pick settles it with the debit. */
 export const ambiguousBody = (a: Ambiguous, today: string) =>
   `Plată de ${lei(a.amount)} ${curOf(a.currency)} pe ${dm(a.date, today)} către ${a.counterparty || a.description}. ${a.candidates.length > 1
     ? "Se potrivește cu mai multe facturi. Alege factura plătită."
-    : "Se potrivește cu o factură doar după numele furnizorului. Alege-o dacă este factura plătită."}`;
+    : "Extrasul nu dovedește factura plătită. Alege factura dacă aceasta este."}`;
 
 function CandidateButtons({ candidates, tx, today }: { candidates: Ambiguous["candidates"]; tx: string; today: string }) {
   return candidates.map((c) => <Act key={c.id} action="resolve-debit" body={{ tx, target: c.id }} cls="btn g"
