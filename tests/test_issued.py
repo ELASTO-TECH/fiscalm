@@ -355,11 +355,25 @@ def test_only_one_whole_identifier_picks_among_amount_twins(ledger, home, sec, m
     assert issued.match_statement(ledger, _st(anonymous, named)) == []  # the same statement again: the same answer
 
 
-def test_a_number_without_series_never_chooses_between_a_clients_invoices(ledger, home, sec, monkeypatch):
-    _stored(ledger, monkeypatch, **{"7001": ubl(number="10", client="ION POPESCU", client_cui="")})
-    _stored(ledger, monkeypatch, **{"7002": ubl(number="99", client="ION POPESCU", client_cui="")})
-    t = _credit("1190.00", date(2026, 10, 20), counterparty="ION POPESCU", iban="", desc="servicii 2026-10-20")
-    assert issued.match_statement(ledger, _st(t)) == []
+@pytest.mark.parametrize(
+    "numbers,desc,collected",
+    [(("10", "99"), "servicii 2026-10-20", []), (("NRD 0042", "NRD 0043"), "Plata factura 0042", ["7001"])],
+)
+def test_a_number_without_series_never_chooses_between_a_clients_invoices(
+    ledger, home, sec, monkeypatch, numbers, desc, collected
+):
+    _stored(ledger, monkeypatch, **{"7001": ubl(number=numbers[0], client="ION POPESCU", client_cui="")})
+    _stored(ledger, monkeypatch, **{"7002": ubl(number=numbers[1], client="ION POPESCU", client_cui="")})
+    t = _credit("1190.00", date(2026, 10, 20), counterparty="ION POPESCU", iban="", desc=desc)
+    assert issued.match_statement(ledger, _st(t)) == collected  # digits of a series invoice still pick
+
+
+def test_two_connections_matching_one_statement_collect_once(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"7001": ubl()})
+    st = _st(_credit("1190.00", date(2026, 10, 20), counterparty="X", iban=OTHER_IBAN, desc="servicii"))
+    won, _ = race(ledger.path, lambda other, k: issued.match_statement(other, st))
+    assert sorted(won) == [[], ["7001"]]
+    assert ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 1
 
 
 def test_the_choice_and_the_write_hold_one_write_lock(ledger, home, sec, monkeypatch):
@@ -416,16 +430,14 @@ def test_wrong_client_amount_debit_or_own_transfer_never_collects(ledger, home, 
     other = _credit("1190.00", date(2026, 10, 20), counterparty="DELTA SOFTWARE SRL", iban=OTHER_IBAN, desc="servicii")
     card_refund = _credit("1190.00", date(2026, 10, 20), counterparty="BETA SOFTWARE SRL", iban="", desc="RETUR")
     card_refund.card_last4 = "4242"
-    pos = _credit("1190.00", date(2026, 10, 20), counterparty="", iban="", desc="Merchant refund")  # MT940: no card
-    pos.title = "POS refund"  # its ?00 booking text
-    card = _credit("1190.00", date(2026, 10, 20), counterparty="", iban="", desc="Merchant refund")
-    card.title = "Card refund"
+    # no account it came from: a refund without its card number, interest the bank's text doesn't name
+    no_account = _credit("1190.00", date(2026, 10, 20), counterparty="", iban="", desc="RETUR")
     amount = _credit("1189.99", date(2026, 10, 20))
     early = _credit("1190.00", date(2026, 9, 1))
     debit = _credit("1190.00", date(2026, 10, 20))
     debit.direction = "debit"
     own = _credit("1190.00", date(2026, 10, 20), iban="RO71BTRLEURCRT0000000001")
-    for t in (other, card_refund, pos, card, amount, early, debit, own):
+    for t in (other, card_refund, no_account, amount, early, debit, own):
         assert issued.match_statement(ledger, _st(t)) == []
     assert ledger.issued("7001")["status"] == "open"
     series = _credit("1190.00", date(2026, 10, 21), desc="plata CARD 0042")  # the client's own words: no refund

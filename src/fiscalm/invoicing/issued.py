@@ -377,9 +377,10 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         credit, or its exact name, legal forms aside, private buyers too) settles the one invoice it fits;
       - a credit that shows no client fits by its amount alone (maintainer decision, 2026-11-25): it settles the
         only candidate of its exact amount, and only when no other credit of the statement fits that one too.
-        Never by amount: a credit that shows any of the firm's clients (it pays another's invoice only by naming
-        it), from an account known for a client or shown with one on this statement. Never at all: a card refund,
-        fees or interest. Invoices this statement's credits already collected stay rivals when it is read again;
+        Without its client, only a transfer from a bank account (a counterparty IBAN), never one known for a client
+        or shown with one on this statement; a credit that shows any of the firm's clients pays another's invoice
+        only by naming it. Never at all: a card refund, fees or interest. Invoices this statement's credits already
+        collected stay rivals when it is read again;
       - a credit that names a known invoice (its full identifier, or 3+ digits of it) settles only that one,
         and nothing when that invoice is already closed; without its client, only one whole identifier counts;
       - a credit that fits several invoices settles none; one credit settles one invoice, ever.
@@ -453,22 +454,15 @@ def _collect(L: Ledger, pool: _Pool, t: statements.Tx, rows: tuple, how: str, no
     return True
 
 
-_REFUND_WORDS = {"POS", "CARD", "REFUND"}
-
-
 def _not_a_payment(t: statements.Tx) -> bool:
-    """A card refund (a card number, POS in the bank's text, or POS, card or refund in its booking title when the format
-    drops the card; never the payer's own words, which may name a 'CARD 0042' invoice) or the bank's own
-    money: never a client's payment."""
+    """A card refund or the bank's own money (fees, interest): never a client's payment."""
     statements.classify_tx(t)
-    title, text = (set(re.split(r"[^A-Z]+", v.upper())) for v in (t.title, t.description))
-    card = t.card_last4 or "POS" in text or _REFUND_WORDS & title
-    return bool(card) or t.category in (statements.BANK_FEE, statements.INTEREST)
+    return bool(t.card_last4) or t.category in (statements.BANK_FEE, statements.INTEREST)
 
 
 def _kept(was: str | None, how: str) -> bool:
-    """The evidence a credit had at the start still holds: the same, or its client shown another way."""
-    return was == how or (was in CLIENT_PROOF and how in CLIENT_PROOF)
+    """The evidence a credit had at the start still holds: the same, or its client shown (another way)."""
+    return was == how or (was in (*CLIENT_PROOF, "ref") and how in CLIENT_PROOF)
 
 
 def _rank(cands: list) -> int:
@@ -531,8 +525,8 @@ class _Pool:
         cui = r["client_cui"] or ""
         if how := credit_from_client(self.L, self.company, r["client_name"], cui, t, accounts=self.accounts):
             return how
-        if t.counterparty_iban in self.accounts:
-            return ""  # another client's known account
+        if not t.counterparty_iban or t.counterparty_iban in self.accounts:
+            return ""  # no transfer from a bank account (a card refund, the bank's own money), or another client's
         # a credit showing another client (any invoice, any status) pays this one only if it names it
         return "other" if self.from_client(t) else "amount"
 
@@ -545,34 +539,36 @@ class _Pool:
             )
         return self._from_client[id(t)]
 
-    def named(self, t: statements.Tx) -> tuple[set[str], bool]:
-        """Invoices the credit names, and whether by their full identifier; any status, so a credit for an already
-        closed one settles nothing. A full identifier (series and number) wins; the bare digits count only when no
-        full identifier is on the credit, so 'NRD 0042' never also names 'STD 0042'."""
+    def named(self, t: statements.Tx) -> tuple[set[str], str]:
+        """Invoices the credit names, and how: "series" (a whole identifier, 'NRD 0042'), "digits" (3+ digits of one,
+        when no whole identifier is written, so 'NRD 0042' never also names 'STD 0042') or "bare" (an invoice number
+        without a series, '10', which may be a date or a quantity). Any status, so a credit for an already closed
+        one settles nothing."""
         desc = _norm(t.description)
-        full = {mid for mid, rx, _ in self.known if rx and rx.search(desc)}
-        if full:  # a number without a series ('10') may be a date or a quantity: it names, never by itself picks
-            return full, all(re.search(r"[A-Z]", _norm(self.numbers[m])) for m in full)
+        whole = {mid for mid, rx, _ in self.known if rx and rx.search(desc)}
+        series = {m for m in whole if re.search(r"[A-Z]", _norm(self.numbers[m]))}
+        if series or whole:
+            return (series, "series") if series else (whole, "bare")
         by_digits = {
             mid for mid, _, digits in self.known if digits and re.search(rf"(?<!\d){digits}(?!\d)", t.description)
         }
         # bare digits shared by several invoices (NRD 0042 and STD 0042) name none for sure: settle nothing
-        return (by_digits if len(by_digits) <= 1 else {"__ambiguous__"}), False
+        return (by_digits if len(by_digits) <= 1 else {"__ambiguous__"}), "digits"
 
     def candidates(self, t: statements.Tx, done) -> list[tuple]:
         """(invoice, how) the credit may collect: those it names, else all it fits; the ones that show the
         client win over those that fit by amount alone."""
         cands = [(r, how) for r in self.rows if r["message_id"] not in done and (how := self.fits(r, t))]
-        names, full = self.named(t)
+        names, kind = self.named(t)
         if names:
             fit = [c for c in cands if c[1] in CLIENT_PROOF]
             cands = [(r, how) for r, how in cands if r["message_id"] in names]
-            if full and len(names) == 1:  # one whole invoice identifier: the credit says which it pays
+            if kind == "series" and len(names) == 1:  # one whole invoice identifier: the credit says which it pays
                 cands = [(r, "ref" if how in ("amount", "other") else how) for r, how in cands]
             else:  # digits, or several invoices named: without its client the credit proves none of them
                 kept = [(r, how) for r, how in cands if how in CLIENT_PROOF]
                 # a number without a series ('10' in a date) may refuse, never choose among the client's invoices
-                cands = kept if full or len(kept) == len(fit) or len(kept) <= 1 and len(fit) <= 1 else []
+                cands = kept if kind != "bare" or len(kept) == len(fit) or len(kept) <= 1 and len(fit) <= 1 else []
         cands = [c for c in cands if c[1] != "other"]
         return [c for c in cands if c[1] in CLIENT_PROOF] or cands
 
