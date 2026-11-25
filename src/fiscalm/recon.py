@@ -15,7 +15,7 @@ from functools import cache
 from pathlib import Path
 
 from fiscalm import companies
-from fiscalm.bank import statements
+from fiscalm.bank import coverage, statements
 from fiscalm.bank.intake import (
     StoredStatementUnavailable,
     combine,
@@ -343,6 +343,9 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
         return stored
     paid = auto_mark_paid(ledger, st)
     ef_paid = efactura.match_statement(ledger, st)
+    days = coverage.recorded(st)  # the set's: the month it proves, each file for its own accounts; last, once matched
+    for o in parts:
+        coverage.record(ledger, o.digest, {i: days[i] for i in statement_ibans(o.st) if i in days})
     return {
         "file": ", ".join(str(o.path) for o in parts),
         "status": "added" if any(new for _, new in stored) else "duplicate",

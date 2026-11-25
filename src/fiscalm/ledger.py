@@ -1487,10 +1487,16 @@ class Ledger:
 
             def owner(iban: str, month: str, claim: bool = True) -> str | None:
                 """The source that settles `month` of `iban`; `claim`: this source takes it if nobody has. The bank
-                takes a month only when it read it from its first day: a month it saw in part stays the
-                statement's (its lines there are evidence only)."""
+                takes a month only when it read it from its first day, in this read or since its first one (`covered`):
+                a month it saw in part stays the statement's (its lines there are evidence only)."""
                 start = getattr(st, "period_start", None)
-                if claim and source == "ob" and start and start > date.fromisoformat(month + "-01"):
+                if (
+                    claim
+                    and source == "ob"
+                    and start
+                    and start > date.fromisoformat(month + "-01")
+                    and not self._feed_read_from(db, st.company, iban, month + "-01")
+                ):
                     claim = None  # look, but don't take: and if nobody has it, it isn't the bank's
                 if (iban, month) not in owners:
                     row = db.execute(
@@ -1673,6 +1679,13 @@ class Ledger:
             "ORDER BY t.day, t.rowid",
             (company, since),
         ).fetchall()
+
+    @staticmethod
+    def _feed_read_from(db, company: str, iban: str, day: str) -> bool:
+        """The bank's feed has read the account every day since `day` or before (bank_connections.covered), over
+        all its reads: a month it read from its first day is the bank's, whatever day this read starts."""
+        rows = db.execute("SELECT covered FROM bank_connections WHERE company=?", (company,))
+        return any(json.loads(c).get(iban, "9999-12-31") <= day for (c,) in rows)
 
     @staticmethod
     def _file_has(db, company: str, iban: str, month: str) -> bool:

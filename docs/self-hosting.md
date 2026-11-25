@@ -620,8 +620,8 @@ up, one full calendar month, booked lines only; reversals are refused. CSV expor
 once per account in fiscalm (date, amount or debit and credit, details, optionally the other party, its IBAN and the
 reference); a CSV names no account, so it is uploaded on one, and it carries no balances, so its document says its
 totals can't be checked. A CSV is a partial import: it proves only the days it holds (CSVs of one account add up day
-by day, overlapping days are refused), it never stands for the month's statement (automatic payments still wait for
-one), and two identical rows are refused (map the bank's reference column). Amounts must be written as the mapping
+by day, overlapping days are refused), it never stands for the month's statement in the accountant's pack (automatic
+payments go out once statements, CSVs or the bank's feed cover every day of last month), and two identical rows are refused (map the bank's reference column). Amounts must be written as the mapping
 says (thousands only by threes, at most two decimals). The same CSV read on another account or with other columns is
 another document. MT940 needs final opening and closing balances (60F, 62F), no missing days between daily
 statements, and lines that add up to the balances. MT940 and CSV are accepted from the operator CLI (MT940) and from an administrator's upload
@@ -936,6 +936,11 @@ explicitly checks the saved application. The private key never leaves `FISCALM_S
 Restricted mode is free for the owner's own accounts. A hosted fiscalm serving clients needs the commercial
 tier. Open banking is read-only and works in Sandbox. These written steps are the guide's authority;
 no third-party panel screenshots are distributed or claimed to be current.
+
+A connection that reads every day counts as the bank's record of its accounts, like a statement: automatic
+payments that wait for last month's statement go out once the feed has read the whole month. Bookings can land
+a few days late, so the feed covers an account up to five days before its last read, from the first day it read
+of that account.
 
 The primary return address is the install's origin followed by `/bank/return`. Additional addresses can be
 entered in “Alte adrese de întoarcere”, separated by whitespace, for example a domain and a Tailscale name.

@@ -45,8 +45,10 @@ def test_state_equivalence_and_query_budget(ledger, home, co, scale, monkeypatch
     assert all(report["bank"]["error"] is None for part in parts for report in part["reports"] if report["bank"])
     # Reuse whole-request invoice, payment, document, pack and metadata reads.
     # ALL: 145 since the enabled shops are read once per request for their Emitere automată rules; 147 since each
-    # firm with an open invoice reads its credit lines once for client reminders (mail.reminders, #52).
-    assert metrics["queries"] <= (102 if co == "NORD" else 147)
+    # firm with an open invoice reads its credit lines once for client reminders (mail.reminders, #52); 149 since each
+    # firm's paying account record (lines, month sources, feeds, statements) is read in one query for the payment
+    # hold (bank.coverage), whatever the number of lines.
+    assert metrics["queries"] <= (102 if co == "NORD" else 149)
     assert metrics["queries"] < before["queries"]
     assert metrics["subprocesses"] == before["subprocesses"] == 0
     (home / "state").mkdir(exist_ok=True)
