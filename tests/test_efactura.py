@@ -1581,6 +1581,11 @@ def test_an_exported_net_payment_whose_credit_stops_linking_is_never_settled(led
     assert recon.auto_mark_paid(ledger, _debit_st(debit)) == []  # the debit stays to explain, the 50.00 stays owed
     assert not ledger.mark_paid(item, "user: settled by hand", None)  # no writer settles it
     assert ledger.payment(item)["status"] == "exported" and ledger.efactura("3001")["status"] == "linked"
+    assert [r["id"] for r in tasks.credit_holds(api.state(ledger, "NORD"))] == ["3001"]  # the 50.00 stays to check
+    assert pay.import_file(
+        ledger, ident, "NORD", ledger.db.execute("SELECT max(id) FROM payment_downloads").fetchone()[0], date.today()
+    )
+    assert [r["id"] for r in tasks.credit_holds(api.state(ledger, "NORD"))] == ["3001"]  # imported in the bank too
 
 
 @pytest.mark.parametrize(("shown", "ok"), [("200.00", True), ("250.00", False), ("200", None)])
