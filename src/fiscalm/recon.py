@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
+import shutil
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from functools import cache
@@ -11,6 +14,15 @@ from pathlib import Path
 
 from fiscalm import companies
 from fiscalm.bank import statements
+from fiscalm.bank.intake import (
+    StoredStatementUnavailable,
+    combine,
+    hold_csv_days,
+    import_lock,
+    refuse_incomplete,
+    refuse_overlap,
+    statement_ibans,
+)
 from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import Ledger, finance_home
 from fiscalm.payments.orders import parse_payment_pdf
@@ -35,7 +47,8 @@ def ingest_file(
     operator: bool = False,
     allowed_companies: list[str] | None = None,
 ) -> dict:
-    """Route one PDF: encrypted BT statement, or treasury OP. Anything else is reported back."""
+    """Route one file: a BT statement PDF, a CAMT or MT940 (operator only), or a treasury OP. Anything else is reported
+    back."""
     path = Path(path)
     home = home or finance_home()
     if path.is_symlink():
@@ -68,9 +81,25 @@ def ingest_file(
             return {"file": str(path), "status": "error", "errors": [str(exc)]}
         except statements.StatementError as exc:
             return {"file": str(path), "status": "refused", "errors": [str(exc)]}
-    if re.search(r"allmerge.*\.pdf$", path.name, re.I):
+    if _bt_pdf(path):
         return ingest_statement(ledger, path, home, password_lookup)
     return ingest_op(ledger, path)
+
+
+def ingest_files(ledger: Ledger, paths: list[Path], home: Path | None = None, password_lookup=None) -> list[dict]:
+    """The operator's files (`fiscalm ingest`), each routed by `ingest_file`, except BT statement PDFs: those go in
+    together (`ingest_statements`), so one month's files, one per account or one per day, are one statement."""
+    home = home or finance_home()
+    pdfs = [Path(p) for p in paths if _bt_pdf(Path(p))]
+    rest = [ingest_file(ledger, Path(p), home, password_lookup, operator=True) for p in paths if Path(p) not in pdfs]
+    return rest + (ingest_statements(ledger, pdfs, home, password_lookup) if pdfs else [])
+
+
+def _bt_pdf(path: Path) -> bool:
+    """A BT statement: its monthly "allmerge" PDF, or any PDF that needs a password (older per-account or daily ones)."""
+    if path.is_symlink() or not path.is_file():
+        return False
+    return bool(re.search(r"allmerge.*\.pdf$", path.name, re.I)) or statements.encrypted(path)
 
 
 def ingest_op(ledger: Ledger, path: Path, allowed_companies: list[str] | None = None) -> dict:
@@ -110,9 +139,24 @@ def _inside(root: Path, p: Path) -> bool:
     return p.resolve().is_relative_to(root.resolve())
 
 
-def ingest_statement(
+def ingest_statement(ledger: Ledger, path: Path, home: Path, password_lookup=None, **kw) -> dict:
+    """One BT PDF: `ingest_statements` with a set of one."""
+    return ingest_statements(ledger, [path], home, password_lookup, **kw)[0]
+
+
+@dataclass
+class _Opened:
+    path: Path
+    company: str
+    month: str
+    out: Path  # its decrypted copy
+    st: statements.Statement
+    digest: str
+
+
+def ingest_statements(
     ledger: Ledger,
-    path: Path,
+    paths: list[Path],
     home: Path,
     password_lookup=None,
     *,
@@ -120,106 +164,189 @@ def ingest_statement(
     check=None,
     source: str | None = None,
     tmp_dir: Path | None = None,
-) -> dict:
-    """`only`: the company the statement is for (an upload); no other company's password is tried. `check(st)`: a
-    last refusal on the parsed statement before anything is stored (raises statements.StatementError)."""
-    from fiscalm.bank.intake import import_lock
-
-    with import_lock():
-        return _ingest_statement(
-            ledger, path, home, password_lookup, only=only, check=check, source=source, tmp_dir=tmp_dir
-        )
-
-
-def _ingest_statement(
-    ledger: Ledger,
-    path: Path,
-    home: Path,
-    password_lookup=None,
-    *,
-    only: str | None = None,
-    check=None,
-    source: str | None = None,
-    tmp_dir: Path | None = None,
-) -> dict:
+    one_set: bool = False,
+) -> list[dict]:
+    """BT PDFs, grouped by company and month: each group is one statement (one file per account, or daily ones,
+    `intake.combine`), checked whole and stored whole or not at all. One result per group, and one per file that
+    isn't a statement of ours. `only`: the company the files are for (an upload); no other company's password is
+    tried. `check(st)`: a last refusal on a group's statement before anything is stored (raises
+    statements.StatementError). `one_set`: the files must make one group, or nothing is stored."""
+    tmp = tmp_dir or home / "state" / "tmp"  # an upload's own staging is already confined (bank.upload._confined)
+    tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not tmp_dir and not _inside(home, tmp):  # a symlink on the way would put decrypted copies outside the data root
+        error = "Unsafe statement storage directory; remove symlinks and retry"
+        return [{"file": str(path), "status": "error", "errors": [error]} for path in paths]
+    work = tmp / f"set-{secrets.token_hex(8)}"
     kw = {"password_lookup": password_lookup} if password_lookup else {}
     if only is not None:
         kw["only"] = only
+    with import_lock():
+        try:  # a parser failing on a hostile or damaged file leaves no decrypted copy behind
+            failed, opened = [], []
+            for i, path in enumerate(paths):
+                o = _open_statement(Path(path), work / str(i), kw)
+                (opened if isinstance(o, _Opened) else failed).append(o)
+            groups: dict[tuple[str, str], list[_Opened]] = {}
+            for o in opened:
+                groups.setdefault((o.company, o.month), []).append(o)
+            if one_set and (failed or len(groups) > 1):
+                return failed[:1] or [_refused(opened, "Statement set: files of different months or companies")]
+            return failed + [_store_set(ledger, g, home, check, source) for g in groups.values()]
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+def _open_statement(path: Path, out_dir: Path, kw: dict) -> _Opened | dict:
     try:
-        company, month, out = statements.decrypt_to(path, tmp_dir or home / "state" / "tmp", **kw)
+        company, month, out = statements.decrypt_to(path, out_dir, **kw)
     except statements.SecretsUnavailable as e:
         return {"file": str(path), "status": "error", "errors": [str(e)]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "not_ours", "errors": [str(e)]}
-    from fiscalm.bank.intake import StoredStatementUnavailable, refuse_overlap, statement_ibans
-
     try:
         st = statements.parse(out, company)
-        if check:
-            check(st)
-    except statements.StatementError as exc:
-        out.unlink()
-        return {"file": str(path), "status": "refused", "errors": [str(exc)]}
-    except BaseException:  # a parser failing on a hostile or damaged file leaves no decrypted copy behind
-        out.unlink(missing_ok=True)
-        raise
-    digest = sha256(path)
-    try:
-        refuse_overlap(ledger, st, digest)
-    except StoredStatementUnavailable as exc:
-        out.unlink()
-        return {"file": str(path), "status": "error", "errors": [str(exc)]}
-    except statements.StatementError as exc:
-        out.unlink()
-        return {"file": str(path), "status": "refused", "errors": [str(exc)]}
-    existing = ledger.document(digest)
-    if existing and not (existing["source"] or "").startswith("upload:"):
-        dest = Path(existing["path"])
-        out.unlink()
-    else:
-        dest = month_dir(company, month, home) / "extrase" / out.name
-        if dest.exists() and sha256(dest) != sha256(out):
-            dest = dest.with_stem(dest.stem + "-" + digest[:12])
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if not _inside(home / company, dest.parent):  # a symlink on the way would publish outside the data root
-            out.unlink()
-            return {
-                "file": str(path),
-                "status": "error",
-                "errors": ["Unsafe statement storage directory; remove symlinks and retry"],
-            }
-        out.replace(dest)
-    unbalanced = [a.iban for a in st.accounts if not a.balanced]
-    with ledger.tx():
-        if check:
-            check(st)
-        added = ledger.add_document(
-            digest,
-            company,
-            month,
-            "statement",
-            str(dest),
-            issues=[f"parser totals mismatch on {i[-4:]}" for i in unbalanced],
-            source=source or f"mail:{path.name}",
-            accounts=statement_ibans(st),
-        )
-        if added:
-            ledger.set_meta("statement_stored_sha:" + digest, sha256(dest))
-    paid = auto_mark_paid(ledger, st)
-    from fiscalm.efactura import inbox as efactura
+        if st.month and st.month != month:  # the month comes from what the bank printed, never from a file name
+            raise statements.StatementError("Statement file name names another month than its period")
+    except statements.StatementError as e:
+        return {"file": str(path), "status": "refused", "errors": [str(e)]}
+    return _Opened(path, company, month, out, st, sha256(path))
 
+
+def _refused(parts: list[_Opened], error: str, status: str = "refused", **extra) -> dict:
+    return {"file": ", ".join(str(o.path) for o in parts), "status": status, "errors": [error], **extra}
+
+
+def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: str | None) -> dict:
+    try:
+        st = combine([o.st for o in parts])
+        _set_checks(st, parts, check)
+        for o in parts:
+            refuse_overlap(ledger, o.st, o.digest, siblings={p.digest for p in parts})
+    except StoredStatementUnavailable as exc:
+        return _refused(parts, str(exc), "error")
+    except statements.StatementError as exc:
+        return _refusal(parts, exc)
+    folder = month_dir(parts[0].company, parts[0].month, home) / "extrase"
+    folder.mkdir(parents=True, exist_ok=True)
+    if not _inside(home / parts[0].company, folder):  # a symlink on the way would publish outside the data root
+        return _refused(parts, "Unsafe statement storage directory; remove symlinks and retry", "error")
+    stored = _publish(ledger, parts, folder, st, check, source)
+    if isinstance(stored, dict):
+        return stored
+    paid = auto_mark_paid(ledger, st)
     ef_paid = efactura.match_statement(ledger, st)
     return {
-        "file": str(path),
-        "status": "added" if added else "duplicate",
-        "company": company,
-        "month": month,
-        "unprotected": str(dest),
+        "file": ", ".join(str(o.path) for o in parts),
+        "status": "added" if any(new for _, new in stored) else "duplicate",
+        "company": parts[0].company,
+        "month": parts[0].month,
+        "unprotected": ", ".join(str(dest) for dest, _ in stored),
         "transactions": len(st.txs),
-        "balanced": not unbalanced,
+        "balanced": all(a.balanced for a in st.accounts),
         "payments_marked_paid": paid,
         "efactura_marked_paid": ef_paid,
     }
+
+
+def _set_checks(st: statements.Statement, parts: list[_Opened], check) -> None:
+    """What the firm's statement must be, checked again under the write lock that stores it."""
+    own = companies.get(st.company)
+    if any(not own.account(a.iban) for a in st.accounts):  # another account's lines never reach the matchers
+        raise statements.StatementError("PDF account does not belong to the selected company")
+    if check:
+        check(st)
+    refuse_incomplete(st)  # every caller: a statement, in one file or several, holds every account at its bank
+
+
+def _refusal(parts: list[_Opened], exc: statements.StatementError) -> dict:
+    """A refused set, with the engine's own facts for the person: the missing accounts, or the month left partial."""
+    if isinstance(exc, statements.MissingAccounts):
+        return _refused(parts, str(exc), missing=exc.accounts)
+    if isinstance(exc, statements.PartialMonth):
+        return _refused(parts, str(exc), partial=exc.month.isoformat())
+    return _refused(parts, str(exc))
+
+
+class _NotStored(Exception):
+    """A file of the set is not kept as this firm's statement of that month (another document has its bytes, or a
+    stored copy is gone): the set is not stored."""
+
+    def __init__(self, error: str, status: str):
+        super().__init__(error)
+        self.error, self.status = error, status
+
+
+def _publish(ledger: Ledger, parts: list[_Opened], folder: Path, st, check, source) -> list[tuple[Path, bool]] | dict:
+    """Every file of the set stored as its own statement document in one ledger transaction, with the days a CSV
+    already brought held (the same payment never settles twice), or none: on any failure the copies this call moved
+    into the month's folder are removed again. (A crash between the moves and the commit leaves only unregistered
+    copies, which a retry reuses by name and checksum.)"""
+    placed: list[Path] = []
+    try:
+        dests = [_place(ledger, o, folder, placed) for o in parts]
+        with ledger.tx():
+            _set_checks(st, parts, check)
+            added = [_add_part(ledger, o, dest, source) for o, dest in zip(parts, dests, strict=True)]
+            for o in parts:
+                _kept(ledger, o)
+            hold_csv_days(ledger, st)
+    except BaseException as exc:
+        _unplace(placed)
+        if isinstance(exc, _NotStored):
+            return _refused(parts, exc.error, exc.status)
+        if isinstance(exc, StoredStatementUnavailable):
+            return _refused(parts, str(exc), "error")
+        if isinstance(exc, statements.StatementError):
+            return _refusal(parts, exc)
+        raise
+    return list(zip(dests, added, strict=True))
+
+
+def _add_part(ledger: Ledger, o: _Opened, dest: Path, source: str | None) -> bool:
+    added = ledger.add_document(
+        o.digest,
+        o.company,
+        o.month,
+        "statement",
+        str(dest),
+        issues=[f"parser totals mismatch on {a.iban[-4:]}" for a in o.st.accounts if not a.balanced],
+        source=source or f"mail:{o.path.name}",
+        accounts=statement_ibans(o.st),
+    )
+    if added:
+        ledger.set_meta("statement_stored_sha:" + o.digest, sha256(dest))
+    return added
+
+
+def _kept(ledger: Ledger, o: _Opened) -> None:
+    """The file is on record as the firm's statement of its month, and its stored copy is there."""
+    doc = ledger.document(o.digest)
+    if not doc or doc["kind"] != "statement" or doc["company"] != o.company or doc["month"] != o.month:
+        raise _NotStored("Statement set: a file is already kept as another document", "refused")
+    if not Path(doc["path"]).is_file():
+        raise _NotStored("Cannot read a stored statement; restore the stored document and retry", "error")
+
+
+def _unplace(placed: list[Path]) -> None:
+    for dest in placed:
+        dest.unlink(missing_ok=True)
+
+
+def _place(ledger: Ledger, o: _Opened, folder: Path, placed: list[Path]) -> Path:
+    """Where a set's file is kept: the stored copy of a statement imported before, else its decrypted copy, moved
+    into the month's folder under a name no other file of that folder has."""
+    existing = ledger.document(o.digest)
+    if existing and not (existing["source"] or "").startswith("upload:"):
+        o.out.unlink()
+        return Path(existing["path"])
+    dest = folder / o.out.name
+    if dest.exists() and sha256(dest) != sha256(o.out):
+        dest = dest.with_stem(dest.stem + "-" + o.digest[:12])
+    fresh = not dest.exists()  # a copy already there (the same bytes) is never removed on failure
+    o.out.replace(dest)
+    if fresh:
+        placed.append(dest)
+    return dest
 
 
 def classify(ledger: Ledger, company: str, txs: list[statements.Tx]) -> None:

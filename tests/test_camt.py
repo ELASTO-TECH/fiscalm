@@ -111,9 +111,9 @@ def add_invoice(ledger, mid="1", number="ABC123"):
 
 
 def fake_pdf(monkeypatch, tmp_path):
-    """An encrypted BT PDF that reads as the CAMT month; its decrypted copy has other bytes on every opening."""
+    """An encrypted BT PDF that reads as the complete CAMT month; its decrypted copy has other bytes on every opening."""
     p = write(tmp_path, b"%PDF-1.7 synthetic encrypted", "allmerge.pdf")
-    st = camt.parse_camt(xml())
+    st = camt.parse_camt(complete())
     monkeypatch.setattr(statements, "parse_pdf", lambda path, company: st)
     opened = []
 

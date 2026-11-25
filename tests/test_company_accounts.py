@@ -1,13 +1,14 @@
 """Adding a company's accounts, any bank and currency, and what Setări shows of them. Synthetic data only."""
 
 import json
+from datetime import date
 
 import pytest
 from firms import entries
 from test_camt import xml
 from test_company_config import config as config  # noqa: F401
 
-from fiscalm import companies, company_config as cc
+from fiscalm import cli, companies, company_config as cc
 from fiscalm.api import actions
 from fiscalm.payments import engine as pay
 
@@ -154,3 +155,24 @@ def test_multiple_account_additions_are_validated_before_any_is_saved(config, le
     with pay.pay_lock(), ledger.tx(), pytest.raises(cc.CompanyError):
         cc.account_additions(ledger, "NORD", [(ING_EUR, "EUR"), second])
     assert companies.get("NORD", L=ledger) == before
+
+
+@pytest.mark.parametrize(
+    "month,refused,retired",
+    [("2023-07", False, False), ("", False, False), ("2023-7", True, False), ("2023-13", True, False)]
+    + [("2026-12", True, True)],  # a retired account cannot open after it was retired
+)
+def test_an_accounts_opening_month_is_set_from_the_cli(config, ledger, month, refused, retired):
+    nord = companies.get("NORD")
+    if retired:
+        cc.bank(key="NORD", iban=iban("BTRL", 9), replace=True, today=date(2026, 11, 2), L=ledger)
+    own = nord.ron_iban if retired else nord.ibans["EUR"]
+    code = cli.main(["company", "opened", "--company", "NORD", "--iban", own, "--month", month])
+    assert (code, companies.get("NORD").account(own).opened) == ((2, "") if refused else (0, month))
+
+
+def test_choosing_the_paying_account_again_keeps_its_opening_month(config, ledger):
+    ron = companies.get("NORD").ron_iban
+    cc.set_opened(key="NORD", iban=ron, month="2021-08", L=ledger)
+    cc.bank(key="NORD", iban=ron, replace=True, today=date(2026, 11, 2), L=ledger)
+    assert companies.get("NORD").account(ron).opened == "2021-08"

@@ -39,7 +39,7 @@ from fiscalm.api.mcp import stdio
 from fiscalm.bank import connections as bank_connect, enablebanking as eb, feed as bank_feed, statements
 from fiscalm.bank.intake import recover
 from fiscalm.commerce.shopify import tick
-from fiscalm.company_config import CompanyError, bank, change
+from fiscalm.company_config import CompanyError, bank, change, set_opened
 from fiscalm.config_errors import ConfigError
 from fiscalm.efactura import client as anaf, inbox as efactura
 from fiscalm.invoicing import issued
@@ -127,10 +127,10 @@ def cmd_sync(a, L: Ledger) -> int:
 
 
 def cmd_ingest(a, L: Ledger) -> int:
-    res = [recon.ingest_file(L, Path(f), operator=True) for f in a.files]
+    res = recon.ingest_files(L, [Path(f) for f in a.files])
     pay.refresh_to_pay(L)  # a statement may have just settled a whole file
     _out(res)
-    return 0 if all(r["status"] not in ("refused", "error") for r in res) else 2
+    return 0 if all(r["status"] not in ("refused", "error", "not_ours") for r in res) else 2
 
 
 def cmd_doc_note(a, L: Ledger) -> int:
@@ -889,6 +889,15 @@ def cmd_company_bank(a, L: Ledger) -> int:
     return 0
 
 
+def cmd_company_opened(a, L: Ledger) -> int:
+    try:
+        _out(set_opened(L=L, key=a.company, iban=a.iban, month=a.month))
+    except (CompanyError, ConfigError) as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def cmd_bank_setup(a, L: Ledger) -> int:
     try:
         cert = eb.generate_key()
@@ -997,6 +1006,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--iban", required=True)
     s.add_argument("--replace", action="store_true")
     s.set_defaults(fn=cmd_company_bank)
+    s = c.add_parser("opened", help="the first month an account existed: its bank's earlier statements don't need it")
+    s.add_argument("--company", required=True)
+    s.add_argument("--iban", required=True)
+    s.add_argument("--month", required=True, help="YYYY-MM; '' forgets it")
+    s.set_defaults(fn=cmd_company_opened)
 
     b = sub.add_parser("bank", help="open banking: the install's Enable Banking application and its connections")
     b = b.add_subparsers(dest="bank_cmd", required=True)
@@ -1017,7 +1031,11 @@ def build_parser() -> argparse.ArgumentParser:
         "sync",
         help="read the mail accounts (invoices, statements, the accountant's OPs), build payment files, write reports",
     ).set_defaults(fn=cmd_sync)
-    s = sub.add_parser("ingest", help="ingest statements (BT PDF, CAMT.053 XML or MT940) and payment orders (OP PDFs)")
+    s = sub.add_parser(
+        "ingest",
+        help="ingest statements (BT PDF, CAMT.053 XML or MT940) and payment orders (OP PDFs); BT PDFs of one firm"
+        " and month (one per account, or daily) are checked and stored together",
+    )
     s.add_argument("files", nargs="+")
     s.set_defaults(fn=cmd_ingest)
 

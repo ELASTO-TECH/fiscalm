@@ -13,7 +13,10 @@ import os
 import secrets
 import shutil
 import time
+from datetime import date
 from pathlib import Path
+
+import pikepdf
 
 from fiscalm import companies
 from fiscalm.bank import catalogue as banks, statements
@@ -22,6 +25,7 @@ from fiscalm.ledger import Ledger, finance_home
 from fiscalm.pack import LUNI
 
 MAX_PDF = 20 * 1024 * 1024
+MAX_FILES = 100  # PDFs uploaded together: a month of daily statements for a few accounts
 TYPES = {
     "application/pdf": "pdf",
     "application/xml": "xml",
@@ -40,7 +44,11 @@ NEEDS_COLUMNS = "E primul CSV al acestui cont: trebuie alese coloanele pentru da
 TOO_BIG = "Fișierul este prea mare pentru un extras."
 WRONG_COMPANY = "Extrasul nu este al acestei firme sau parola extraselor nu îl deschide."
 WRONG_BANK = "Extrasul are conturi de la altă bancă decât cea aleasă."
-INCOMPLETE = "Extrasul nu cuprinde toate conturile firmei de la această bancă."
+INCOMPLETE = (
+    "Extrasul nu cuprinde {accounts}. Încarcă extrasul cu toate conturile firmei de la această bancă "
+    "sau, împreună, extrasele fiecărui cont. "
+    "Dacă firma a deschis contul după luna extrasului, administratorul trece luna deschiderii din linia de comandă."
+)
 NOT_READ = "Extrasul nu a putut fi citit. Verifică fișierul, apoi încearcă din nou."
 NO_PASSWORD = "Parola extraselor acestei firme lipsește sau nu poate fi citită. Se adaugă în Setări › Firme › Bănci."
 NOT_SAVED = "Extrasul nu a putut fi încărcat: {why}"
@@ -88,10 +96,8 @@ def kind_of(data: bytes, content_type: str) -> str:
 
 def _checks(company: str, bank: str):
     """What an uploaded statement must be before anything is stored: every account the company's (a PDF that isn't
-    encrypted opens with any password, and its text naming the company proves nothing about its accounts), every
-    account at `bank` when one is given, and every current account the company holds at those banks present."""
-    from fiscalm.bank.intake import missing_accounts
-
+    encrypted opens with any password, and its text naming the company proves nothing about its accounts) and every
+    account at `bank` when one is given. Completeness is the import's own, as for every statement."""
     co = companies.get(company)
 
     def check(st) -> None:
@@ -104,8 +110,6 @@ def _checks(company: str, bank: str):
             b = own.bank or (banks.for_iban(a.iban).id if banks.for_iban(a.iban) else "")
             if bank and b != bank:
                 raise statements.StatementError(WRONG_BANK)
-        if not st.partial and missing_accounts(st):  # a CSV speaks for its one account and its own days only
-            raise statements.StatementError(INCOMPLETE)
 
     return check
 
@@ -141,9 +145,13 @@ KNOWN = (
         "CSV columns not found",
         "Fișierul CSV nu are coloanele alese pentru acest cont. Descarcă-l din bancă în același format.",
     ),
+    ("files of different months", "Fișierele sunt din luni diferite. Încarcă împreună extrasele unei singure luni."),
+    ("appears twice", "Un cont apare de două ori pentru aceleași zile. Încarcă fiecare extras o singură dată."),
+    ("every file must name one period", RESTATE),
+    ("do not chain", "Soldurile extraselor nu se leagă: lipsește un extras. Încarcă toate extrasele lunii."),
     ("Overlapping statement", "Extrasul se suprapune cu unul încărcat deja pentru același cont."),
     ("already imported", "Extrasul pentru acest cont și această lună este deja încărcat."),
-    ("missing configured accounts", INCOMPLETE),
+    ("missing configured accounts", "Extrasul nu cuprinde toate conturile firmei de la această bancă."),
     ("Cannot read a stored statement", STORED),
     ("Cannot tell which accounts", STORED),
     ("Cannot verify adjacent", STORED),
@@ -165,6 +173,7 @@ KNOWN = (
     ("Unsupported statement", NOT_A_STATEMENT),
     ("cannot determine statement month", "Extrasul PDF nu arată perioada. Descarcă din bancă extrasul complet."),
     ("PDF account IBAN missing", "Extrasul PDF nu arată IBAN-ul contului. Descarcă din bancă extrasul complet."),
+    ("PDF account currency", "Extrasul PDF nu arată clar moneda contului. Descarcă din bancă extrasul complet."),
     ("CSV encoding", "Fișierul CSV are o codare necunoscută. Salvează-l ca UTF-8, apoi încarcă-l din nou."),
     ("CSV has no rows", "Fișierul CSV nu are rânduri sau are prea multe. Încarcă extrasul unei singure luni."),
     (
@@ -180,7 +189,13 @@ KNOWN = (
         "Nu mai este spațiu pentru extras. Eliberează spațiu pe server, apoi încearcă din nou.",
     ),
 )
-OWN = (WRONG_BANK, WRONG_COMPANY, OTHER_ACCOUNT, INCOMPLETE, NOT_READ)
+OWN = (WRONG_BANK, WRONG_COMPANY, OTHER_ACCOUNT, NOT_READ)
+
+
+def incomplete(accounts: list[str]) -> str:
+    """INCOMPLETE naming each missing account ("EUR 0001") by currency and last four characters."""
+    named = ", ".join(a.replace(" ", " ••••") for a in accounts)
+    return INCOMPLETE.format(accounts=("contul " if len(accounts) == 1 else "conturile ") + named)
 
 
 def _say(errors) -> str:
@@ -195,6 +210,8 @@ def _refusal(e: statements.StatementError) -> str:
     if isinstance(e, statements.PartialMonth):
         last = calendar.monthrange(e.month.year, e.month.month)[1]
         return PARTIAL.format(last=last, month=LUNI[e.month.month - 1])
+    if isinstance(e, statements.MissingAccounts):
+        return incomplete(e.accounts)
     return _say([str(e)])
 
 
@@ -225,42 +242,82 @@ def accept(L: Ledger, company: str, bank: str, data: bytes, content_type: str, a
     try:
         # fiscalm names the file; nothing from the request reaches a path. The BT parser reads the month from a
         # bank-style name or, failing that, from the text.
-        path = staging / f"upload-allmerge.{kind}"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        check = _checks(company, bank)
-        if kind in ("xml", "mt940", "csv"):
-            from fiscalm.bank.intake import StoredStatementUnavailable, ingest
+        path = _write(staging / f"upload-allmerge.{kind}", data)
+        if kind == "pdf":
+            return _answer(_pdfs(L, company, bank, staging, [path]), company)
+        from fiscalm.bank.intake import StoredStatementUnavailable, ingest
 
-            try:
-                result = ingest(L, path, company, check, csv_account)
-            except StoredStatementUnavailable as e:
-                raise Refused(409, _refusal(e)) from None
-            except statements.StatementError as e:
-                raise Refused(422, _refusal(e)) from None
-        else:
-            from fiscalm import recon
-
-            try:
-                result = recon.ingest_statement(
-                    L, path, finance_home(), only=company, check=check, source="statement-import", tmp_dir=staging
-                )
-            except (ValueError, ArithmeticError, IndexError, KeyError):  # a damaged or hostile PDF's text
-                raise Refused(422, NOT_READ) from None
-            if result["status"] == "not_ours":  # no password opened it, or what opened isn't this firm's statement
-                said = _say(result.get("errors"))
-                raise Refused(422, WRONG_COMPANY if said == NOT_READ else said)
-            if result["status"] == "error":
-                errors = result.get("errors") or []
-                raise Refused(409, _say(errors) if _say(errors) != NOT_READ else NO_PASSWORD)
-            if result["status"] == "refused":
-                raise Refused(422, _say(result.get("errors")))
-        if result.get("company") != company:  # defence in depth: the import named another company
-            raise Refused(422, WRONG_COMPANY)
-        result["message"] = DUPLICATE if result["status"] == "duplicate" else ADDED
-        result.pop("file", None)
-        result.pop("unprotected", None)  # no server path leaves fiscalm
-        return result
+        try:
+            result = ingest(L, path, company, _checks(company, bank), csv_account)
+        except StoredStatementUnavailable as e:
+            raise Refused(409, _refusal(e)) from None
+        except statements.StatementError as e:
+            raise Refused(422, _refusal(e)) from None
+        return _answer(result, company)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def accept_pdfs(L: Ledger, company: str, bank: str, files: list[bytes]) -> dict:
+    """Import several BT PDFs uploaded together for `company`: one month's files, one per account or one per day,
+    checked as one statement and stored together or not at all (recon.ingest_statements)."""
+    if company not in companies.all(L) or (bank and bank not in banks.BY_ID) or not 0 < len(files) <= MAX_FILES:
+        raise Refused(400, NOT_A_STATEMENT)
+    for data in files:
+        if kind_of(data, "application/pdf") != "pdf":
+            raise Refused(415, NOT_A_STATEMENT)
+    if bank and not banks.BY_ID[bank].reads_pdf:
+        raise Refused(422, pdf_support())
+    staging = _confined(company)
+    try:
+        paths = [_write(staging / f"upload-{i}-allmerge.pdf", data) for i, data in enumerate(files)]
+        return _answer(_pdfs(L, company, bank, staging, paths), company)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _write(path: Path, data: bytes) -> Path:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return path
+
+
+def _pdfs(L: Ledger, company: str, bank: str, staging: Path, paths: list[Path]) -> dict:
+    """BT PDFs opened only with the company's password, read as one statement (one file: itself)."""
+    from fiscalm import recon
+
+    try:
+        (result,) = recon.ingest_statements(
+            L,
+            paths,
+            finance_home(),
+            only=company,
+            check=_checks(company, bank),
+            source="statement-import",
+            tmp_dir=staging,
+            one_set=True,
+        )
+    except (ValueError, ArithmeticError, IndexError, KeyError, pikepdf.PdfError):  # a damaged or hostile PDF
+        raise Refused(422, NOT_READ) from None
+    if result["status"] == "not_ours":  # no password opened it, or what opened isn't this firm's statement
+        said = _say(result.get("errors"))
+        raise Refused(422, WRONG_COMPANY if said == NOT_READ else said)
+    if result["status"] == "error":
+        errors = result.get("errors") or []
+        raise Refused(409, _say(errors) if _say(errors) != NOT_READ else NO_PASSWORD)
+    if result["status"] == "refused":
+        missing = result.get("missing")  # the engine's own list, never words read back from an error text
+        if result.get("partial"):  # the engine's own month
+            raise Refused(422, _refusal(statements.PartialMonth("PDF", date.fromisoformat(result["partial"]))))
+        raise Refused(422, incomplete(missing) if missing else _say(result.get("errors")))
+    return result
+
+
+def _answer(result: dict, company: str) -> dict:
+    if result.get("company") != company:  # defence in depth: the import named another company
+        raise Refused(422, WRONG_COMPANY)
+    result["message"] = DUPLICATE if result["status"] == "duplicate" else ADDED
+    result.pop("file", None)
+    result.pop("unprotected", None)  # no server path leaves fiscalm
+    return result

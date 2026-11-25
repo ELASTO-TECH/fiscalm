@@ -15,6 +15,16 @@ from fiscalm.mail import invoices
 from fiscalm.storage import read_file
 
 
+def staged(L: Ledger, sha: str) -> bool:
+    """An upload still waiting outside every firm; each firm is offered it until one is assigned."""
+    return bool(
+        L.db.execute(
+            "SELECT 1 FROM documents WHERE sha=? AND company='ALL' AND kind='receipt' AND source LIKE 'upload:%'",
+            (sha,),
+        ).fetchone()
+    )
+
+
 def pending_file(L: Ledger, sha: str) -> tuple[str, bytes] | None:
     row = L.db.execute(
         "SELECT path FROM documents WHERE sha=? AND company='ALL' AND source LIKE 'upload:%'", (sha,)

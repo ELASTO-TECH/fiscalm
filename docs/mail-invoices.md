@@ -40,7 +40,8 @@ expired delta token starts again from the last 30 days. No mailbox state changes
 
 **Which mails are invoices.** Only attachments are read, never the body, never a link. An attachment is a candidate
 when its bytes are a PDF (`%PDF-`) or a UBL Invoice (XML, parsed with DTDs refused). Mails from the install's
-own addresses are skipped; a current account's bank statement (a BT-style bank: its "allmerge" PDF) and a firm's
+own addresses are skipped; a current account's bank statement (a BT-style bank: its "allmerge" PDFs, imported
+together and refused unless they hold every account the firm had at that bank that month) and a firm's
 accountant's OPs (PDFs named op…) go to statement and payment-order intake instead. Payment-confirmation mails are
 found by an IMAP search of the same folders; Microsoft payment-proof search is not yet supported (#637). No Sent-folder scan or draft write is performed. A PDF counts as an invoice when its text carries a fiscal document title (factură, invoice, receipt,
 Rechnung, facture, …) and a total. That list is a fixed rule of the document's content, like the proforma check,

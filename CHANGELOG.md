@@ -3,6 +3,15 @@
 Product versions describe fiscalm releases. The API and the ledger schema have their own
 version numbers. Back up before upgrading; see [self-hosting](docs/self-hosting.md).
 
+## 0.1.4 (2026-11-25)
+
+- Older BT PDFs are read, and accounts opened after a statement's month are not required
+  for it (`fiscalm company opened`).
+- One month of BT PDFs can be imported together, one per account or daily, in
+  `fiscalm ingest` and in Încarcă extras; all files are stored or none.
+- Every BT PDF, from mail, the CLI or the app, must hold all of the firm's BT accounts.
+- Unassigned uploads open from Toate firmele.
+
 ## 0.1.3 (2026-11-20)
 
 - Ledger schema 39, upgraded automatically at startup. Back up first.

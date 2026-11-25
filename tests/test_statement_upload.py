@@ -15,8 +15,9 @@ from test_api import (
 )
 from test_camt import complete
 from test_mt940 import EUR, block
+from test_statement_accounts import bt_files
 
-from fiscalm import companies, pack, recon
+from fiscalm import companies, integrations, pack, recon
 from fiscalm.api import receipts as intake, uploads as upload_links, web
 from fiscalm.bank import statements, upload as su
 from fiscalm.ledger import finance_home
@@ -178,6 +179,7 @@ def fake_pdf_import(monkeypatch, accounts, parse_error=None, decrypt_error=None)
     def decrypt(path, out_dir, password_lookup=None, only=None):
         if decrypt_error:
             raise decrypt_error
+        out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / "Extras_BT_NORD_2026-10.pdf"
         out.write_bytes(b"%PDF-decrypted")
         return only, "2026-10", out
@@ -232,7 +234,7 @@ NORD_RON, NORD_EUR, STUDIO9_RON = "RO24BTRLRONCRT0000000001", "RO71BTRLEURCRT000
     [
         ([(STUDIO9_RON, "RON")], su.OTHER_ACCOUNT, {}),  # NORD's CUI in the text, STUDIO9's account in the statement
         ([(NORD_RON, "RON"), (STUDIO9_RON, "RON")], su.OTHER_ACCOUNT, {}),
-        ([(NORD_RON, "RON")], su.INCOMPLETE, {}),  # BT's EUR account missing
+        ([(NORD_RON, "RON")], su.incomplete(["EUR 0001"]), {}),  # BT's EUR account missing, named
         ([], su.NOT_READ, {}),
         ([], su.NOT_READ, {"parse_error": ValueError("day 99 out of range")}),  # the parser chokes
         (
@@ -333,3 +335,58 @@ def test_report_upload_refuses_untrusted_or_wrong_context(server, ledger, home, 
         query = "co=NORD&format=ignored"
     assert _post(server, data, "text/csv", query, **headers)[0] == status
     assert ledger.db.execute("SELECT count(*) FROM settlement_reports").fetchone()[0] == 0
+
+
+def test_a_file_naming_accounts_in_an_error_never_reads_as_missing_accounts():
+    """Review: a CSV column name comes from the file; only the engine's typed list names a missing account."""
+    assert su._say(["CSV columns not found: missing configured accounts: EUR 9999; x"]) == su.KNOWN[0][1]
+
+
+# ---- several BT PDFs of one month, uploaded together
+
+
+def multipart(files: list[bytes]) -> tuple[bytes, str]:
+    parts = [
+        b'--b0undary\r\nContent-Disposition: form-data; name="files"; filename="extras.pdf"\r\n'
+        b"Content-Type: application/pdf\r\n\r\n" + data + b"\r\n"
+        for data in files
+    ]
+    return b"".join(parts) + b"--b0undary--\r\n", "multipart/form-data; boundary=b0undary"
+
+
+def test_one_months_pdfs_uploaded_together_are_one_statement(ledger, sec, tmp_path):
+    integrations.set_statement_password(ledger, "NORD", "bt", "synthetic")
+    ron, eur = (p.read_bytes() for p in bt_files(tmp_path))
+    with pytest.raises(su.Refused) as e:
+        su.accept_pdfs(ledger, "NORD", "", [ron])
+    assert e.value.message == su.incomplete(["EUR 0001"]) and not ledger.documents(kind="statement")
+    r = su.accept_pdfs(ledger, "NORD", "bt", [ron, eur])
+    assert (r["status"], r["message"], r["month"]) == ("added", su.ADDED, "2026-10") and "unprotected" not in r
+    assert len(ledger.documents(kind="statement")) == 2 and leftovers() == []
+    assert su.accept_pdfs(ledger, "NORD", "", [eur, ron])["message"] == su.DUPLICATE
+
+
+@pytest.mark.parametrize(
+    "case,status,message",
+    [
+        ("whole", 200, su.ADDED),
+        ("days missing", 422, su.PARTIAL.format(last=31, month="octombrie")),
+        ("not a pdf", 415, su.NOT_A_STATEMENT),
+        ("damaged pdf", 422, su.NOT_READ),
+        ("on an account", 400, None),  # a CSV's query: never for several PDFs
+    ],
+)
+def test_http_upload_of_several_pdfs(server, ledger, sec, tmp_path, case, status, message):
+    integrations.set_statement_password(ledger, "NORD", "bt", "synthetic")
+    files = [p.read_bytes() for p in bt_files(tmp_path, ((1, 15), (16, 31)))]
+    if case == "days missing":
+        files.pop()
+    if case == "not a pdf":
+        files[0] = complete()
+    if case == "damaged pdf":
+        files[0] = b"%PDF-1.7 " + b"x" * 5000
+    body, ctype = multipart(files)
+    code, _, raw = _post(server, body, ctype, "co=NORD&account=x" if case == "on an account" else "co=NORD")
+    r = json.loads(raw)
+    assert code == status and (message is None or r["message"] == message)
+    assert len(ledger.documents(kind="statement")) == (4 if status == 200 else 0)

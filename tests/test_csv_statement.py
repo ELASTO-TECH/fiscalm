@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from firms import set_firm
+from pdf_fake import bt_statement
 from test_api import (
     _req,  # noqa: F401
     server as server,
@@ -19,6 +20,7 @@ from fiscalm.api import actions
 from fiscalm.bank import csv as cs, intake as statement_intake, statements, upload as su
 from fiscalm.bank.mt940 import parse_mt940
 from fiscalm.efactura import inbox as efactura
+from fiscalm.ledger import finance_home
 
 ING = "RO00INGB0000000000000009"
 RON, EUR = "RO24BTRLRONCRT0000000001", "RO71BTRLEURCRT0000000001"
@@ -319,6 +321,19 @@ def test_a_full_statement_after_csvs_is_taken_and_the_csvs_days_keep_counting_on
     statement_intake.hold_csv_days(ledger, full)
     used = ledger.used_txs()
     assert [statements.tx_key(t) in used for t in full.txs] == [True, False]
+
+
+def test_a_bt_pdf_set_after_a_csv_holds_the_csvs_days_too(ledger, tmp_path):
+    columns(RON)
+    su.accept(ledger, "NORD", "", SIGNED, "text/csv", rid(RON))  # RON's 2 to 15 October
+    nord, month = companies.get("NORD"), ("01/10/2026", "31/10/2026")
+    debits = [("02/10/2026", "B1", Decimal("-1250.50")), ("25/10/2026", "B2", Decimal("-40.00"))]
+    ron = bt_statement(tmp_path / "ron.pdf", nord.cui, month, [("RON", RON, Decimal("5000.00"), debits)])
+    eur = bt_statement(tmp_path / "eur.pdf", nord.cui, month, [("EUR", EUR, Decimal("0.00"), [])])
+    (r,) = recon.ingest_statements(ledger, [ron, eur], finance_home(), lambda co: "synthetic")
+    assert r["status"] == "added"
+    held = ledger.db.execute("SELECT COUNT(*) FROM settled_tx WHERE what='twin csv'").fetchone()[0]
+    assert held == 1  # the 2nd, a CSV day; the 25th settles as usual
 
 
 def test_a_csv_never_stands_for_the_months_statement(ledger):

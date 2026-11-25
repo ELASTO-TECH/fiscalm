@@ -485,8 +485,8 @@ def sender_firm(L: Ledger, address: str) -> tuple[bool, str | None]:
 
 def known(L: Ledger, msg: imapread.Message) -> tuple[str, list[imapread.Attachment], list[str] | None] | None:
     """Mail that isn't a supplier's: ("own", [], None) for the install's own addresses; ("statement", PDFs, None) from
-    a current account's bank (a BT-style bank: only its "allmerge" PDF, the complete statement); ("op", PDFs named
-    op…, the sender's firms) from a firm's accountant. None for any other sender. Exact addresses only."""
+    a current account's bank (a BT-style bank: only its "allmerge" PDFs, imported together); ("op", PDFs named op…,
+    the sender's firms) from a firm's accountant. None for any other sender. Exact addresses only."""
     address = msg.address
     if not address:
         return None
@@ -502,22 +502,24 @@ def known(L: Ledger, msg: imapread.Message) -> tuple[str, list[imapread.Attachme
     return ("op", [a for a in pdfs if a.name.lower().startswith("op")], firms) if firms else None
 
 
-def _scoped_statement(L: Ledger, path: Path, account: str) -> dict:
-    excluded = False
+OUTSIDE_SCOPE = "Firm outside inbox scope"
+
+
+def _scoped_statements(L: Ledger, paths: list[Path], account: str) -> list[dict]:
+    """A statement mail's PDFs, imported together (one month's files of a firm are one statement), for the inbox's
+    firms only."""
 
     def check(st):
-        nonlocal excluded
-        excluded = st.company not in account_firms(L, account)
-        if excluded:
-            raise statements.StatementError("Firm outside inbox scope")
+        if st.company not in account_firms(L, account):
+            raise statements.StatementError(OUTSIDE_SCOPE)
 
     try:
-        result = recon.ingest_statement(L, path, finance_home(), check=check)
-    except statements.StatementError:
-        if not excluded:
+        results = recon.ingest_statements(L, paths, finance_home(), check=check)
+    except statements.StatementError as e:  # the scope changed between the two checks
+        if str(e) != OUTSIDE_SCOPE:
             raise
-        result = {"status": "refused"}
-    return result | ({"code": "outside_scope"} if excluded else {})
+        results = [{"file": ", ".join(map(str, paths)), "status": "refused", "errors": [OUTSIDE_SCOPE]}]
+    return [r | ({"code": "outside_scope"} if r.get("errors") == [OUTSIDE_SCOPE] else {}) for r in results]
 
 
 def _ingest_known(
@@ -531,21 +533,21 @@ def _ingest_known(
 ) -> str:
     """Ingest a statement or accountant mail's PDFs (recon); an error (e.g. a password not available yet) raises, so
     the reader tries the mail again on its next runs."""
-    results = []
-    for att in files:
-        path = _store(("inbox", "mail"), att.sha, "pdf", att.data)
-        if kind == "statement":
-            r = _scoped_statement(L, path, account)
-        else:
+    paths = [_store(("inbox", "mail"), att.sha, "pdf", att.data) for att in files]
+    if kind == "statement":
+        results = _scoped_statements(L, paths, account) if paths else []
+    else:
+        results = []
+        for path in paths:
             with L.tx():
                 allowed = account_firms(L, account)
-                r = recon.ingest_op(L, path, [co for co in (firms or []) if co in allowed])
-        if r.get("code") == "outside_scope":
+                results.append(recon.ingest_op(L, path, [co for co in (firms or []) if co in allowed]))
+    for att, path in zip(files, paths, strict=True):
+        if any(r.get("code") == "outside_scope" and str(path) in r["file"].split(", ") for r in results):
             ask_user(L, msg, att, Doc("pdf"), Outcome("asked", reason="outside-scope", choices=[]))
-        if r["status"] == "error":
-            raise RuntimeError(f"{kind} not ingested yet")
-        results.append(r["status"])
-    return ",".join(f"{kind}:{r}" for r in results) or f"{kind}:none"
+    if any(r["status"] == "error" for r in results):
+        raise RuntimeError(f"{kind} not ingested yet")
+    return ",".join(f"{kind}:{r['status']}" for r in results) or f"{kind}:none"
 
 
 def _issued_by(L: Ledger, co: str, number: str) -> bool:
