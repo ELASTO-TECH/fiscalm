@@ -551,9 +551,9 @@ export async function fixtureCompanies(): Promise<CompaniesConfig> {
       palette: c.palette, has_data: true, has_ron_account: i === 0, iban_last4: i === 0 ? "0001" : "",
       aliases: i === 0 ? ["Atelier Nord"] : [], alias_suggestion: i === 0 ? "" : "Studio 9",
       accounts: i === 0 ? [
-        { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-09" },
-        { id: "acc2", iban_last4: "0001", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-09" },
-        { id: "acc3", iban_last4: "0007", currency: "EUR", bank: "ing", bank_name: "ING Bank", pays: false, retired: null, statement_senders: [], last_statement: null },
+        { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-09" },
+        { id: "acc2", iban_last4: "0001", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-09" },
+        { id: "acc3", iban_last4: "0007", currency: "EUR", bank: "ing", bank_name: "ING Bank", pays: false, retired: null, opened: null, statement_senders: [], last_statement: null },
       ] : [],
       banks: i === 0 ? [{ bank: "bt", name: "Banca Transilvania", connect: "ready" as const, statement_password: true, connection: { state: "expiring" as const,
         valid_until: "2026-11-06", last_read: "2026-10-26", accounts: ["0001"], error: null },

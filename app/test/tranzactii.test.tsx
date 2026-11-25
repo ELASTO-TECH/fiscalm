@@ -222,7 +222,7 @@ describe("Tranzacții", () => {
     let fail = true;
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], accounts: [
-      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
     renderTransactions({ companies: () => (fail ? new Response("", { status: 500 }) : json(cfg)) });
     expect(await screen.findByText("Conturile nu au putut fi încărcate.")).toBeInTheDocument();
     expect(await rows()).toEqual(DE_EXPLICAT); // the list doesn't wait on them
@@ -237,7 +237,7 @@ describe("Tranzacții", () => {
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], banks: [{ bank: "bt", name: "Banca Transilvania", connect: "ready",
       connection: { state: "expiring", valid_until: "2026-11-06", last_read: "2026-10-26", accounts: ["0001"], error: null } }], accounts: [
-      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-10" }] };
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-10" }] };
     const { p } = await page({ companies: () => json(cfg), state: () => json({ ...fixture(), can_manage_companies: false }) });
     const accounts = within(p.getByRole("region", { name: "Conturi" }));
     expect(accounts.getByText("Banca Transilvania, pentru plăți, citit pe 26 oct")).toBeInTheDocument();
@@ -265,10 +265,10 @@ describe("Tranzacții", () => {
     at("?co=NORD&tab=tranzactii");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], has_ron_account: true, iban_last4: "0001", accounts: [
-      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-10" },
-      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null },
-      { id: "acc3", iban_last4: "0009", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: "2026-09-30", statement_senders: [], last_statement: "2026-09" },
-      { id: "acc4", iban_last4: "0007", currency: "EUR", bank: "", bank_name: "", pays: false, retired: null, statement_senders: [], last_statement: null }] };
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-10" },
+      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null },
+      { id: "acc3", iban_last4: "0009", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: "2026-09-30", opened: null, statement_senders: [], last_statement: "2026-09" },
+      { id: "acc4", iban_last4: "0007", currency: "EUR", bank: "", bank_name: "", pays: false, retired: null, opened: null, statement_senders: [], last_statement: null }] };
     const { api, p } = await page({ companies: () => json(cfg), onPost: () => answer({ key: "NORD", currency: "EUR", bank: "ing", iban_last4: "0007" }, "Contul a fost adăugat.") });
     const accounts = p.getByRole("region", { name: "Conturi" });
     expect([...accounts.querySelectorAll(".row")].map((r) => r.textContent)).toEqual([
@@ -283,7 +283,7 @@ describe("Tranzacții", () => {
     at("?co=NORD&tab=tranzactii");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], has_ron_account: true, iban_last4: "0001", accounts: [
-      { id: "acc5", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
+      { id: "acc5", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
     const { api, p } = await page({ companies: () => json(cfg), onPost: () => json({ ok: true, message: "Extrasul a fost încărcat.", next: null, done: { status: "added" }, state: null }) });
     const input = (await openUpload("Încarcă extras"))!;
     const file = new File(["<Document/>"], "extras.xml", { type: "text/xml" });
@@ -300,7 +300,7 @@ describe("Tranzacții", () => {
     at("?co=NORD&tab=tranzactii");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], accounts: [
-      { id: "acc8", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: [], last_statement: null }] };
+      { id: "acc8", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null }] };
     const { api } = await page({ companies: () => json(cfg), onPost: () => json({ ok: true, message: "Extrasul a fost încărcat.", next: null, done: { status: "added" }, state: null }) });
     const input = (await openUpload("Încarcă extras"))!;
     const pdf = (name: string) => new File(["%PDF-1.7"], name, { type: "application/pdf" });
@@ -319,7 +319,7 @@ describe("Tranzacții", () => {
     const why = "Extrasul trebuie să cuprindă toată luna (1–30 noiembrie). Încarcă extrasul lunii încheiate.";
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], accounts: [
-      { id: "acc7", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: [], last_statement: null }] };
+      { id: "acc7", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null }] };
     let n = 0;
     const { api, p } = await page({ companies: () => json(cfg), onPost: () => (n++ ? json({ ok: true, message: "Extrasul a fost încărcat.", next: null, done: { status: "added" }, state: null })
       : json({ ok: false, message: why, next: null, done: null, state: null }, 422)) });
@@ -337,7 +337,7 @@ describe("Tranzacții", () => {
     at("?co=NORD&tab=tranzactii");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], accounts: [
-      { id: "acc6", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
+      { id: "acc6", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
     const { api } = await page({ companies: () => json(cfg) });
     const input = (await openUpload("Încarcă extras"))!;
     await userEvent.upload(input, new File(["x"], "poza.png", { type: "image/png" }), { applyAccept: false });
@@ -349,8 +349,8 @@ describe("Tranzacții", () => {
     at("?co=NORD&tab=tranzactii");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], accounts: [
-      { id: "a-ron", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null },
-      { id: "a-eur", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
+      { id: "a-ron", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null },
+      { id: "a-eur", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
     let uploads = 0;
     const { api, p } = await page({ companies: () => json(cfg), onPost: (c: Call) => {
       if (c.url.includes("statement-upload")) {

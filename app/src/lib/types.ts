@@ -955,6 +955,8 @@ export type InvoicingResult = ActionResult & { recurrences?: Recurrence[]; invoi
 export type CompanyAccount = {
   /** Opaque: names the account for a CSV upload without its IBAN. */
   id: string; iban_last4: string; currency: string; bank: string; bank_name: string; pays: boolean; retired: string | null;
+  /** The month (YYYY-MM) or exact day (YYYY-MM-DD) the account opened, when a person set it. */
+  opened: string | null;
   last_statement: string | null; statement_senders: string[];
 };
 

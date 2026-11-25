@@ -81,6 +81,7 @@
   "company-bank": "local",
   "company-account": "local",
   "company-statement-password": "local",
+  "company-account-dates": "local",
   "company-alias-add": "local",
   "company-alias-remove": "local",
   "statement-csv-format": "local",
