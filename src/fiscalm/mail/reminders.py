@@ -31,7 +31,7 @@ CLOSED = "Factura nu mai este eligibilă. Verifică încasarea și corecțiile."
 STATEMENTS = "Un credit din extras nu poate fi citit. Verifică extrasul înainte să pregătești textul de reamintire."
 # A person sends the text, so statements behind by more than STATEMENT_MAX_AGE_DAYS only warn on the card.
 STALE = "Extrasele de cont acoperă încasările doar până pe {date}. Verifică în bancă dacă clientul a plătit înainte să trimiți textul."
-NO_STATEMENTS = "Lipsesc extrasele de cont de la emiterea facturii. Verifică în bancă dacă clientul a plătit înainte să trimiți textul."
+NO_STATEMENTS = "Extrasele de cont nu acoperă întreaga perioadă de la emiterea facturii. Verifică în bancă dacă clientul a plătit înainte să trimiți textul."
 CONFIG = "Configurarea reamintirilor nu este validă."
 SETTINGS_BAD = "Numărul de zile poate fi între 1 și 365."
 SETTINGS_SAVED = "Setările reamintirilor au fost salvate."

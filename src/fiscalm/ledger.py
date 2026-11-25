@@ -1607,15 +1607,8 @@ class Ledger:
                             "INSERT OR IGNORE INTO settled_tx VALUES(?,?,?)", (key, "bank reference conflict", now())
                         )
                         self._reference_copy(db, st.company, t, key, iban, True, statement_keys)
-                    elif t.counterparty or t.counterparty_iban:
-                        # The same money read again naming its payer (a parser that learned the layout) keeps that
-                        # evidence when the stored copy named none: who paid is what a client reminder checks.
-                        db.execute(
-                            "UPDATE statement_txs SET tx=? WHERE tx_key=? AND company=? AND (tx IS NULL OR "
-                            "(COALESCE(json_extract(tx,'$.counterparty'),'')='' "
-                            "AND COALESCE(json_extract(tx,'$.counterparty_iban'),'')=''))",
-                            (shown, key, st.company),
-                        )
+                    else:
+                        self._learn_payer(db, st.company, key, t)
                     # A row recorded before accounts were (iban NULL) learns its account from the same statement
                     # read again; a recorded account is never overwritten, and another company's row is never touched.
                     db.execute(
@@ -1758,6 +1751,33 @@ class Ledger:
         all its reads: a month it read from its first day is the bank's, whatever day this read starts."""
         rows = db.execute("SELECT covered FROM bank_connections WHERE company=?", (company,))
         return any(json.loads(c).get(iban, "9999-12-31") <= day for (c,) in rows)
+
+    @staticmethod
+    def _learn_payer(db, company: str, key: str, t) -> None:
+        """The same money read again naming its payer (a parser that learned the layout, the feed adding a name)
+        fills the payer fields the stored copy lacks: who paid is what a client reminder checks. Only an empty field
+        is filled, only when the two reads agree on every payer field both name, and nothing else in the stored copy
+        (its description, reference, dates) changes."""
+        row = db.execute("SELECT tx FROM statement_txs WHERE tx_key=? AND company=?", (key, company)).fetchone()
+        if not row:
+            return
+        if row["tx"] is None:
+            db.execute(
+                "UPDATE statement_txs SET tx=? WHERE tx_key=? AND company=?", (json.dumps(t.to_dict()), key, company)
+            )
+            return
+        stored, fields = (
+            json.loads(row["tx"]),
+            {"counterparty": t.counterparty, "counterparty_iban": t.counterparty_iban},
+        )
+        if any(stored.get(f) and v and stored[f] != v for f, v in fields.items()):
+            return  # the reads disagree on who paid: keep the first, in doubt
+        learned = {f: v for f, v in fields.items() if v and not stored.get(f)}
+        if learned:
+            db.execute(
+                "UPDATE statement_txs SET tx=? WHERE tx_key=? AND company=?",
+                (json.dumps(stored | learned), key, company),
+            )
 
     @staticmethod
     def _file_has(db, company: str, iban: str, month: str) -> bool:

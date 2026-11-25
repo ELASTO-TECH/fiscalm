@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import pytest
@@ -129,14 +130,16 @@ def _reserve(L, tx, what):
         ("explained", True),
         ("conflict", False),
         ("named_on_a_later_read", False),  # first recorded without its payer, then read again naming the client
+        ("named_after_its_account", False),  # first recorded with the payer's account only
         ("no_details", False),
     ],
 )
 def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, case, reminded):
     L, iid = reminder
     credit = _client_credit(L, iid)
-    if case == "named_on_a_later_read":
-        blank = _client_credit(L, iid, counterparty="", iban="", desc=credit.description)
+    if case in ("named_on_a_later_read", "named_after_its_account"):
+        iban = credit.counterparty_iban if case == "named_after_its_account" else ""
+        blank = _client_credit(L, iid, counterparty="", iban=iban, desc=credit.description)
         assert statements.tx_key(blank) == statements.tx_key(credit)
         L.record_statement(_st(blank))
     L.record_statement(_st(credit))
@@ -201,6 +204,25 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
             _reserve(L, blank, "duplicate:" + statements.tx_key(settled))
     rows = api._issued(L, "NORD", TODAY, True)
     assert bool(r.tasks(L, "NORD", TODAY, rows)) is reminded
+
+
+def test_a_payer_learned_on_a_later_read_keeps_the_first_remittance(reminder):
+    # The feed keys a line by the bank's reference: a later read may name the payer and drop the remittance text.
+    L, iid = reminder
+    first = _client_credit(L, iid, counterparty="", iban="", desc="Plata FACT TEST-42")
+    first.ref = "eb:ref-1"
+    later = _client_credit(L, iid, desc="")
+    later.ref = "eb:ref-1"
+    L.record_statement(_st(first))
+    L.record_statement(_st(later))
+    (tx,) = L.db.execute("SELECT tx FROM statement_txs").fetchone()
+    stored = statements.Tx.from_dict(json.loads(tx))
+    assert (stored.description, stored.counterparty, stored.counterparty_iban) == (
+        "Plata FACT TEST-42",
+        later.counterparty,
+        later.counterparty_iban,
+    )
+    assert r.tasks(L, "NORD", TODAY, api._issued(L, "NORD", TODAY, True)) == []
 
 
 @pytest.mark.parametrize(
