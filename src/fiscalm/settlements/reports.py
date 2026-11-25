@@ -30,7 +30,7 @@ class ReportError(ValueError):
 # Currency words a report writes next to an amount or in its currency column, by ISO code.
 CURRENCY_WORDS = {"RON": "RON", "LEI": "RON", "EUR": "EUR", "€": "EUR", "USD": "USD"}  # never `$`: USD, CAD, AUD…
 _NUMBER = re.compile(
-    r"(?P<int>\d{1,12}|\d{1,3}(?P<sep>[., '])\d{3}(?:(?P=sep)\d{3}){0,3})(?:(?P<dec>[.,])(?P<cents>\d{1,2}))?"
+    r"(?P<int>\d{1,12}|[1-9]\d{0,2}(?P<sep>[., '])\d{3}(?:(?P=sep)\d{3}){0,3})(?:(?P<dec>[.,])(?P<cents>\d{1,2}))?"
 )
 # A lone dot or comma before the decimal digits is a separator; space, apostrophe and non-breaking spaces group thousands.
 PLACEHOLDERS = ("-", "–", "—")
@@ -217,7 +217,7 @@ def parse(
     header = rows.pop(0)
     if len(set(header)) != len(header) or not set(mapping.values()) <= set(header):
         raise ReportError("Missing or duplicate headers")
-    result = []
+    result, signs = [], set()
     for n, row in enumerate(rows, 2):
         if kind == "xlsx" and len(row) < len(header):
             row = row + [""] * (len(header) - len(row))
@@ -230,6 +230,11 @@ def parse(
         ):
             raise ReportError(f"Line {n}: missing reference or control character")
         result.append(_money_line(n, line))
+        fee = amount(line["fee"])[0] if line["fee"] else 0
+        if fee:
+            signs.add(fee < 0)
+    if len(signs) > 1:  # `-5` beside `5`: a rebate or a deduction? One report writes its fees one way.
+        raise ReportError("Fee signs differ: invalid gross/fee/net")
     batches = {r.get("batch") for r in result}
     if len(batches) != 1:
         raise ReportError("Exactly one payout required")

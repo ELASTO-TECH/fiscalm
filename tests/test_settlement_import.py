@@ -127,6 +127,7 @@ def test_bad_delimiter_and_negative_string_index():
         ("$ 100", "0", "", None),  # USD, CAD or AUD
         ("1,000,000,000,000.00", "0", "", None),  # past the stored amount's 12 digits
         ("1 " * 300 + "x", "0", "", None),  # a long odd cell refuses at once
+        ("0.250,50", "0", "", None),  # a grouped amount never starts with 0
         ("100lei", "100,00", "-0,00", ("100.00", "100.00", "RON")),  # a net of -0 is stored as 0.00
         ("1.250", "0", "", None),  # one group, no decimals: 1250 or 1.25
         ("100,005", "0", "", None),
@@ -315,3 +316,12 @@ def test_uploaded_company_cui_refuses_whole_report(ledger, kind, value):
     assert all(r["status"] == "open" for r in ledger.db.execute("SELECT status FROM issued WHERE company='STUDIO9'"))
     if value in ("foreign", "unknown", "invalid"):
         assert all(r["status"] == "open" for r in ledger.db.execute("SELECT status FROM issued"))
+
+
+def test_one_report_writes_its_fees_one_way():
+    """A fee written `-5` beside one written `5` could be a rebate or a deduction: the report refuses."""
+    data = b"Ref;Gross;Fee\nTEST-1;100,00;5,00\nTEST-2;100,00;-5,00\n"
+    mapping = {"reference": "Ref", "gross": "Gross", "fee": "Fee"}
+    with pytest.raises(ReportError):
+        parse(data, "csv", "fan", mapping, ";")
+    assert [x["fee"] for x in parse(data.replace(b";5,00", b";-5,00"), "csv", "fan", mapping, ";")] == ["5.00", "5.00"]
