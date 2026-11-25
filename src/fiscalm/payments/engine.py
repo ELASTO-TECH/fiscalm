@@ -217,9 +217,7 @@ def file_rows(ledger: Ledger, file_id: int) -> list:
 def file_downloads(ledger: Ledger, file_id: int) -> list[dict]:
     return [
         dict(r) | {"items": json.loads(r["items"])}
-        for r in ledger.db.execute(
-            "SELECT * FROM payment_downloads WHERE file_id=? ORDER BY created_at DESC,id DESC", (file_id,)
-        )
+        for r in ledger.db.execute("SELECT * FROM payment_downloads WHERE file_id=? ORDER BY id DESC", (file_id,))
     ]
 
 
@@ -233,7 +231,7 @@ def named_files(ledger: Ledger, company: str) -> list[dict]:
         members.setdefault(row["file_id"], []).append(row)
     for row in ledger.db.execute(
         "SELECT d.* FROM payment_downloads d JOIN payment_files f ON f.id=d.file_id "
-        "WHERE f.company=? ORDER BY d.created_at DESC,d.id DESC",
+        "WHERE f.company=? ORDER BY d.id DESC",
         (company,),
     ):
         snapshots.setdefault(row["file_id"], []).append(dict(row) | {"items": json.loads(row["items"])})

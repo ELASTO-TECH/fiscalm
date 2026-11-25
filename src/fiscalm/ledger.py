@@ -1234,13 +1234,8 @@ class Ledger:
                 (file_id, company, revision),
             ).fetchone():
                 return None
-            existing = db.execute(
-                "SELECT id FROM payment_downloads WHERE file_id=? AND version=? AND revision=?",
-                (file_id, version, revision),
-            ).fetchone()
-            if existing:
-                db.execute("UPDATE payment_downloads SET created_at=? WHERE id=?", (now(), existing["id"]))
-                return existing["id"]
+            # Every download is its own row, the same bytes again included: the history shows each one, and the
+            # highest id is the one the bank got last (timestamps tie within a second).
             return db.execute(
                 "INSERT INTO payment_downloads(file_id,version,revision,items,created_at,value_date) "
                 "VALUES(?,?,?,?,?,?)",
@@ -1274,7 +1269,7 @@ class Ledger:
         """The latest download was not imported: bump the revision so that download can no longer be imported."""
         with self.tx() as db:
             latest = db.execute(
-                "SELECT id FROM payment_downloads WHERE file_id=? ORDER BY created_at DESC,id DESC LIMIT 1", (file_id,)
+                "SELECT id FROM payment_downloads WHERE file_id=? ORDER BY id DESC LIMIT 1", (file_id,)
             ).fetchone()
             if (latest["id"] if latest else 0) != download_id:
                 return False

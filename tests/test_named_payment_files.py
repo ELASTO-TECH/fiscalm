@@ -15,7 +15,7 @@ from payment_cases import D0, _op
 from test_api import _req, server as server, world as world
 from test_payfiles import ing_has_a_format as ing_has_a_format
 
-from fiscalm import cli, companies
+from fiscalm import cli, companies, ledger as ledger_module
 from fiscalm.api import actions, state
 from fiscalm.bank import statements
 from fiscalm.efactura import inbox as efactura
@@ -266,11 +266,12 @@ def test_two_connections_import_only_once(ledger, live):
     assert not ledger.get_meta(f"payment_import:{ident}")
 
 
-def test_a_file_downloaded_twice_stays_editable_and_imports_its_latest_download(ledger, world):
+def test_a_file_downloaded_twice_stays_editable_and_imports_its_latest_download(ledger, world, monkeypatch):
     ident = pay.add_invoices(ledger, "NORD", ["101"], name="Twice", approve_invoice=efactura.approve)
+    monkeypatch.setattr(ledger_module, "now", lambda: "2099-01-01T10:00:00")  # every download in the same second
     first = pay.download_file(ledger, ident, "NORD", D0, lambda: None)
     with closing(Ledger(ledger.path)) as other:
-        latest = pay.download_file(other, ident, "NORD", D0 + timedelta(days=1), lambda: None)
+        latest = pay.download_file(other, ident, "NORD", D0, lambda: None)  # the same bytes again: a retry
     detail = state.payment_file_detail(ledger, ident)
     assert detail["question"] is None and detail["questions"] == [] and detail["can_add"] and detail["can_import"]
     assert [d["id"] for d in detail["downloads"]] == [latest["download_id"], first["download_id"]]
@@ -279,10 +280,14 @@ def test_a_file_downloaded_twice_stays_editable_and_imports_its_latest_download(
     assert state.payment_file_detail(ledger, ident)["changed_since_download"]
     with pytest.raises(PaymentFileError):  # the edit came after both downloads: import needs a new one
         pay.import_file(ledger, ident, "NORD", latest["download_id"], D0)
-    again = pay.download_file(ledger, ident, "NORD", D0 + timedelta(days=1), lambda: None)
+    a = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0)
+    pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0 + timedelta(days=1))
+    again = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0)  # A, B, then A again
+    assert state.payment_file_detail(ledger, ident)["downloads"][0]["id"] == again["download_id"] != a["download_id"]
     with pytest.raises(PaymentFileError):
         pay.import_file(ledger, ident, "NORD", latest["download_id"], D0)
     assert pay.import_file(ledger, ident, "NORD", again["download_id"], D0)
+    assert Path(ledger.payment_file(ident)["path"]).read_bytes() == again["data"]
 
 
 def test_all_skipped_is_never_confirmed_and_can_be_emptied(ledger, live):
