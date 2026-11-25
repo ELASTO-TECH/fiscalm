@@ -42,7 +42,8 @@ def fields(L: Ledger, raw: bytes, company: str) -> dict:
         "party_tax_id": tax_token(cui),
         "reason": doc.refused,
     }
-    explicit = reader.PROFORMA.search(doc.text) or reader.CREDIT.search(doc.text)  # whatever the title says
+    negative = any(Decimal(amount) < 0 for amount, _ in reader.totals(doc.text))
+    explicit = reader.PROFORMA.search(doc.text) or reader.CREDIT.search(doc.text) or negative  # whatever the title
     if (valid(rules) and rules["party_tax_id"]) or doc.refused in ("proforma", "credit-note") or explicit:
         return rules
     return _with_ai(L, raw, company, doc, rules)
