@@ -830,7 +830,9 @@ def _known_numbers(L: Ledger, company: str, old: list) -> set[str]:
 
 
 def _named(known: set[str], t: statements.Tx) -> set[str]:
-    return {n for n in known if re.search(rf"(?<!\d){n}(?!\d)", t.description)}
+    """The known invoice numbers a debit's text names, written plain or with separators ("INV-2026-0042")."""
+    text = t.description + " " + re.sub(r"(?<=\d)[-/. ](?=\d)", "", t.description)
+    return {n for n in known if re.search(rf"(?<!\d){n}(?!\d)", text)}
 
 
 def _open_invoices(L: Ledger, company: str):
@@ -973,8 +975,9 @@ class ResolveError(ValueError):
 def resolve_debit(L: Ledger, co: str, key: str, target: str) -> tuple[str, str]:
     """The user says which of its recorded candidates an ambiguous debit paid: that one is settled with the debit,
     through the same guarded writes as the matchers (the key is reserved in the same transaction: one debit, one
-    invoice). His choice, the bank's proof: it counts as confirmed, and the debit's account or name is remembered for
-    the invoice's supplier (statement_partner, listed in Ținute minte). Returns the candidate ("efactura" | "payment", id)."""
+    invoice). His choice, the bank's proof: it counts as confirmed, and, when the debit fit the invoice by its account
+    or name (a rival), that account or name is remembered for the invoice's supplier (statement_partner, listed in
+    Ținute minte); a pick made on the amount alone teaches nothing. Returns the candidate ("efactura" | "payment", id)."""
     rec = next(iter(L.ambiguous(key=key)), None) if key else None
     if not rec or rec["company"] != co:
         raise ResolveError("no ambiguous debit with this key")
