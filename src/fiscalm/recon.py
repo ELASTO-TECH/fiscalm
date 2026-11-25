@@ -212,19 +212,29 @@ def ingest_statements(
             failed, opened = [], []
             for i, path in enumerate(paths):
                 o = _open_statement(Path(path), work / str(i), kw)
-                (opened if isinstance(o, _Opened) else failed).append(o)
+                if isinstance(o, dict):
+                    failed.append(o)
+                else:
+                    opened.extend(o)
             groups: dict[tuple[str, str], list[_Opened]] = {}
             for o in opened:
                 groups.setdefault((o.company, o.month), []).append(o)
             if one_set and (failed or len(groups) > 1):
-                return failed[:1] or [_refused(opened, "Statement set: files of different months or companies")]
+                several = len(paths) == 1 and not failed  # one file, split by month: each month is uploaded alone
+                error = (
+                    statements.SEVERAL_MONTHS if several else "Statement set: files of different months or companies"
+                )
+                return failed[:1] or [_refused(opened, error)]
             # month by month: a month that starts after the 1st is checked against the one before it
-            return failed + [_store_set(ledger, groups[k], home, check, source) for k in sorted(groups)]
+            others = _checked(groups, check)  # the months imported together prove each other's edges
+            return failed + [_store_set(ledger, groups[k], home, check, source, others) for k in sorted(groups)]
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
 
-def _open_statement(path: Path, out_dir: Path, kw: dict) -> _Opened | dict:
+def _open_statement(path: Path, out_dir: Path, kw: dict) -> list[_Opened] | dict:
+    """The file's statement, or one per month for a statement of several months (split by month, each part its own
+    document); a dict says why the file is not read."""
     try:
         company, month, out = statements.decrypt_to(path, out_dir, **kw)
     except statements.SecretsUnavailable as e:
@@ -235,24 +245,45 @@ def _open_statement(path: Path, out_dir: Path, kw: dict) -> _Opened | dict:
         return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement"]}
     try:
         st = statements.parse(out, company)
-        if st.month and st.month != month:  # the month comes from what the bank printed, never from a file name
+        if not st.period_start or not st.period_end:
+            raise statements.StatementError("Cannot verify statement period")
+        if statements.several_months(st):
+            parts = statements.split_months(out, company, st, out_dir / "months")
+            if month not in {m for m, *_ in parts}:  # a name's month, or the first printed: one of its months
+                raise statements.StatementError("Statement file name names another month than its period")
+            return [_Opened(path, company, m, piece, s, sha256(piece)) for m, piece, s in parts]
+        if st.month != month:  # the month comes from what the bank printed, never from a file name
             raise statements.StatementError("Statement file name names another month than its period")
     except (ValueError, ArithmeticError):
         return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement"]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "refused", "errors": [str(e)]}
-    return _Opened(path, company, month, out, st, sha256(path))
+    return [_Opened(path, company, month, out, st, sha256(path))]
+
+
+def _checked(groups: dict[tuple[str, str], list[_Opened]], check) -> list[statements.Statement]:
+    """Each month of the call as one statement, only those that pass their own checks: a refused file proves no
+    neighbour's edge."""
+    out = []
+    for parts in groups.values():
+        try:
+            st = combine([o.st for o in parts])
+            _set_checks(st, parts, check)
+        except statements.StatementError:
+            continue
+        out.append(st)
+    return out
 
 
 def _refused(parts: list[_Opened], error: str, status: str = "refused", **extra) -> dict:
     return {"file": ", ".join(str(o.path) for o in parts), "status": status, "errors": [error], **extra}
 
 
-def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: str | None) -> dict:
+def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: str | None, others=()) -> dict:
     try:
         st = combine([o.st for o in parts])
         _set_checks(st, parts, check)
-        refuse_unchained(ledger, st)  # under the import lock: the previous month can't change meanwhile
+        refuse_unchained(ledger, st, others)  # under the import lock
         for o in parts:
             refuse_overlap(ledger, o.st, o.digest, siblings={p.digest for p in parts})
     except StoredStatementUnavailable as exc:
