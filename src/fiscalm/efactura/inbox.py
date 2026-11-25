@@ -81,9 +81,11 @@ def awaiting(L: Ledger, company: str | None = None) -> list:
     return net_invoices(L, _marked(L, company))
 
 
-def _marked(L: Ledger, company: str | None = None) -> list:
-    """awaiting's rows whole, for a reader that nets the credits itself (once)."""
-    q, args = f"SELECT * FROM efactura WHERE {USER_MARKED}", []
+def _marked(L: Ledger, company: str | None = None, *, proved: bool = False) -> list:
+    """awaiting's rows whole, for a reader that nets the credits itself (once); `proved`: mail_proved's too, in the
+    same read."""
+    also = f" OR ({MAIL_PROVED} AND parse_error IS NULL)" if proved else ""
+    q, args = f"SELECT * FROM efactura WHERE ({USER_MARKED}{also})", []
     if company:
         q, args = q + " AND company=?", [company]
     return L.db.execute(q + " ORDER BY paid_at DESC, message_id", args).fetchall()
@@ -860,7 +862,7 @@ def _open_invoices(L: Ledger, company: str):
     """The received invoices whose debit is still to come (open, marked, or proved by a mail), and what rivals needs to
     see the rest."""
     have = covered(L, company, "efactura")
-    rows = [*L.efactura_rows(status=OPEN, company=company), *_marked(L, company), *mail_proved(L, company)]
+    rows = [*L.efactura_rows(status=OPEN, company=company), *_marked(L, company, proved=True)]
     rows = [r for r in rows if not r["parse_error"]]
     credits = credited(L, company)
     rows = net_invoices(L, rows)

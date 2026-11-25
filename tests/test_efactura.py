@@ -409,11 +409,11 @@ def test_a_reopen_during_matching_never_hides_a_rival(ledger, home, sec, monkeyp
     other = threading.Thread(target=reopen)
     marked = efactura._marked
 
-    def reopen_then_read(L, company=None):  # between rivals' read of the open rows and of the marked ones
+    def reopen_then_read(L, company=None, **kw):  # between rivals' read of the open rows and of the marked ones
         if sys._getframe(1).f_code.co_name == "_open_invoices" and not other.ident:
             other.start()
             other.join(timeout=1)  # blocked by the matcher's lock: it stops waiting and the matcher goes on
-        return marked(L, company)
+        return marked(L, company, **kw)
 
     monkeypatch.setattr(efactura, "_marked", reopen_then_read)
     t = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
