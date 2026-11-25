@@ -377,8 +377,8 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         credit, or its exact name, legal forms aside, private buyers too) settles the one invoice it fits;
       - a credit that shows no client fits by its amount alone (maintainer decision, 2026-11-25): it settles the
         only candidate of its exact amount, and only when no other credit of the statement fits that one too.
-        Never by amount: a credit from an account known for another client or shown with a client on this
-        statement, a card refund, fees or interest;
+        Never by amount: a credit that shows any of the firm's clients, from an account known for a client or
+        shown with one on this statement. Never at all: a card refund, fees or interest;
       - a credit that names a known invoice (its full identifier, or 3+ digits of it) settles only that one,
         and nothing when that invoice is already closed; without its client, only one whole identifier counts;
       - a credit that fits several invoices settles none; one credit settles one invoice, ever.
@@ -403,7 +403,8 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         and not advance(t)
     ]
     first = {statements.tx_key(t): pool.candidates(t, ()) for t in credits}
-    claims = Counter(r["message_id"] for c in first.values() for r, _ in c)
+    # every statement line counts, even two that share a key (same day, amount and text, no bank reference)
+    claims = Counter(r["message_id"] for t in credits for r, _ in first[statements.tx_key(t)])
     # accounts that show a client on a credit of this statement are nobody's anonymous payment
     shown = {
         t.counterparty_iban
@@ -415,7 +416,7 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
     # they collected theirs, a plain twin may fit a single one. A credit keeps the evidence it had at the start.
     for t in sorted(credits, key=lambda t: (len(c := first[statements.tx_key(t)]) != 1, _rank(c))):
         was = {r["message_id"]: how for r, how in first[statements.tx_key(t)]}
-        cands = [(r, how) for r, how in pool.candidates(t, done) if was.get(r["message_id"]) == how]
+        cands = [(r, how) for r, how in pool.candidates(t, done) if _kept(was.get(r["message_id"]), how)]
         if len(cands) != 1 or not pool.settles(cands[0][0]["message_id"]):
             continue
         (r, how) = cands[0]
@@ -433,6 +434,11 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
             if learned:  # the next credit of the statement from this account sees it known
                 pool.accounts.setdefault(t.counterparty_iban, set()).add(r["client_cui"] or "")
     return batch_done + done
+
+
+def _kept(was: str | None, how: str) -> bool:
+    """The evidence a credit had at the start still holds: the same, or its client shown another way."""
+    return was == how or (was in CLIENT_PROOF and how in CLIENT_PROOF)
 
 
 def _rank(cands: list) -> int:
@@ -460,6 +466,12 @@ class _Pool:
             if r["doc_type"] == "invoice" and r["status"] != "duplicate"
         ]
         self.accounts = client_accounts(L, company)
+        self.clients = {
+            (r["client_name"] or "", r["client_cui"] or "")
+            for r in [*L.issued_rows(company=company), *old]
+            if r["doc_type"] == "invoice"
+        }
+        self._from_client: dict[int, bool] = {}
 
     def owed(self, r) -> Decimal:
         mid = r["message_id"]
@@ -471,6 +483,9 @@ class _Pool:
 
     def fits(self, r, t: statements.Tx) -> str:
         """How the credit fits this invoice: by its client (CLIENT_PROOF), by its amount alone, or not ("")."""
+        statements.classify_tx(t)
+        if t.card_last4 or t.category in (statements.BANK_FEE, statements.INTEREST):
+            return ""  # a card refund, the bank's own money: never a client's payment
         if not _amount_matches(t, self.owed(r), r["currency"]):
             return ""
         issued_on = date.fromisoformat(r["issue_date"])
@@ -481,14 +496,18 @@ class _Pool:
         cui = r["client_cui"] or ""
         if how := credit_from_client(self.L, self.company, r["client_name"], cui, t, accounts=self.accounts):
             return how
-        statements.classify_tx(t)
-        if (
-            t.counterparty_iban in self.accounts
-            or t.card_last4
-            or t.category in (statements.BANK_FEE, statements.INTEREST)
-        ):
-            return ""  # another client's known account, a card refund, the bank's own money
+        if t.counterparty_iban in self.accounts or self.from_client(t):
+            return ""  # another client's known account, or a credit showing another client (any invoice, any status)
         return "amount"
+
+    def from_client(self, t: statements.Tx) -> bool:
+        """The credit shows one of the firm's clients (iban, CUI or name): it can pay only that client's invoices."""
+        if id(t) not in self._from_client:
+            self._from_client[id(t)] = any(
+                credit_from_client(self.L, self.company, name, cui, t, accounts=self.accounts)
+                for name, cui in self.clients
+            )
+        return self._from_client[id(t)]
 
     def named(self, t: statements.Tx) -> tuple[set[str], bool]:
         """Invoices the credit names, and whether by their full identifier; any status, so a credit for an already

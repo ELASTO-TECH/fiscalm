@@ -302,6 +302,7 @@ def test_two_credits_of_one_amount_collect_nothing_by_amount(ledger, home, sec, 
     a = _credit("1190.00", date(2026, 10, 20), counterparty="ALFA", iban=OTHER_IBAN, desc="x")
     b = _credit("1190.00", date(2026, 10, 21), counterparty="OMEGA", iban=OTHER_IBAN, desc="y")
     assert issued.match_statement(ledger, _st(a, b)) == []
+    assert issued.match_statement(ledger, _st(a, a)) == []  # two lines alike (one key) are two credits too
     assert issued.match_statement(ledger, _st(a, _credit("1190.00", date(2026, 10, 22)))) == ["7001"]  # the client's
     assert "name" in ledger.issued("7001")["collected_note"]
 
@@ -316,6 +317,7 @@ def test_a_credit_never_trades_its_client_for_an_amount(ledger, home, sec, monke
         _credit("100.00", date(2026, 10, d), counterparty="ALPHA SOFT SRL", iban="", desc=f"p{d}") for d in (20, 21)
     ]
     assert issued.match_statement(ledger, _st(*alpha)) == ["7001"]  # the second Alpha credit never pays Beta
+    assert issued.match_statement(ledger, _st(*alpha)) == []  # nor on the next sync, once Alpha's is closed
 
 
 @pytest.mark.parametrize("gamma_first", [True, False])
@@ -373,7 +375,7 @@ def test_wrong_client_amount_debit_or_own_transfer_never_collects(ledger, home, 
     )
     assert issued.match_statement(ledger, _st(gamma)) == ["7002"]  # OTHER_IBAN is now GAMMA's account
     other = _credit("1190.00", date(2026, 10, 20), counterparty="DELTA SOFTWARE SRL", iban=OTHER_IBAN, desc="servicii")
-    card_refund = _credit("1190.00", date(2026, 10, 20), counterparty="SHOP", iban="", desc="RETUR POS")
+    card_refund = _credit("1190.00", date(2026, 10, 20), counterparty="BETA SOFTWARE SRL", iban="", desc="RETUR")
     card_refund.card_last4 = "4242"
     amount = _credit("1189.99", date(2026, 10, 20))
     early = _credit("1190.00", date(2026, 9, 1))
