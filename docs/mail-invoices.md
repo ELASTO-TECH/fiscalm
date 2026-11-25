@@ -64,11 +64,12 @@ line with its currency, the issue date on a dated line, the number after the doc
 sender's display name. When the administrator configures the AI integration, that consents to document text (or, for a scanned PDF
 without text, a picture of its first page) being sent to its provider in Sandbox and Live. It is asked once per PDF
 the rules could not settle (no firm, an unclear buyer, two firms, no single total, no text) and proposes the fields
-(`fiscalm.ai_extract`). Fixed rules check each one: an ISO date, a positive two-decimal total printed in the text in
-a currency the document shows, a known currency, and buyer and seller matched to the firms by CUI or name and printed
+(`fiscalm.ai_extract`). Fixed rules check each one: an ISO date, a positive two-decimal total printed positive in the text
+with its currency, a known currency, and buyer and seller matched to the firms by CUI or name and printed
 on the document. It never overrules the rules: a firm they found must include its buyer, a total they found must
-include its total. A confident reading may file the document or refuse it (proforma, credit note, the firm as seller,
-a Romanian seller); a low-confidence one only fills the question's number, date and supplier.
+include its total. A confident reading may file the document; a low-confidence one, a disagreement, or a refusal only the AI sees
+(proforma, credit note, the firm as seller, a Romanian seller) leaves the question open with its number, date and
+supplier filled in. A scan without text is asked about, never silently refused. Only the rules refuse.
 
 **In doubt, one question (Sarcini).** No firm on the document, a firm without a clear buyer's role, two firms, a sender tied to another firm, or a total
 that isn't clear: the document waits in Sarcini as one question with the answers to pick (each firm, each total

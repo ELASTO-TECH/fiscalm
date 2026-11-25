@@ -28,7 +28,7 @@ from fiscalm.ledger import Ledger
 
 TEXT_LIMIT = 12000  # characters of a document sent: the header and totals are on its first pages
 DOC_TYPES = ("invoice", "receipt", "proforma", "credit_note", "other")
-AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[ .,' ]\d{3})+|\d+)([.,]\d{2})(?![\d])")
+AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[ .,'\u00a0]\d{3})+|\d+)([.,]\d{2})(?![\d])")
 _TEXT = {"type": "string"}
 SCHEMA = {
     "type": "object",
@@ -92,7 +92,7 @@ class Extraction:
 def money(whole: str, cents: str) -> Decimal | None:
     """An amount AMOUNT found, its separators dropped."""
     try:
-        return Decimal(re.sub(r"[ .,' ]", "", whole) + "." + cents[1:])
+        return Decimal(re.sub(r"[ .,'\u00a0]", "", whole) + "." + cents[1:])
     except InvalidOperation:
         return None
 
@@ -127,8 +127,8 @@ def _firm(name: str, tax_id: str, firms: dict[str, companies.Company], text: str
     digits = re.fullmatch(r"(?:RO)?\s*(\d{2,10})", tax_id.strip().upper())
     by_id = {k for k, co in firms.items() if digits and digits.group(1) == co.cui}
     by_name = {k for k, co in firms.items() if name.strip() and co.named_in(name)}
-    if tax_id.strip() and not digits and by_name:
-        return ""  # a foreign id beside a firm's name: not clear
+    if tax_id.strip() and by_name and not by_id:
+        return ""  # an id that is none of the firms' beside a firm's name: not clear
     found = by_id or by_name
     if len(found) != 1 or (by_id and by_name and by_id != by_name):
         return ""
@@ -170,6 +170,11 @@ def ro_seller(x: Extraction, firms: Collection[companies.Company]) -> bool:
     return bool(m) and not x.seller and m.group(1) not in {co.cui for co in firms}
 
 
+def ready(L: Ledger) -> bool:
+    """Only an integration the administrator configured, never a CLI that happens to be installed."""
+    return integrations.default(L, "ai") is not None and ai.available(L)
+
+
 def extract(
     L: Ledger,
     firms: Collection[str],
@@ -183,8 +188,8 @@ def extract(
     provider in tests."""
     if not text.strip() and image is None:
         return None
-    if ask is None and not (integrations.default(L, "ai") and ai.available(L)):
-        return None  # only an integration the administrator configured, never a CLI that happens to be installed
+    if ask is None and not ready(L):
+        return None
     registry = companies.all(L)
     scope = {k: registry[k] for k in firms if k in registry}
     prompt = "Document text follows.\n" + text[:TEXT_LIMIT] if text.strip() else "The document is the picture."

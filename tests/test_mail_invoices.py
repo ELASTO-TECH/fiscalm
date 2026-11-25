@@ -345,10 +345,13 @@ def test_a_confident_ai_reading_files_what_the_rules_could_not(ledger, home, liv
         ({"currency": "EUR"}, "asked:1"),  # a currency the document doesn't show
         ({"buyer_name": "Studio 9 SRL", "buyer_tax_id": "RO33333333"}, "asked:1"),  # a firm not on the document
         ({"buyer_name": "Atelier Nord SRL", "buyer_tax_id": "RO33333333"}, "asked:1"),  # id and name disagree
-        ({"doc_type": "proforma"}, "proforma:1"),
-        ({"doc_type": "credit_note"}, "credit-note:1"),
-        ({"seller_tax_id": "RO44444444"}, "efactura:1"),  # a Romanian supplier: its invoice is in SPV
-        ({"seller_name": "Atelier Nord SRL", "buyer_name": "", "buyer_tax_id": ""}, "issued:1"),
+        ({"buyer_name": "Atelier Nord SRL", "buyer_tax_id": "RO44444444"}, "asked:1"),  # an id none of the firms'
+        ({"total": "-49.00"}, "asked:1"),
+        # A refusal only the AI sees keeps the question: only the rules refuse.
+        ({"doc_type": "proforma"}, "asked:1"),
+        ({"doc_type": "credit_note"}, "asked:1"),
+        ({"seller_tax_id": "RO44444444"}, "asked:1"),
+        ({"seller_name": "Atelier Nord SRL", "buyer_name": "", "buyer_tax_id": ""}, "asked:1"),
     ],
 )
 def test_an_ai_reading_never_overrules_the_document(ledger, fields, result):
@@ -391,8 +394,25 @@ def test_a_scanned_invoice_is_read_from_its_picture(ledger):
     assert ask.calls[0][1][0] == "image/png" and ask.calls[0][1][1].startswith(b"\x89PNG")
     (doc,) = docs_of(ledger)
     assert (doc["company"], doc["amount"], doc["currency"], doc["doc_date"]) == ("NORD", "80.00", "EUR", "2026-10-28")
-    low = text_pdf([" "])
-    assert mi.handle(ledger, message(("pdf", low), mid="m2"), ask=reading(confidence="low")) == "unreadable:1"
+    low = text_pdf([" "])  # a low-confidence reading of a scan waits as a question, with what it read
+    assert mi.handle(ledger, message(("pdf", low), mid="m2"), ask=reading(confidence="low")) == "asked:1"
+    (q,) = mi.questions(ledger)
+    assert (q["data"]["reason"], q["data"]["number"], q["data"]["totals"]) == ("no-firm", "INV-2026-0042", [])
+
+
+@pytest.mark.parametrize(
+    ("text", "total", "currency", "ok"),
+    [
+        ("Charged EUR 12.00\nFee USD 1.00", "12.00", "USD", False),  # the amount in another currency
+        ("Charged EUR 12.00\nFee USD 1.00", "12.00", "EUR", True),
+        ("Refund USD -12.00", "12.00", "USD", False),  # a negative amount
+        ("Paid 12.00\nAll prices in EUR", "12.00", "EUR", True),
+        ("Paid 12.00\nFee USD 1.00\nEUR", "12.00", "EUR", False),  # no currency on its line, two on the document
+    ],
+)
+def test_an_ai_total_needs_its_amount_printed_with_its_currency(text, total, currency, ok):
+    x = ai_extract.Extraction("invoice", "", "", "", "", "", "", "", "", total, currency, "", True)
+    assert mi._agreed_totals(mi.Doc("pdf", text=text), x) == ([(total, currency)] if ok else None)
 
 
 def test_duplicates_are_filed_once(ledger):
@@ -622,6 +642,7 @@ def test_totals_reader():
     assert mi.totals(text) == [("1234.56", "EUR"), ("12.00", "USD")]
     assert mi.totals("Total de plată 100,00 lei") == [("100.00", "RON")]
     assert mi.totals("Total 50.00\nPaid in RON") == [("50.00", "RON")]
+    assert mi.totals("Total 1\u00a0234,56 EUR") == [("1234.56", "EUR")]
 
 
 def test_without_an_ai_integration_no_ai_is_asked(ledger, monkeypatch):
