@@ -101,9 +101,8 @@ LEGAL_FORMS = frozenset(
 
 def _name_words(name: str) -> list[str]:
     words = [w for w in firm_name(name).split("-") if w]
-    while len(words) > 1 and words[-1] in LEGAL_FORMS:  # only a trailing legal form; 'Spa Design SRL' keeps 'spa'
-        words.pop()
-    return words
+    # Only one trailing legal form: 'Atelier Spa SRL' keeps 'spa', 'Spa SRL' keeps its name.
+    return words[:-1] if len(words) > 1 and words[-1] in LEGAL_FORMS else words
 
 
 def same_firm(saved: dict, buyer: dict) -> bool:

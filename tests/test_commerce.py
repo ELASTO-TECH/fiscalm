@@ -164,6 +164,7 @@ def test_shop_never_overwrites_saved_client(shop):
         ("Firma Fictivă SRL", "S.C. FIRMA FICTIVA S.R.L.", True),
         ("Spa SRL", "spa s.r.l.", True),
         ("Atelier Spa Design SRL", "Atelier Design SRL", False),
+        ("Atelier Spa SRL", "Atelier SRL", False),
         ("...", "!!!", False),
     ],
 )
