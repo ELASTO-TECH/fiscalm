@@ -704,6 +704,7 @@ FACTURA = ["Factura SB-0099", *HISTORY_TEXT]
             {"seller_tax_id": "RO88888888"},
         ),
         (FACTURA, {"currency": ""}),  # a total it gave without its currency
+        (["Factura SB-0099", *HISTORY_TEXT[:2], "Data: 03.11.2026", "Data: 03.12.2026", "119,00 lei"], {}),  # two dates
         (["Aviz de insotire SB-0099", *HISTORY_TEXT], {}),  # no invoice title
         (
             [

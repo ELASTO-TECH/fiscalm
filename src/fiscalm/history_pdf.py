@@ -10,7 +10,7 @@ import stat
 from datetime import date, datetime
 from decimal import Decimal
 
-from fiscalm import ai_extract, companies, identity
+from fiscalm import ai_extract, companies, docs, identity
 from fiscalm.efactura.inbox import Invoice, tax_token
 from fiscalm.ledger import Ledger, finance_home, now
 from fiscalm.mail import invoices as reader
@@ -95,6 +95,7 @@ def _certain(x: ai_extract.Extraction, company: str, doc: reader.Doc, rules: dic
             set(doc.firms) <= {company},  # another firm named on it: never decided by the AI
             agree,
             rules["number"] or not seen,
+            rules["issue_date"] or len(docs._dates(doc.text)) <= 1,  # dates the rules couldn't pick between
             money,
             rules["party_tax_id"] or ai["party_tax_id"],  # a partner id printed whole, as an import requires
             company not in reader.disputed(doc.text, [company]),  # never its delivery address
