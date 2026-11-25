@@ -2,6 +2,7 @@
 
 import io
 import json
+import sqlite3
 import zipfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -364,9 +365,14 @@ def test_a_number_without_series_never_chooses_between_a_clients_invoices(ledger
 def test_the_choice_and_the_write_hold_one_write_lock(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"7001": ubl()})
     seen, build = [], issued._Pool.__init__
-    monkeypatch.setattr(
-        issued._Pool, "__init__", lambda self, L, *a: seen.append(L.db.in_transaction) or build(self, L, *a)
-    )
+
+    def locked(self, L, *a):  # another connection can't take the write lock while the choice is made
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            sqlite3.connect(L.path, timeout=0).execute("BEGIN IMMEDIATE")
+        seen.append(True)
+        build(self, L, *a)
+
+    monkeypatch.setattr(issued._Pool, "__init__", locked)
     assert issued.match_statement(ledger, _st(_credit("1190.00", date(2026, 10, 20)))) == ["7001"] and seen == [True]
 
 
@@ -422,6 +428,8 @@ def test_wrong_client_amount_debit_or_own_transfer_never_collects(ledger, home, 
     for t in (other, card_refund, pos, card, amount, early, debit, own):
         assert issued.match_statement(ledger, _st(t)) == []
     assert ledger.issued("7001")["status"] == "open"
+    series = _credit("1190.00", date(2026, 10, 21), desc="plata CARD 0042")  # the client's own words: no refund
+    assert issued.match_statement(ledger, _st(series)) == ["7001"]
 
 
 def test_credit_that_settled_one_invoice_never_settles_another(ledger, home, sec, monkeypatch):

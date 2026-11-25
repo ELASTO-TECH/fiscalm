@@ -457,11 +457,12 @@ _REFUND_WORDS = {"POS", "CARD", "REFUND"}
 
 
 def _not_a_payment(t: statements.Tx) -> bool:
-    """A card refund (a card number, or POS, card or refund in the bank's text or booking title when the format drops
-    the card) or the bank's own
+    """A card refund (a card number, POS in the bank's text, or POS, card or refund in its booking title when the format
+    drops the card; never the payer's own words, which may name a 'CARD 0042' invoice) or the bank's own
     money: never a client's payment."""
     statements.classify_tx(t)
-    card = t.card_last4 or _REFUND_WORDS & set(re.split(r"[^A-Z]+", f"{t.title} {t.description}".upper()))
+    title, text = (set(re.split(r"[^A-Z]+", v.upper())) for v in (t.title, t.description))
+    card = t.card_last4 or "POS" in text or _REFUND_WORDS & title
     return bool(card) or t.category in (statements.BANK_FEE, statements.INTEREST)
 
 
