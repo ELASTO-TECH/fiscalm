@@ -729,7 +729,7 @@ def cmd_statement(a, L) -> int:
         is_pdf = stream.read(5) == b"%PDF-"
     if "allmerge" in path.name and is_pdf:
         with tempfile.TemporaryDirectory() as td:
-            co, _, out = statements.decrypt_to(path, Path(td))
+            co, _, out = statements.decrypt_to(path, Path(td), plain=True)
             st = statements.parse(out, co)
     else:
         st = statements.parse(path, co or "")

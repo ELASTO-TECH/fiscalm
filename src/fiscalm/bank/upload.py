@@ -297,6 +297,7 @@ def _pdfs(L: Ledger, company: str, bank: str, staging: Path, paths: list[Path]) 
             source="statement-import",
             tmp_dir=staging,
             one_set=True,
+            plain=True,
         )
     except (ValueError, ArithmeticError, IndexError, KeyError, pikepdf.PdfError):  # a damaged or hostile PDF
         raise Refused(422, NOT_READ) from None

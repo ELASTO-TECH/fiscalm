@@ -31,16 +31,16 @@ def text_pdf(lines: list[str], *, font: str = "Helvetica") -> bytes:
     return bytes(out)
 
 
-def bt_statement(path, cui: str, period: tuple[str, str], accounts, password: str = "synthetic"):
+def bt_statement(path, cui: str, period: tuple[str, str], accounts, password: str | None = "synthetic"):
     """A synthetic encrypted BT statement PDF laid out as pdftotext reads BT's: the holder's CUI, the period
     (dd/mm/yyyy, dd/mm/yyyy) and one section per account, (currency, iban, opening, lines), each line
-    (dd/mm/yyyy, reference, Decimal amount: below zero a debit)."""
+    (dd/mm/yyyy, reference, Decimal amount: below zero a debit). `password=None`: a plain PDF, as BT24 downloads."""
 
     def at(text: str, amount, end: int) -> str:  # an amount right-aligned under its column (Debit ends at 68)
         shown = f"{abs(amount):,.2f}"
         return text.ljust(end - len(shown)) + shown
 
-    lines = [f"CUI:{cui}", f"din {period[0]} - {period[1]}"]
+    lines = ["BANCA TRANSILVANIA S.A.", f"CUI:{cui}", f"EXTRAS CONT Numarul: 6 din {period[0]} - {period[1]}"]
     for currency, iban, opening, moves in accounts:
         debit = sum((-a for *_, a in moves if a < 0), opening * 0)
         credit = sum((a for *_, a in moves if a > 0), opening * 0)
@@ -61,5 +61,6 @@ def bt_statement(path, cui: str, period: tuple[str, str], accounts, password: st
         top = 36 + 12 * len(lines)
         text = f"BT /F1 10 Tf 12 TL 40 {top} Td " + " ".join("(" + ln + ") Tj T*" for ln in lines) + " ET"
         page.Contents = pdf.make_stream(text.encode())
-        pdf.save(path, encryption=pikepdf.Encryption(owner="synthetic-owner", user=password, R=6))
+        crypt = pikepdf.Encryption(owner="synthetic-owner", user=password, R=6) if password else False
+        pdf.save(path, encryption=crypt)
     return path
