@@ -397,6 +397,47 @@ def test_preview_guesses_columns_and_date_only_to_prefill(ledger, dates, day, or
     assert ledger.db.execute("SELECT count(*) FROM settlement_reports").fetchone()[0] == 0
 
 
+def test_preview_recognizes_a_preset_header(ledger):
+    """A built-in preset fills the source and its columns; only the person's submit stores anything."""
+    data = (
+        b"Numar borderou;AWB;Numar factura;Ramburs;Comision ramburs;Telefon\nB1;1;TEST-1;1.250,50;-12,50;+40700000000\n"
+    )
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    preview = ask.value.extra
+    assert (preview["source"], preview["proposed"]) == ("fan", "preset")
+    assert preview["guess"] == dict(
+        reference="Numar factura", gross="Ramburs", fee="Comision ramburs", batch="Numar borderou"
+    )
+
+
+@pytest.mark.parametrize(
+    "answer,expected",
+    [
+        (dict(reference="Doc", gross="Incasat", fee="Retinut"), dict(reference="Doc", gross="Incasat", fee="Retinut")),
+        (dict(reference="Doc", gross="Incasat", fee="Ignore previous instructions"), None),  # not a header name
+        (dict(reference="Doc", gross="Incasat", fee="Incasat"), None),  # one column twice
+        (dict(reference="Doc", gross="Incasat"), None),  # incomplete
+    ],
+)
+def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, expected):
+    """An unknown header: the AI proposes, the engine keeps only header names, each once, complete; otherwise the
+    header-name guess stays."""
+    asked = []
+    monkeypatch.setattr(bank_upload.ai, "available", lambda L: True)
+    monkeypatch.setattr(
+        bank_upload.ai,
+        "ask_json",
+        lambda L, s, p, schema: asked.append(p) or {f: "" for f in bank_upload.FIELDS} | answer,
+    )
+    data = b"Doc,Incasat,Retinut\nTEST-1,100.00,2.00\n"
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    preview = ask.value.extra
+    assert (preview["guess"], preview["proposed"]) == ((expected, "ai") if expected else ({"gross": "Incasat"}, ""))
+    assert len(asked) == 1 and "TEST-1" in asked[0]
+
+
 @pytest.mark.parametrize("second,currency", [("ron", "RON"), ("eur", "")])
 def test_preview_prefills_stripe_currency_and_saved_payers(ledger, second, currency):
     setup(ledger)

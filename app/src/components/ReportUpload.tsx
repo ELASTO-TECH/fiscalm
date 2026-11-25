@@ -12,6 +12,8 @@ type SavedPayer = { source: string; name: string; cui: string; currency: string;
  * `currency`), which only pre-fill the form. */
 export type ReportPreview = { columns: string[]; rows: string[][]; known: { id: string; name: string; source: string; company_cui_column: string }[];
   guess: Record<string, string>; date: string; orders: boolean; payer: string; source: string; currency: string;
+  /** Who filled `guess`: a built-in courier/processor preset, the install's AI, or header names alone (""). */
+  proposed: "" | "preset" | "ai";
   currencies: string[]; payers: SavedPayer[] };
 const SOURCES = [["fan", "FAN Courier"], ["sameday", "Sameday"], ["cargus", "Cargus"], ["dpd", "DPD"], ["gls", "GLS"],
   ["stripe", "Stripe"], ["netopia", "Netopia"], ["payu", "PayU"], ["courier", "Alt curier"], ["processor", "Alt procesator"]];
@@ -136,6 +138,7 @@ export function ReportUpload({ co, reload }: { co: string; reload: () => void })
           </div>
           <fieldset className="m-0 mt-5 min-w-0 border-0 p-0">
             <legend className={legendStyle}>Coloanele raportului</legend>
+            {preview.proposed ? <p className="mt-0 text-sm text-muted">{preview.proposed === "ai" ? "Coloanele sunt propuse de AI." : "Coloanele sunt recunoscute după antet."} Verifică-le înainte de încărcare.</p> : null}
             <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2">{shown.map(column)}</div>
             {more.length ? <details className="mt-3">
               <Summary>Alte detalii</Summary>

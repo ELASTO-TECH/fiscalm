@@ -64,6 +64,12 @@ A refund's fee keeps its direction only through a mapped net (a fee returned or 
 Every source needs an explicit column mapping, submitted by a person. The upload preview pre-fills it from header names
 (`guess`, compared without case or diacritics; AWB and order only for a firm with shop orders), the payment day from
 a date column that names one day on every line (`date`), and the saved payer whose header is identical (`payer`).
+Built-in presets for FAN Courier, Sameday, Cargus, DPD, GLS, Netopia, PayU and eMAG (as `processor`) pre-fill the
+source and columns when a header has every column of exactly one preset (`proposed: "preset"`); their header names are
+invented samples until a live export is checked. For a header nothing reads whole, with an AI integration configured,
+the preview asks it for a mapping from the header and the first five rows (`proposed: "ai"`). The engine keeps the
+answer only if it names header columns, each once, with gross, fee and an identifier; the payer and the date are never
+taken from the file or the AI. A person still submits the form.
 Example: `{"reference":"Factura","gross":"Ramburs","fee":"Comision"}`.
 Optional mappings: `awb`, `order`, `net`, `currency`, `batch`, `date`, `category` (`charge`, anything else is an
 adjustment line).
