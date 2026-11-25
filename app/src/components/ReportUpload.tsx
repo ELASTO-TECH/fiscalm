@@ -69,7 +69,8 @@ export function ReportUpload({ co, reload }: { co: string; reload: () => void })
     if (r && "report" in r && r.report) {
       const p = r.report as ReportPreview;
       setPreview(p); setDay(p.date); setPartner(p.payer); setMapping(p.guess); setCurrency(p.currency || "RON");
-      pick(p, p.source, p.currency || "RON");
+      // A proposed source (preset, AI) is only a suggestion: the person still picks who sent the file.
+      if (p.proposed) setSource(p.source); else pick(p, p.source, p.currency || "RON");
     }
     if (r?.ok) { setFile(null); setPreview(null); reload(); }
   };

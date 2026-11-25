@@ -437,6 +437,9 @@ it.each([["preset", "Coloanele sunt recunoscute după antet."], ["ai", "Coloanel
     await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["x"], "report.csv", { type: "text/csv" }));
     expect(await screen.findByText(`${text} Verifică-le înainte de încărcare.`)).toBeVisible();
     expect(screen.getByLabelText("Curier sau procesator")).toHaveValue("fan");
+    // PREVIEW has one saved FAN payer: a proposed source never fills it in; the person names who sent the file.
+    expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue("");
+    expect(screen.getByLabelText("CUI-ul partenerului (opțional)")).toHaveValue("");
   });
 
 it("clears a saved payer's CUI when another courier is chosen, keeping the name the person typed", async () => {

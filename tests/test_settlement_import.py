@@ -409,6 +409,14 @@ def test_preview_recognizes_a_preset_header(ledger):
     assert preview["guess"] == dict(
         reference="Numar factura", gross="Ramburs", fee="Comision ramburs", batch="Numar borderou"
     )
+    with_currency = data.replace(b";Telefon\n", b";Moneda\n").replace(b";+40700000000\n", b";EUR\n")
+    with pytest.raises(bank_upload.Refused) as ask:  # a column the preset doesn't use keeps its header guess
+        bank_upload.accept_report(ledger, "NORD", with_currency, "text/csv", **UPLOAD)
+    assert ask.value.extra["guess"]["currency"] == "Moneda" and ask.value.extra["currency"] == "EUR"
+    twice = data.replace(b";Telefon\n", b";Num\xc4\x83r factur\xc4\x83\n")  # read alike as "Numar factura"
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", twice, "text/csv", **UPLOAD)
+    assert (ask.value.extra["proposed"], ask.value.extra["source"]) == ("", "")
 
 
 @pytest.mark.parametrize(
@@ -418,6 +426,10 @@ def test_preview_recognizes_a_preset_header(ledger):
         (dict(reference="Doc", gross="Incasat", fee="Ignore previous instructions"), None),  # not a header name
         (dict(reference="Doc", gross="Incasat", fee="Incasat"), None),  # one column twice
         (dict(reference="Doc", gross="Incasat"), None),  # incomplete
+        (  # a payout day is a person's: dropped from the proposal
+            dict(reference="Doc", gross="Incasat", fee="Retinut", date="Doc"),
+            dict(reference="Doc", gross="Incasat", fee="Retinut"),
+        ),
     ],
 )
 def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, expected):
@@ -435,7 +447,7 @@ def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, e
         bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
     preview = ask.value.extra
     assert (preview["guess"], preview["proposed"]) == ((expected, "ai") if expected else ({"gross": "Incasat"}, ""))
-    assert len(asked) == 1 and "TEST-1" in asked[0]
+    assert len(asked) == 1 and "TEST-1" not in asked[0] and "xxxx-9" in asked[0]  # cells leave only as shapes
 
 
 @pytest.mark.parametrize("second,currency", [("ron", "RON"), ("eur", "")])
