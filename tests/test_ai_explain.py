@@ -140,7 +140,6 @@ def test_a_sure_label_waits_when_an_amount_fits_by_the_write_or_answers_disagree
         "b" * 64, "NORD", day[:7], "receipt", "bon.jpg", vendor="ALT NUME", doc_date=day, amount="12.00", currency="EUR"
     )
     name = efactura.line_keys(_tx(13, "debit", "27.00", counterparty="ABONAMENT EXEMPLU"), frozenset())["name"]
-    iban = "RO49AAAA1B31007593840000"
 
     def answers(prompt):
         with closing(Ledger(ledger.path)) as other:  # another connection records an invoice and a rule meanwhile
@@ -149,7 +148,7 @@ def test_a_sure_label_waits_when_an_amount_fits_by_the_write_or_answers_disagree
                 "NORD", "name", name, {"kind": "advance", "partner": None, "reason": None, "note": "A"}, None
             )
         return [
-            _answer(late, "label", label="other", note=f"Plata catre {iban}"),
+            _answer(late, "label", label="other", note="Plata catre RO49\nAAAA\t1B31 0075 9384 0000"),
             _answer(abroad, "label", label="personal"),
             _answer(twice, "documents", partner="", sure=False),
             _answer(twice, "label", label="personal"),
@@ -191,3 +190,15 @@ def test_an_ai_label_leaves_a_transfer_leg_even_when_the_other_leg_arrives_meanw
 
     assert _run(ledger, answers)[0]["applied"] == 0
     assert links.apply_rules(ledger, "NORD", list(_rows(ledger).values())) == [out]
+
+
+def test_an_ai_label_leaves_a_line_that_may_be_one_of_two_transfers(ledger, live):
+    eur = "RO71BTRLEURCRT0000000001"
+    out, *_ = _record(
+        ledger,
+        "NORD",
+        _tx(18, "debit", "320.00"),
+        _tx(19, "credit", "320.00", iban=eur),
+        _tx(20, "credit", "320.00", iban=eur, day=TODAY - timedelta(days=2)),
+    )
+    assert _run(ledger, [_answer(out, "label", label="personal")])[0]["applied"] == 0

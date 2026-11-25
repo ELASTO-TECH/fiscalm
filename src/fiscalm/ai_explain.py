@@ -66,7 +66,12 @@ def explain(L: Ledger, company: str, full: dict, ask: Callable | None = None) ->
         return {"sent": 0, "asked": 0, "applied": 0}
     asked = L.ai_proposals(company)
     rows = full["transactions"]["rows"]
-    lines = [r for r in rows if r["can_link"] and not (r["explanation"] or r["proposal"] or r["awaiting"])]
+    lines = [
+        r
+        for r in rows
+        if r["can_link"]
+        and not (r["explanation"] or r["proposal"] or r["awaiting"] or (r["card"] and not r["card_owner"]))
+    ]
     lines = [r for r in lines if r["id"] not in asked][:BATCH]
     if not lines:
         return {"sent": 0, "asked": 0, "applied": 0}
@@ -98,7 +103,11 @@ def _prompt(full: dict, rows: list[dict], lines: list[dict]) -> str:
         return {k: r.get(k) for k in ("id", "number", "partner", "left", "currency", "issue_date")} | {"kind": kind}
 
     newest = sorted(
-        [invoice(r, "issued") for r in full["issued"] if r["status"] in ("open", "marked")]
+        [
+            invoice(r, "issued")
+            for r in full["issued"]
+            if r["status"] in ("open", "marked") and not r.get("rejected") and r.get("local_id") != r["id"]
+        ]
         + [invoice(r, "received") for r in full["invoices"] if r["status"] in ("open", "marked")],
         key=lambda r: r["issue_date"] or "",
         reverse=True,
@@ -128,7 +137,7 @@ def _checked(full: dict, tx: dict, a: dict) -> dict:
     a note); an advance: who, briefly; documents: the partner's open invoices of this direction, all of them only when
     what is left of them is the line's amount to the cent (transaction_choices.exactly), else the partner alone."""
     none = {"kind": "none", "sure": False}
-    note = " ".join(statements.masked(a["note"]).split())  # never an account or a card in full
+    note = statements.masked(" ".join(a["note"].split()))  # never an account or a card in full
     if a["kind"] == "label":
         ok = a["label"] in links.LABELS and len(note) <= links.NOTE_MAX and (note or a["label"] != "other")
         return {"kind": "label", "reason": a["label"], "note": note or None, "sure": a["sure"]} if ok else none

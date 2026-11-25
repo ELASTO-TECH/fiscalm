@@ -309,15 +309,21 @@ def _advance(L: Ledger, company: str, key: str, who: str) -> Callable[[], dict]:
 
 
 def other_end(L: Ledger, company: str, key: str, t: statements.Tx, *, but: str = "") -> str | None:
-    """The other end of a transfer between the firm's accounts, when exactly one is on record and free: the opposite
+    """The one other end of a transfer (ends), or None when there is none or several."""
+    found = ends(L, company, key, t, but=but)
+    return found[0] if found and len(found) == 1 else None
+
+
+def ends(L: Ledger, company: str, key: str, t: statements.Tx, *, but: str = "") -> list[str] | None:
+    """The possible other ends of a transfer between the firm's accounts, on record and free: the opposite
     direction, the same amount and currency, on another of its accounts (the one the transfer names, when it names one
     of the firm's), naming this account or none, not a credit a Decontare waits on, at most BOUNDARY_DAYS apart. A
-    transfer to an account that isn't the firm's has none. `but`: a transaction whose reservation doesn't count (the
+    transfer to an account that isn't the firm's has none; None when a same-amount line can't be read. `but`: a transaction whose reservation doesn't count (the
     one being explained, asking from the other end). Read under the write lock (Ledger.link_tx runs the build)."""
     own = companies.get(company, L=L).own_ibans
     to = companies.normalize_iban(t.counterparty_iban)
     if to and to not in own:
-        return None
+        return []
     lo, hi = (t.date - timedelta(days=BOUNDARY_DAYS)).isoformat(), (t.date + timedelta(days=BOUNDARY_DAYS)).isoformat()
     rows = L.db.execute(
         "SELECT tx_key, tx FROM statement_txs WHERE company=? AND direction=? AND amount=? AND tx_key!=? AND day BETWEEN ? "
@@ -349,8 +355,7 @@ def other_end(L: Ledger, company: str, key: str, t: statements.Tx, *, but: str =
             and not (other["direction"] == "credit" and _awaits_settlement(L, company, r["tx_key"]))
         )
 
-    found = [r["tx_key"] for r in rows if fits(r)]
-    return found[0] if len(found) == 1 else None
+    return [r["tx_key"] for r in rows if fits(r)]
 
 
 def _transfer(L: Ledger, company: str, key: str) -> Callable[[], dict]:
@@ -567,7 +572,7 @@ def apply_ai_label(L: Ledger, company: str, key: str, label: str, note: str) -> 
         if (
             fits_open_amount(L, company, t)
             or companies.normalize_iban(t.counterparty_iban) in own  # money between the firm's accounts
-            or other_end(L, company, key, t)
+            or ends(L, company, key, t) != []  # any possible other end, or one fiscalm can't read
             or any(recon.match_receipts([s], receipts) for s in sizes)
             or proposals(company, [t], L.memories(company), L)[0]
         ):
@@ -677,12 +682,12 @@ def fits_open_amount(L: Ledger, company: str, t: statements.Tx) -> bool:
     queries = (
         [  # an invoice whose total could not be read fits no amount
             "SELECT 'issued ' || message_id, currency FROM issued WHERE company=? AND status IN ('open','marked') "
-            "AND total IS NOT NULL"
+            "AND total IS NOT NULL AND parse_error IS NULL"
         ]
         if t.direction == "credit"
         else [
             "SELECT 'efactura ' || message_id, currency FROM efactura WHERE company=? AND total IS NOT NULL "
-            "AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)",
+            "AND parse_error IS NULL AND (status='open' OR status='paid' AND paid_tx IS NULL)",  # linked: its payment row
             "SELECT 'payment ' || item_id, 'RON' FROM payments WHERE company=? AND status IN ('pending','exported')",
         ]
     )
