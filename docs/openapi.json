@@ -12851,6 +12851,9 @@
                       "type": "null"
                     }
                   ]
+                },
+                "amount_changed": {
+                  "type": "boolean"
                 }
               },
               "required": [
@@ -12881,7 +12884,8 @@
                 "can_withdraw",
                 "can_reopen",
                 "proved",
-                "payment_file"
+                "payment_file",
+                "amount_changed"
               ]
             }
           },
@@ -17115,6 +17119,9 @@
                                   "type": "null"
                                 }
                               ]
+                            },
+                            "amount_changed": {
+                              "type": "boolean"
                             }
                           },
                           "required": [
@@ -17145,7 +17152,8 @@
                             "can_withdraw",
                             "can_reopen",
                             "proved",
-                            "payment_file"
+                            "payment_file",
+                            "amount_changed"
                           ]
                         },
                         {
@@ -17577,6 +17585,9 @@
                                           "type": "null"
                                         }
                                       ]
+                                    },
+                                    "amount_changed": {
+                                      "type": "boolean"
                                     }
                                   },
                                   "required": [
@@ -17607,7 +17618,8 @@
                                     "can_withdraw",
                                     "can_reopen",
                                     "proved",
-                                    "payment_file"
+                                    "payment_file",
+                                    "amount_changed"
                                   ]
                                 },
                                 {

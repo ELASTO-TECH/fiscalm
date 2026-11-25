@@ -490,6 +490,10 @@ def _invoices(
                 "payment_state": ps,
                 "item_id": r["item_id"],
                 "payment_file": membership.get(r["item_id"]),
+                # its payment row is not the invoice's total minus its linked credits now: check it in the bank
+                "amount_changed": status == "linked"
+                and (p := payments.get(r["item_id"])) is not None
+                and Decimal(p["amount"]) != gross - credit_total,
                 "covered": money(part),
                 "left": money(max(Decimal(0), net - part) if status in ("open", "marked", "linked") else 0),
                 "paid_at": iso_dt(r["paid_at"]) if status in ("marked", "paid", "skipped") else None,

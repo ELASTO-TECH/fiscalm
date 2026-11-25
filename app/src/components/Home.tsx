@@ -213,7 +213,7 @@ export function taskCards(s: State, { tag = false }: TaskOpts = {}): Card[] {
     );
   }
   for (const r of s.invoices.filter((r) => r.credit_question?.length)) add(creditQuestionCard(s, r, own));
-  for (const r of s.invoices.filter((r) => r.credits?.length && r.status === "linked" && r.payment_state !== "imported")) {
+  for (const r of s.invoices.filter((r) => r.amount_changed && r.payment_state !== "imported")) {
     add(<Task co={own} key={`${co}credit${r.id}`} icon="warning-circle" title="Plată în fișier, cu factură de stornare" late
       body="Verifică plata în bancă. Fișierul nu se mai descarcă până lămurești situația.">
       <L to={{ inv: r.id }} className="btn g">Vezi factura</L>

@@ -487,13 +487,12 @@ def auto_mark_paid(ledger: Ledger, st: statements.Statement) -> list[str]:
     rivals = efactura.rivals(ledger, st.company)
     advance = efactura.remembered_advance(ledger, st.company)  # the owner's money: never a payment row's
 
-    stale = pay.stale_payments(ledger, st.company)
-
     def settle(p, t):
-        if p["item_id"] in stale:  # its amount is no longer the invoice's net: a person checks it
-            return
-        if ledger.mark_paid(p["item_id"], f"statement {t.date} REF {t.ref}", statements.tx_key(t)):
-            done.append(p["item_id"])
+        with ledger.tx():  # the net is re-read in the settling transaction: a credit changing it meanwhile wins
+            if p["kind"] == "efactura" and p["item_id"] in pay.stale_payments(ledger, st.company):
+                return  # its amount is no longer the invoice's net: a person checks it
+            if ledger.mark_paid(p["item_id"], f"statement {t.date} REF {t.ref}", statements.tx_key(t)):
+                done.append(p["item_id"])
         used.add(statements.tx_key(t))
 
     # Unambiguous debits first (one naming its invoice): once they paid theirs, a plain twin may fit a single one.

@@ -1009,7 +1009,6 @@ def test_autopay_supplier_invoices_go_into_bt_go_by_themselves(ledger, home, sec
 
 def test_only_automatic_payments_wait_for_last_months_statement(ledger, home, sec, live, monkeypatch):
     """A person who adds an invoice knows whether they paid it; the autopay rule waits for last month's statement."""
-    from fiscalm.api import tasks
 
     ledger.db.execute(
         "INSERT INTO bank_connections(id,company,bank,provider,accounts,valid_until,created_at) "
@@ -1542,6 +1541,10 @@ def test_a_partly_credited_invoice_is_downloaded_for_its_net_and_a_credit_since_
     ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
     item = ledger.efactura("3001")["item_id"]
     assert ledger.payment(item)["amount"] == "180.00"
+    shown = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]
+    assert not shown["amount_changed"] and not tasks.credit_holds(
+        api.state(ledger, "NORD")
+    )  # a right net warns nothing
     pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
     assert (
         ledger.payment(item)["status"] == "exported"
@@ -1556,6 +1559,7 @@ def test_a_net_payment_whose_credit_no_longer_links_is_withdrawn_before_download
     item = ledger.efactura("3001")["item_id"]
     _stored(ledger, monkeypatch, **{"3003": ubl(number="TEST 1", issue="2026-10-19")})  # the credit fits two now
     assert efactura.credited(ledger, "NORD") == {}
+    assert {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]["amount_changed"]
     with pytest.raises(PaymentFileError):
         pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
     assert ledger.payment(item)["status"] == "pending"  # nothing exported: the 200.00 never reaches a bank file
