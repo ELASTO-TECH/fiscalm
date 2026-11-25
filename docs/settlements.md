@@ -46,7 +46,8 @@ Limits: 4 MiB compressed/input, 32 MiB expanded, 10,000 lines, 128 columns.
 Amounts are read exactly as Romanian and English exports write them: `1.234,56`, `123,45`, `1,234.56`, `1 250,50`,
 with an optional currency word (`RON`, `lei`, `EUR`, `€`, `USD`) that must agree with the line's currency column.
 A lone group without decimals (`1.234`), more than two decimals and exponents refuse rather than guess or round.
-A fee written as a deduction (`-12,50`) is the same fee; an empty fee or a `-` placeholder is zero. Gross must be positive.
+A fee written as a deduction (`-12,50`) is the same fee; an empty fee or a `-` placeholder is zero. A charge's gross is positive;
+a negative gross or a non-`charge` category is an adjustment line (kept, flagged, settling nothing on its own).
 Cells starting with `=`, `+`, `-` or `@` are data (phone numbers, signed fees); only XLSX formula nodes refuse, and
 exports that a spreadsheet opens escape such cells (`rezumat.csv`). Blank CSV lines refuse. XLSX row
 positions/visibility do not select evidence: all stored rows are included. Worksheets with the same header row are
@@ -65,8 +66,8 @@ a date column that names one day on every line (`date`), and the saved payer who
 Example: `{"reference":"Factura","gross":"Ramburs","fee":"Comision"}`.
 Optional mappings: `awb`, `order`, `net`, `currency`, `batch`, `date`, `category` (`charge`, anything else is an
 adjustment line).
-For Stripe, export one automatic payout's itemized reconciliation report with `invoice_number`, charges only; a
-missing invoice reference refuses, and manual payouts cannot establish membership. Native PayU reports (operation
+For Stripe, export one automatic payout's itemized reconciliation report with `invoice_number`; refunds and fees
+in it become adjustment lines that keep the payout for a person, and a charge without an invoice reference refuses, and manual payouts cannot establish membership. Native PayU reports (operation
 codes, signed commission columns) are not parsed; map a transaction-only export instead. The tests use synthetic
 reports only; no courier's or processor's live export has been checked.
 Shopify Payments payouts come through the Shopify connector; see [self-hosting](self-hosting.md#shopify-payments-payouts).

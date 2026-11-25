@@ -121,6 +121,20 @@ def test_xlsx_sheets_with_one_header_read_as_one_table():
     assert [r[0] for r in table(both, "xlsx")] == ["Ref", "T1", "T2"]
     with pytest.raises(ReportError):  # Refunds declared, its relationship gone
         table(declared((1, "worksheets/sheet1.xml")), "xlsx")
+    for old, new in ((b"sheetData", b"data"), (b"xl/workbook.xml", b"xl/workbook.xmz")):
+        broken = io.BytesIO()  # Refunds unreadable (no sheetData); the workbook manifest missing
+        with zipfile.ZipFile(io.BytesIO(both)) as src, zipfile.ZipFile(broken, "w") as z:
+            for info in src.infolist():
+                body = src.read(info)
+                name = (
+                    info.filename.replace("xl/workbook.xml", new.decode())
+                    if old == b"xl/workbook.xml"
+                    else info.filename
+                )
+                z.writestr(name, body.replace(old, new) if name.endswith("sheet2.xml") else body)
+            z.writestr("_rels/.rels", rels.format('<Relationship Type="x/officeDocument" Target="xl/workbook.xml"/>'))
+        with pytest.raises(ReportError):
+            table(broken.getvalue(), "xlsx")
 
 
 @pytest.mark.parametrize("data", [b"a,a\n1,2", b"a,b\n1", b"a,b\n1,2,3"])

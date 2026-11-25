@@ -143,10 +143,11 @@ def _worksheets(z: zipfile.ZipFile) -> list[str]:
     relationship or kept in xl/worksheets/ is read too."""
     names = set(z.namelist())
     if "_rels/.rels" in names and any(
-        r.get("Type", "").endswith("/officeDocument") and r.get("Target", "").lstrip("/") != "xl/workbook.xml"
+        r.get("Type", "").endswith("/officeDocument")
+        and (r.get("Target", "").lstrip("/") != "xl/workbook.xml" or "xl/workbook.xml" not in names)
         for r in _xml(z.read("_rels/.rels")).iter(_RELS)
     ):
-        raise ReportError("Unreadable worksheet")
+        raise ReportError("Unreadable worksheet")  # the workbook that lists the sheets is not there
     rels = {}
     if "xl/_rels/workbook.xml.rels" in names:
         for r in _xml(z.read("xl/_rels/workbook.xml.rels")).iter(_RELS):
@@ -178,8 +179,10 @@ def _one_table(sheets: list[list[list[str]]]) -> list[list[str]]:
 
 
 def _sheet(xml: bytes, strings: list[str]) -> list[list[str]]:
-    rows = []
-    for row in _xml(xml).findall("s:sheetData/s:row", NS):
+    rows, root = [], _xml(xml)
+    if root.tag != f"{{{NS['s']}}}worksheet" or root.find("s:sheetData", NS) is None:
+        raise ReportError("Unreadable worksheet")  # never read as an empty sheet
+    for row in root.findall("s:sheetData/s:row", NS):
         values: list[str] = []
         for c in row.findall("s:c", NS):
             if c.find("s:f", NS) is not None or c.get("t") in ("e", "b"):
