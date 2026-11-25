@@ -176,12 +176,17 @@ def test_an_invoice_without_a_readable_total_fits_no_amount(ledger, live):
     assert _run(ledger, [_answer(key, "label", label="bank_fee")])[0]["applied"] == 1
 
 
-def test_an_ai_label_leaves_a_transfer_leg_even_when_the_other_leg_arrives_meanwhile(ledger, live):
-    (out,) = _record(ledger, "NORD", _tx(16, "debit", "650.00", counterparty_iban="RO71BTRLEURCRT0000000001"))
+@pytest.mark.parametrize("named_by", ["debit", "credit"])
+def test_an_ai_label_leaves_a_transfer_leg_even_when_the_other_leg_arrives_meanwhile(ledger, live, named_by):
+    eur, ron = "RO71BTRLEURCRT0000000001", "RO24BTRLRONCRT0000000001"
+    (out,) = _record(
+        ledger, "NORD", _tx(16, "debit", "650.00", **({"counterparty_iban": eur} if named_by == "debit" else {}))
+    )
 
     def answers(prompt):
         with closing(Ledger(ledger.path)) as other:
-            _record(other, "NORD", _tx(17, "credit", "650.00", iban="RO71BTRLEURCRT0000000001"))
+            named = {"counterparty_iban": ron} if named_by == "credit" else {}
+            _record(other, "NORD", _tx(17, "credit", "650.00", iban=eur, **named))
         return [_answer(out, "label", label="personal")]
 
     assert _run(ledger, answers)[0]["applied"] == 0
