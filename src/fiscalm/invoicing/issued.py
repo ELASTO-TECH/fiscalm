@@ -336,8 +336,6 @@ def credit_from_client(
     """Recognise a client credit by an exclusive known IBAN, CUI or firm name, in any currency."""
     if tx.direction != "credit" or tx.counterparty_iban in companies.get(company, L=L).own_ibans:
         return ""
-    if not firm_id(tax_token(cui)):
-        return "name" if same_firm(name, tx.counterparty) else ""
     known = (
         accounts.get(tx.counterparty_iban, set())
         if accounts is not None
@@ -350,6 +348,8 @@ def credit_from_client(
             if tx.counterparty_iban
         }
     )
+    if not firm_id(tax_token(cui)):  # a private buyer: by name, never from an account known for a client
+        return "name" if not known and same_firm(name, tx.counterparty) else ""
     if known:
         return "iban" if cui and known == {cui} else ""
     if _cui_on(cui, f"{tx.counterparty} {tx.description}"):
@@ -377,9 +377,10 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         credit, or its exact name, legal forms aside, private buyers too) settles the one invoice it fits;
       - a credit that shows no client fits by its amount alone (maintainer decision, 2026-11-25): it settles the
         only candidate of its exact amount, and only when no other credit of the statement fits that one too.
-        Never by amount: a credit from an account known for another client, a card refund, fees or interest;
+        Never by amount: a credit from an account known for another client or shown with a client on this
+        statement, a card refund, fees or interest;
       - a credit that names a known invoice (its full identifier, or 3+ digits of it) settles only that one,
-        and nothing when that invoice is already closed;
+        and nothing when that invoice is already closed; without its client, only one whole identifier counts;
       - a credit that fits several invoices settles none; one credit settles one invoice, ever.
     Invoices the user marked collected are candidates too: a credit confirms their mark. History invoices (from
     before the firm's start, fiscalm.history) and invoices partly covered by the user's links are rivals that never
@@ -403,19 +404,24 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
     ]
     first = {statements.tx_key(t): pool.candidates(t, ()) for t in credits}
     claims = Counter(r["message_id"] for c in first.values() for r, _ in c)
+    # accounts that show a client on a credit of this statement are nobody's anonymous payment
+    shown = {
+        t.counterparty_iban
+        for t in credits
+        if t.counterparty_iban and any(h in CLIENT_PROOF for _, h in first[statements.tx_key(t)])
+    }
     done: list[str] = []
-    # Unambiguous credits first, those showing their client before those fitting by amount: once they collected
-    # theirs, a plain twin may fit a single one.
-    for t in sorted(
-        credits, key=lambda t: (len(c := first[statements.tx_key(t)]) != 1, not c or c[0][1] not in CLIENT_PROOF)
-    ):
-        cands = pool.candidates(t, done)
+    # Unambiguous credits first, those showing their client, then those naming their invoice, then the rest: once
+    # they collected theirs, a plain twin may fit a single one. A credit keeps the evidence it had at the start.
+    for t in sorted(credits, key=lambda t: (len(c := first[statements.tx_key(t)]) != 1, _rank(c))):
+        was = {r["message_id"]: how for r, how in first[statements.tx_key(t)]}
+        cands = [(r, how) for r, how in pool.candidates(t, done) if was.get(r["message_id"]) == how]
         if len(cands) != 1 or not pool.settles(cands[0][0]["message_id"]):
             continue
         (r, how) = cands[0]
-        if how not in CLIENT_PROOF and claims[r["message_id"]] > 1:
-            continue  # another credit of the statement fits it too: an amount alone proves neither
-        learned = how in CLIENT_PROOF and firm_id(tax_token(r["client_cui"]))
+        if how == "amount" and (len(was) > 1 or claims[r["message_id"]] > 1 or t.counterparty_iban in shown):
+            continue  # it fit others at first, another credit fits it too, or its account showed a client
+        learned = how in CLIENT_PROOF and firm_id(tax_token(r["client_cui"])) and t.counterparty_iban
         if L.mark_issued_collected(
             r["message_id"],
             f"statement {t.date} {how} REF {t.ref}",
@@ -424,7 +430,13 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
             companies.normalize_iban(t.iban),
         ):
             done.append(r["message_id"])
+            if learned:  # the next credit of the statement from this account sees it known
+                pool.accounts.setdefault(t.counterparty_iban, set()).add(r["client_cui"] or "")
     return batch_done + done
+
+
+def _rank(cands: list) -> int:
+    return 0 if cands and cands[0][1] in CLIENT_PROOF else 1 if cands and cands[0][1] == "ref" else 2
 
 
 class _Pool:
@@ -478,26 +490,31 @@ class _Pool:
             return ""  # another client's known account, a card refund, the bank's own money
         return "amount"
 
-    def named(self, t: statements.Tx) -> set[str]:
-        """Invoices the credit names; any status, so a credit for an already closed one settles nothing.
-        A full identifier (series and number) wins; the bare digits count only when no full identifier is
-        on the credit, so 'NRD 0042' never also names 'STD 0042'."""
+    def named(self, t: statements.Tx) -> tuple[set[str], bool]:
+        """Invoices the credit names, and whether by their full identifier; any status, so a credit for an already
+        closed one settles nothing. A full identifier (series and number) wins; the bare digits count only when no
+        full identifier is on the credit, so 'NRD 0042' never also names 'STD 0042'."""
         desc = _norm(t.description)
         full = {mid for mid, rx, _ in self.known if rx and rx.search(desc)}
         if full:
-            return full
+            return full, True
         by_digits = {
             mid for mid, _, digits in self.known if digits and re.search(rf"(?<!\d){digits}(?!\d)", t.description)
         }
         # bare digits shared by several invoices (NRD 0042 and STD 0042) name none for sure: settle nothing
-        return by_digits if len(by_digits) <= 1 else {"__ambiguous__"}
+        return (by_digits if len(by_digits) <= 1 else {"__ambiguous__"}), False
 
     def candidates(self, t: statements.Tx, done) -> list[tuple]:
         """(invoice, how) the credit may collect: those it names, else all it fits; the ones that show the
         client win over those that fit by amount alone."""
         cands = [(r, how) for r in self.rows if r["message_id"] not in done and (how := self.fits(r, t))]
-        if names := self.named(t):
-            cands = [(r, "ref" if how == "amount" else how) for r, how in cands if r["message_id"] in names]
+        names, full = self.named(t)
+        if names:
+            cands = [(r, how) for r, how in cands if r["message_id"] in names]
+            if full and len(names) == 1:  # one whole invoice identifier: the credit says which it pays
+                cands = [(r, "ref" if how == "amount" else how) for r, how in cands]
+            else:  # digits, or several invoices named: without its client the credit proves none of them
+                cands = [(r, how) for r, how in cands if how in CLIENT_PROOF]
         return [c for c in cands if c[1] in CLIENT_PROOF] or cands
 
 

@@ -306,6 +306,44 @@ def test_two_credits_of_one_amount_collect_nothing_by_amount(ledger, home, sec, 
     assert "name" in ledger.issued("7001")["collected_note"]
 
 
+def test_a_credit_never_trades_its_client_for_an_amount(ledger, home, sec, monkeypatch):
+    one = dict(total="100.00", issue="2026-10-11")
+    _stored(ledger, monkeypatch, **{"7001": ubl(client="ALPHA SOFT SRL", **one)})
+    _stored(
+        ledger, monkeypatch, **{"7002": ubl(number="NRD 0043", client="BETA LABS SRL", client_cui="RO77777777", **one)}
+    )
+    alpha = [
+        _credit("100.00", date(2026, 10, d), counterparty="ALPHA SOFT SRL", iban="", desc=f"p{d}") for d in (20, 21)
+    ]
+    assert issued.match_statement(ledger, _st(*alpha)) == ["7001"]  # the second Alpha credit never pays Beta
+
+
+@pytest.mark.parametrize("gamma_first", [True, False])
+def test_an_account_shown_on_the_statement_pays_no_one_else_by_amount(ledger, home, sec, monkeypatch, gamma_first):
+    _stored(ledger, monkeypatch, **{"7001": ubl(total="200.00", client="BETA LABS SRL", client_cui="RO77777777")})
+    _stored(ledger, monkeypatch, **{"7002": ubl(number="NRD 0043", total="100.00", client="GAMMA SRL")})
+    gamma = _credit("100.00", date(2026, 10, 20), counterparty="X", iban=OTHER_IBAN, desc="CUI 66666666")
+    other = _credit("200.00", date(2026, 10, 21), counterparty="XYZ", iban=OTHER_IBAN, desc="servicii")
+    assert issued.match_statement(ledger, _st(*((gamma, other) if gamma_first else (other, gamma)))) == ["7002"]
+
+
+@pytest.mark.parametrize("desc,collected", [("comanda 0042", []), ("NRD 0042 si NRD 0043", []), ("NRD 0042", ["7001"])])
+def test_only_one_whole_identifier_picks_among_amount_twins(ledger, home, sec, monkeypatch, desc, collected):
+    _stored(ledger, monkeypatch, **{"7001": ubl(), "7002": ubl(number="NRD 0043", client="GAMMA SRL")})
+    anonymous = _credit("1190.00", date(2026, 10, 21), counterparty="Y", iban="", desc="plata")
+    named = _credit("1190.00", date(2026, 10, 20), counterparty="NEW PAYER", iban=OTHER_IBAN, desc=desc)
+    assert issued.match_statement(ledger, _st(anonymous, named)) == collected
+
+
+def test_a_private_name_from_a_client_account_collects_nothing(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"7001": ubl(client="GAMMA LABS SRL", client_cui="RO77777777", total="50.00")})
+    _stored(ledger, monkeypatch, **{"7002": ubl(number="NRD 0043", client="ION POPESCU", client_cui="")})
+    gamma = _credit("50.00", date(2026, 10, 20), counterparty="X", iban=OTHER_IBAN, desc="CUI 77777777")
+    assert issued.match_statement(ledger, _st(gamma)) == ["7001"]
+    person = _credit("1190.00", date(2026, 10, 21), counterparty="ION POPESCU", iban=OTHER_IBAN, desc="")
+    assert issued.match_statement(ledger, _st(person)) == []
+
+
 def test_cui_on_credit_and_then_the_learned_iban(ledger, home, sec, monkeypatch):
     _stored(
         ledger,
