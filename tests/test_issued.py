@@ -399,6 +399,192 @@ def test_a_private_name_from_a_client_account_collects_nothing(ledger, home, sec
     assert issued.match_statement(ledger, _st(person)) == []
 
 
+def _owed(*totals):
+    return {f"70{i + 1:02d}": ubl(number=f"NRD 00{i + 50}", total=t, issue="2026-10-11") for i, t in enumerate(totals)}
+
+
+@pytest.mark.parametrize(
+    "totals,desc,collected",
+    [
+        (("400.00", "600.00"), "plata", ["7001", "7002"]),  # the client's two open invoices, one transfer
+        (("400.00", "600.00", "300.00", "700.00"), "plata", []),  # 400+600 and 300+700: which ones is a guess
+        (("400.00", "600.00", "300.00", "700.00"), "NRD 0050 NRD 0051", ["7001", "7002"]),  # it names them
+        (("400.00", "600.00", "300.00", "700.00"), "0050 0051", []),  # digits alone pick no set
+        (("100.00",) * 6 + ("400.00",), "plata", ["7001", "7002", "7003", "7004", "7005", "7006", "7007"]),  # all
+        (("1000.00", "400.00", "600.00"), "plata", ["7001"]),  # one invoice of the amount comes first
+        (("400.00", "600.00"), "Plata factura NRD 0099", []),  # it pays an invoice the firm doesn't have yet
+    ],
+)
+def test_one_credit_collects_the_one_exact_set_of_its_clients_invoices(
+    ledger, home, sec, monkeypatch, totals, desc, collected
+):
+    _stored(ledger, monkeypatch, **_owed(*totals))
+    t = _credit("1000.00", date(2026, 10, 20), desc=desc)
+    assert sorted(issued.match_statement(ledger, _st(t))) == collected
+    if collected:
+        assert {ledger.issued(m)["collected_tx"] for m in collected} == {statements.tx_key(t)}
+        assert ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 1
+
+
+def test_a_set_needs_its_client_and_one_credit(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+    anonymous = _credit("1000.00", date(2026, 10, 20), counterparty="XYZ", iban=OTHER_IBAN, desc="NRD 0050 NRD 0051")
+    assert issued.match_statement(ledger, _st(anonymous)) == []
+    twins = [_credit("1000.00", date(2026, 10, d)) for d in (20, 21)]  # both would pay the same pair: neither does
+    assert issued.match_statement(ledger, _st(*twins)) == []
+
+
+def _gamma(mid, number, total):
+    return {mid: ubl(number=number, total=total, client="GAMMA LABS SRL", client_cui="RO77777777", issue="2026-10-11")}
+
+
+@pytest.mark.parametrize(
+    "case,collected",
+    [
+        ("two firms one name", []),
+        ("two foreign firms one number", []),
+        ("a cash mark", []),
+        ("an ambiguous rival", []),
+        ("one account two clients", []),
+        ("an account taught by a single", ["7001"]),
+        ("a single shrinking two sets to one", []),  # the 40 is also in a set the 100 could pay: neither settles
+        ("an unknown reference with digits in its series", []),
+        ("an account showing another client at any amount", []),
+        ("a foreign vat id of another firm", []),
+        ("a foreign vat id with a romanian cui's digits", []),
+        ("two private buyers one name", []),
+        ("a competing credit over the scan limit", []),
+        ("a foreign vat id written with a space", []),
+        ("one reference read as two invoices", []),
+        ("one private buyer's invoices without an id", []),
+        ("an anonymous single inside a named set", []),
+        ("a named invoice next to an unknown one", []),
+    ],
+)
+def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec, monkeypatch, case, collected):
+    def c(amount, desc="x", **kw):
+        return _credit(amount, date(2026, 10, 20), desc=desc, **kw)
+
+    if case == "two firms one name":
+        _stored(
+            ledger,
+            monkeypatch,
+            **_owed("400.00") | {"7002": ubl(number="NRD 0051", total="600.00", client_cui="RO77777777")},
+        )
+        credits = [c("1000.00")]
+    elif case == "a cash mark":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+        assert issued.mark_collected(ledger, "7001", "cash")
+        credits = [c("1000.00")]
+    elif case == "an ambiguous rival":  # 110 is 40+70 or 60+50: both reach the pair the 100 names
+        _stored(ledger, monkeypatch, **_owed("40.00", "60.00", "50.00", "70.00"))
+        credits = [c("100.00", "NRD 0050 NRD 0051"), c("110.00")]
+    elif case == "one account two clients":
+        pairs = _gamma("7003", "NRD 0060", "300.00") | _gamma("7004", "NRD 0061", "700.00")
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00") | pairs)
+        credits = [c("1000.00", iban=OTHER_IBAN), c("1000.00", "y", counterparty="GAMMA LABS SRL", iban=OTHER_IBAN)]
+    elif case == "two foreign firms one number":
+        vat = {"7001": ("DE123456789", "400.00"), "7002": ("AT123456789", "600.00")}
+        _stored(
+            ledger,
+            monkeypatch,
+            **{m: ubl(number=f"NRD 00{m[-2:]}", total=t, client_cui=v) for m, (v, t) in vat.items()},
+        )
+        credits = [c("1000.00")]
+    elif case == "an account taught by a single":  # the 200 teaches OTHER_IBAN for Beta; Gamma's 1000 is no Beta set
+        _stored(ledger, monkeypatch, **_owed("200.00", "400.00", "600.00") | _gamma("7004", "NRD 0061", "50.00"))
+        credits = [c("200.00", iban=OTHER_IBAN), c("1000.00", "y", counterparty="GAMMA LABS SRL", iban=OTHER_IBAN)]
+    elif case == "a single shrinking two sets to one":  # 100 is 40+60 or 30+70 before the 40 is collected
+        _stored(ledger, monkeypatch, **_owed("40.00", "60.00", "30.00", "70.00"))
+        credits = [c("40.00"), c("100.00", "y")]
+    elif case == "an account showing another client at any amount":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00") | _gamma("7003", "NRD 0060", "50.00"))
+        credits = [c("123.00", counterparty="GAMMA LABS SRL", iban=OTHER_IBAN), c("1000.00", "y", iban=OTHER_IBAN)]
+    elif case == "a foreign vat id of another firm":
+        de = {
+            m: ubl(number=f"NRD 00{m[-2:]}", total=t, client_cui="DE123456789")
+            for m, t in (("7001", "400.00"), ("7002", "600.00"))
+        }
+        at = {"7003": ubl(number="NRD 0060", total="80.00", client="AUSTRIA FIRMA GMBH", client_cui="AT123456789")}
+        _stored(ledger, monkeypatch, **de | at)
+        assert ledger.mark_issued_collected("7003", "statement", "tx-earlier")
+        credits = [c("1000.00", "AT123456789", counterparty="AUSTRIA FIRMA GMBH", iban=OTHER_IBAN)]
+    elif case == "a foreign vat id with a romanian cui's digits":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+        credits = [c("1000.00", "DE66666666", counterparty="AUSLAND GMBH", iban=OTHER_IBAN)]
+    elif case == "two private buyers one name":
+        cnp = {"7001": ("1800101000001", "400.00"), "7002": ("2800101000002", "600.00")}
+        people = {
+            m: ubl(number=f"NRD 00{m[-2:]}", total=t, client="ION POPESCU", client_cui=p) for m, (p, t) in cnp.items()
+        }
+        _stored(ledger, monkeypatch, **people)
+        credits = [c("1000.00", counterparty="ION POPESCU")]
+    elif case == "a competing credit over the scan limit":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00", *["2000.00"] * 19))
+        credits = [c("1000.00", "NRD 0050 NRD 0051"), c("1000.00", "y")]
+    elif case == "a foreign vat id written with a space":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+        credits = [c("1000.00", "DE 66666666", counterparty="AUSLAND GMBH", iban=OTHER_IBAN)]
+    elif case == "one reference read as two invoices":
+        twins = {"7001": ("NRD-050", "400.00"), "7002": ("NRD-0050", "600.00")}
+        _stored(ledger, monkeypatch, **{m: ubl(number=n, total=t) for m, (n, t) in twins.items()})
+        credits = [c("1000.00", "Plata NRD-050")]
+    elif case == "one private buyer's invoices without an id":
+        people = {
+            m: ubl(number=f"NRD 00{m[-2:]}", total=t, client="ION POPESCU", client_cui="")
+            for m, t in (("7001", "400.00"), ("7002", "600.00"))
+        }
+        _stored(ledger, monkeypatch, **people)
+        credits = [c("1000.00", counterparty="ION POPESCU")]
+    elif case == "an anonymous single inside a named set":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+        credits = [c("400.00", "plata", counterparty="UNKNOWN", iban=OTHER_IBAN), c("1000.00", "NRD 0050 NRD 0051")]
+    elif case == "a named invoice next to an unknown one":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+        credits = [c("900.00", "Plata NRD 0050 si NRD 0099"), c("1000.00", "plata")]
+    else:
+        b2b = {"7001": "400.00", "7002": "600.00"}
+        _stored(ledger, monkeypatch, **{m: ubl(number=f"B2B-00{m[-2:]}", total=t) for m, t in b2b.items()})
+        credits = [c("1000.00", "Plata B2B-0099")]
+    assert issued.match_statement(ledger, _st(*credits)) == collected
+    assert issued.match_statement(ledger, _st(*credits)) == []  # the same statement again decides the same
+
+
+@pytest.mark.parametrize(
+    "client,numbers,desc",
+    [
+        ("BETA SOFTWARE SRL|RO66666666", ("NRD 0050", "NRD 0051"), "DE-66666666"),
+        ("BETA SOFTWARE SRL|RO66666666", ("NRD 0050", "NRD 0051"), "US 66666666"),
+        ("GERMAN FIRMA GMBH|DE123456789", ("NRD 0050", "NRD 0051"), "ORDER CODE 123456789"),
+        ("BETA SOFTWARE SRL|RO66666666", ("NRD 0050", "NRD 0051"), "Incasare;DE;66666666"),
+        ("BETA SOFTWARE SRL|RO66666666", ("NRD 50", "NRD 50-2026"), "Plata factura NRD 50/2026"),
+    ],
+)
+def test_a_lookalike_id_or_reference_shows_no_client_and_names_no_set(
+    ledger, home, sec, monkeypatch, client, numbers, desc
+):
+    name, cui = client.split("|")
+    pair = {"7001": (numbers[0], "400.00"), "7002": (numbers[1], "600.00")}
+    _stored(
+        ledger, monkeypatch, **{m: ubl(number=n, total=t, client=name, client_cui=cui) for m, (n, t) in pair.items()}
+    )
+    payer = "UNRELATED PAYER" if "Plata" not in desc else name
+    t = _credit("1000.00", date(2026, 10, 20), counterparty=payer, iban=OTHER_IBAN, desc=desc)
+    assert issued.match_statement(ledger, _st(t)) == []
+
+
+def test_a_set_is_collected_whole_or_not_at_all(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **_owed("400.00", "600.00", "300.00"))
+    assert ledger.mark_issued_collected("7002", "statement", "tx-earlier")
+    assert ledger.mark_issued_collected(("7001", "7002"), "statement", "tx-set") is False
+    assert ledger.issued("7001")["status"] == "open" and "tx-set" not in ledger.used_txs()
+    won, _ = race(
+        ledger.path, lambda other, k: other.mark_issued_collected(("7001", "7003")[k:] + ("7001",)[:k], "s", f"tx-{k}")
+    )
+    assert sorted(won) == [False, True] and ledger.issued("7001")["status"] == "collected"
+    assert ledger.db.execute("SELECT count(*) FROM settled_tx WHERE tx_key LIKE 'tx-_'").fetchone()[0] == 1
+
+
 def test_cui_on_credit_and_then_the_learned_iban(ledger, home, sec, monkeypatch):
     _stored(
         ledger,
