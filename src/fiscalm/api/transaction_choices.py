@@ -10,7 +10,7 @@ from fiscalm import links
 from fiscalm.api import search, state as api
 from fiscalm.api.responses import bounded, fail, page
 
-COLLECTIONS = ("partners", "invoices", "payments", "selected")
+COLLECTIONS = ("partners", "invoices", "payments", "selected", "receipts")
 
 
 def options(query: dict) -> tuple[str, int, int]:
@@ -57,6 +57,10 @@ def project(full: dict, query: dict) -> dict:
     return {"pages": pages}
 
 
+def unread_upload(d: dict) -> bool:
+    return d["held"] and d["amount"] is None and not d["sent"] and not d["invoice"]
+
+
 def partner_name(row: dict) -> str:
     return row["name"] or f"CUI {row['cui'] if row['cui'] is not None else 'null'}"
 
@@ -74,6 +78,8 @@ def records(full: dict, tx: dict, collection: str, partner: str, searched: bool 
         ]
     if collection == "payments":
         return [] if credit else prepared(full, tx, searched)
+    if collection == "receipts":  # uploads with no data of their own yet: a debit's bon to name (tx-receipt)
+        return [] if credit else [d for d in full["documents"] if unread_upload(d)]
     if collection == "selected":
         link = (tx.get("explanation") or {}).get("link") or {}
         return [r for r in invoices(full, tx, link.get("partner") or "") if r["selected"]]

@@ -28,7 +28,7 @@ export type TransactionInvoiceChoice = { id: string; number: string; date: strin
   currency: string; partner: string | null; selected: boolean; position: number };
 export type TransactionChoiceRows = { partners: Partner; invoices: TransactionInvoiceChoice; selected: TransactionInvoiceChoice;
   proposed: TransactionInvoiceChoice;
-  payments: { id: string; payment: Payment } };
+  payments: { id: string; payment: Payment }; receipts: CardInvoice };
 /** What can be paged on its own; `proposed` comes only with the first bundle. */
 export type TransactionChoiceCollection = Exclude<keyof TransactionChoiceRows, "proposed">;
 export type TransactionChoices = { pages: { [K in keyof TransactionChoiceRows]?: Page<TransactionChoiceRows[K]> } };

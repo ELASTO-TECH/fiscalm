@@ -55,6 +55,7 @@
   "credit-pick": "local",
   "card-owner": "local",
   "tx-link": "local",
+  "tx-receipt": "local",
   "tx-await": "local",
   "tx-unlink": "local",
   "memory-forget": "local",

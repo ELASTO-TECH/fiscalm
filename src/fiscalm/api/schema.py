@@ -1040,6 +1040,7 @@ def schemas() -> dict:
         "selected": ref("TransactionInvoiceChoice"),
         "proposed": ref("TransactionInvoiceChoice"),
         "payments": obj({"id": STRING, "payment": ref("PaymentRow")}),
+        "receipts": ref("State/properties/documents/items"),
     }
     choice_pages = obj(
         {
@@ -1051,7 +1052,7 @@ def schemas() -> dict:
     out["TransactionChoices"] = obj({"pages": choice_pages})
     out["TransactionChoices"]["description"] = (
         "Current transaction-form choices, without linking or settling anything. Without collection, one full owner "
-        "projection returns initial partners, invoices, payments and selected pages; with collection, just that page. "
+        "projection returns initial partners, invoices, payments, selected and receipts pages; with collection, just that page. "
         "Each has an exact matching total and offset cursor (default 50, maximum 200). Only partners of the transaction's "
         "direction are offered, including a credit holder's complete exposure. Invoices retain the existing open/marked, "
         "SPV-ready, non-rejected, positive-left and account/original-currency filters; amounts restore this link's own "
@@ -1060,6 +1061,8 @@ def schemas() -> dict:
         "across pages/search. Invoices sort by date then case-folded number; partners by case-folded display name. "
         "Prepared payments retain held/in-file/lost/imported order, for debits with RON account or original currency only. "
         "Payment page IDs are keyed opaque identifiers; raw item_id is private and never appears in a cursor. "
+        "receipts lists, for a debit only, the firm's uploaded files with no amount yet (held, unsent, without an "
+        "invoice), in the documents order: the bon a person may name for it with tx-receipt. "
         "q is an accent-insensitive display-text substring (maximum 200 characters); it excludes private payment keys. "
         "partner applies only to invoices or the initial bundle; selected always uses the current link's partner. "
         "Only the initial bundle has proposed: at most the one open invoice of either partner whose number the bank details "
@@ -1194,7 +1197,7 @@ def schemas() -> dict:
         "A null unit_price means a valid price "
         "per a positive base quantity other than one; a missing price or a malformed base quantity makes the "
         "document unavailable."
-        " Editable transactions also bundle four initial transaction-choices pages from the same owner projection; "
+        " Editable transactions also bundle five initial transaction-choices pages from the same owner projection; "
         "immutable transactions carry an empty choices object. Continue/filter through transaction-choices."
     )
     out["StateSummary"]["description"] = (

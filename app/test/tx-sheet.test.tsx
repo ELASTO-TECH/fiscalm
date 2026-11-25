@@ -53,7 +53,7 @@ it.each([false, true])("keeps transaction detail and choice fixtures equal to co
   const full = manyInvoices(explained), q = { kind: "transaction", id: POPESCU };
   const actual = fixtureDetailData(full, "transaction", POPESCU), expected = detailResult(full, q);
   expect(actual.transaction).toEqual(expected.transaction); expect(actual.related).toEqual(expected.related);
-  for (const collection of ["partners", "invoices", "payments", "selected"] as const) {
+  for (const collection of ["partners", "invoices", "payments", "selected", "receipts"] as const) {
     const cursor = expected.transaction.choices[collection].total > 50 ? "50" : "";
     expect(fixtureTransactionChoicesData(full, { id: POPESCU, collection, cursor })).toEqual(choicesResult(full, { id: POPESCU, collection, cursor }));
   }
@@ -370,6 +370,20 @@ describe("a transaction's sheet", () => {
     if (body.kind === "advance") await userEvent.type(s.getByRole("textbox", { name: "Administratorul sau asociatul" }), "Administrator Exemplu");
     await userEvent.click(s.getByRole("button", { name: button }));
     expect(fake.posts().at(-1)!.body).toEqual({ co: "NORD", tx: NIMBUS, ...body, was: "" });
+  });
+
+  it("names a receipt already uploaded, with no data yet, as a card payment's bon", async () => {
+    const full = fixture(), d = full.documents.find((x) => x.vendor === "Benzinaria Nord")!;
+    Object.assign(d, { vendor: "", date: null, amount: null, held: true, sent: false, invoice: null });
+    at(`?co=NORD&tab=tranzactii&tx=${NIMBUS}`);
+    const fake = renderApp({ state: () => json(summaryResult(full)), detail: (url) => json(detailResult(full, query(url))),
+      transactionChoices: (url) => json(choicesResult(full, query(url))) });
+    const s = await sheet();
+    const picker = s.getByRole("region", { name: "Bonuri încărcate fără date" });
+    expect(within(picker).getAllByRole("button", { name: "Este bonul acestei plăți" })).toHaveLength(1);
+    await userEvent.click(within(picker).getByRole("button", { name: "Este bonul acestei plăți" }));
+    expect(fake.posts().at(-1)!.body).toEqual({ co: "NORD", tx: NIMBUS, id: d.id });
+    expect(fake.posts().at(-1)!.url).toContain("tx-receipt");
   });
 
   it("starts a card payment on its invoices when the engine proposes some", async () => {

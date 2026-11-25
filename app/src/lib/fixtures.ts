@@ -186,8 +186,9 @@ export function fixtureTransactionChoicesData(view: View, query: TransactionChoi
       .sort((a, b) => textOrder(a.name || `CUI ${a.cui}`, b.name || `CUI ${b.cui}`)).map((p) => ({ ...p, held: [], report_formats: [] })),
     invoices: offered, selected, proposed, payments: credit || !lei ? []
       : payments.map((payment, i) => ({ id: `fixture-payment-${s.co}-${i}`, payment })).filter((r) => query.q?.trim() || cents(r.payment.amount) === cents(lei)),
+    receipts: credit ? [] : s.documents.filter((d) => d.held && d.amount === null && !d.sent && !d.invoice),
   };
-  const names = query.collection ? [query.collection] : ["proposed", "partners", "invoices", "payments", "selected"] as const;
+  const names = query.collection ? [query.collection] : ["proposed", "partners", "invoices", "payments", "selected", "receipts"] as const;
   const q = fold((query.q ?? "").trim()), start = Number(query.cursor || 0), take = Number(query.limit ?? 50);
   return { pages: Object.fromEntries(names.map((name) => {
     const rows = records[name].filter((r) => !q || fold(name === "partners" ? `${(r as Partner).name || `CUI ${(r as Partner).cui}`} ${(r as Partner).cui || ""}`
