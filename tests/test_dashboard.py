@@ -349,13 +349,58 @@ def test_a_bank_feed_read_from_mid_month_counts_until_a_statement_brings_the_mon
     assert _moves(ledger) == [("2026-10-15", "credit", "RON", Decimal("500.00"))]
 
 
-def test_a_bt_pdf_with_two_periods_dates_no_balance():
-    text = bt_text() + bt_text().replace("01/10/2026 - 31/10/2026", "01/09/2026 - 30/09/2026").replace(
-        RON, EUR
-    ).replace("RON  Cod", "EUR  Cod")
+def test_a_bt_pdf_with_two_periods_dates_each_balance_by_the_period_above_it():
+    september = bt_text().replace("01/10/2026 - 31/10/2026", "01/09/2026 - 30/09/2026").replace("/10/2026", "/09/2026")
+    text = bt_text() + september.replace(RON, EUR).replace("RON  Cod", "EUR  Cod")
     accounts = statements.parse_text(text, "NORD").accounts
     assert len(accounts) == 2 and all(a.balanced for a in accounts)
-    assert [(a.closing, a.closing_day) for a in accounts] == [(None, None), (None, None)]
+    closing = Decimal("1150.00")
+    assert [(a.closing, a.closing_day) for a in accounts] == [
+        (closing, date(2026, 10, 31)),
+        (closing, date(2026, 9, 30)),
+    ]
+    # a section with no period above it, in a file naming two, proves none
+    text = bt_text().split("\n", 1)[1] + bt_text() + september
+    assert statements.parse_text(text, "NORD").accounts[0].closing is None
+    # a line outside its section's period proves none either
+    assert statements.parse_text(bt_text() + september.replace("05/09", "05/10"), "NORD").accounts[1].closing is None
+
+
+def test_a_bt_pdfs_month_is_its_sections_and_a_line_needs_its_day():
+    """Review: a period printed on a cover page names no month; a line before any date is no statement line."""
+    assert statements.parse_text("Extras de cont din 01/09/2026 - 30/09/2026\n" + bt_text(), "NORD").month == "2026-10"
+    undated = bt_text().replace("01/10/2026  SOLD", "            SOLD").replace("05/10/2026  Inc", "            Inc")
+    for text in (undated, bt_text() + undated.split("\n", 1)[1]):  # alone, or after a section that had dates
+        with pytest.raises(statements.StatementError, match="booking date"):
+            statements.parse_text(text, "NORD")
+
+
+@pytest.mark.parametrize(
+    "after_footer,trusted",
+    [
+        ("            SOLD FINAL CONT                    1,150.00", True),
+        (
+            "Extras de cont din 01/11/2026 - 30/11/2026\n            SOLD FINAL CONT     1,150.00",
+            False,
+        ),  # next statement's
+        ("            RULAJ TOTAL CONT     60.00     200.00\n            SOLD FINAL CONT     1,150.00", False),
+        (  # a third set agreeing again does not undo the contradiction
+            "            RULAJ TOTAL CONT     60.00     200.00\n            RULAJ TOTAL CONT     50.00     200.00\n"
+            "            SOLD FINAL CONT     1,150.00",
+            False,
+        ),
+        ("            SOLD FINAL CONT estimat            1,150.00", False),
+        ("", False),  # really missing
+    ],
+)
+def test_after_a_page_footer_only_the_accounts_own_closing_rows_count(after_footer, trusted):
+    """Review: across a page break the final balance is read only for the account still open, by its exact row; a
+    second set of totals that disagrees, or another statement's header between, proves nothing."""
+    head, _ = bt_text().rsplit("            SOLD FINAL CONT", 1)
+    text = head + "BANCA TRANSILVANIA S.A. - footer      4/5\n\f      BANCA TRANSILVANIA\n\n" + after_footer + "\n"
+    (account,) = statements.parse_text(text, "NORD").accounts
+    assert account.trustworthy is trusted
+    assert account.balanced is not ("RULAJ TOTAL CONT     60.00" in after_footer)  # contradicted totals: unbalanced
 
 
 def test_the_newest_balance_of_a_month_wins_and_two_that_disagree_prove_none(ledger, home):

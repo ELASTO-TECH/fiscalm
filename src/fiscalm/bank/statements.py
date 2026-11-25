@@ -11,6 +11,7 @@ import hashlib
 import itertools
 import json
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -68,12 +69,25 @@ def month_from_filename(name: str) -> str | None:
     return f"{m.group(2)}-{MONTHS_EN[m.group(1)]:02d}"
 
 
-def open_encrypted(path: Path, password_lookup=secrets.bt_statement_password, only: str | None = None):
+def is_bt_statement(text: str) -> bool:
+    """The text of a BT account statement: BT's name and an `EXTRAS CONT` header, as every BT statement prints."""
+    return "BANCA TRANSILVANIA" in text.upper() and re.search(r"EXTRAS\s+CONT", text) is not None
+
+
+def open_encrypted(
+    path: Path, password_lookup=secrets.bt_statement_password, only: str | None = None, plain: bool = False
+):
     """Try each company's Keychain password. Returns (company_key, pikepdf.Pdf) or raises.
 
     A statement that opens with neither password (e.g. the user's personal PFA
-    statement) is not ours.
+    statement) is not ours. A PDF without a password, accepted only when `plain` (a person brought it: the operator
+    CLI or an upload, never mail, where it would prove nothing about its sender), belongs to the one company with a BT
+    account whose CUI its header names; no password is read for it.
     """
+    if _plain(path):
+        if not plain:
+            raise StatementError(f"{Path(path).name}: an unprotected PDF is imported only from the CLI or the app")
+        return _open_plain(Path(path), only)
     unavailable = []
     for key, company in companies.all().items():
         if only is not None and key != only:  # the statement was uploaded for this company: no other is tried
@@ -97,6 +111,30 @@ def open_encrypted(path: Path, password_lookup=secrets.bt_statement_password, on
         # Can't tell "not ours" from "Keychain locked/inaccessible": never conclude not-ours.
         raise SecretsUnavailable(f"{Path(path).name}: " + "; ".join(unavailable))
     raise StatementError(f"{Path(path).name}: no company password opens it (not a statement of a configured company)")
+
+
+def _plain(path: Path) -> bool:
+    """A PDF that opens without a password (a damaged or missing one is neither: the password loop refuses it)."""
+    try:
+        pikepdf.open(path).close()
+    except (pikepdf.PasswordError, pikepdf.PdfError, OSError, ValueError):
+        return False
+    return True
+
+
+def _open_plain(path: Path, only: str | None):
+    try:
+        text = pdf_text(path)
+    except RuntimeError:
+        raise StatementError(f"{path.name}: cannot read the PDF") from None
+    named = [
+        key
+        for key, company in companies.all().items()
+        if any(a.bank == "bt" for a in company.accounts) and names_cui(text, company.cui)
+    ]  # every firm first: a header naming two is nobody's, whichever firm it was uploaded for
+    if len(named) != 1 or (only is not None and named[0] != only):
+        raise StatementError(f"{path.name}: its header names no single configured company with a BT account")
+    return named[0], pikepdf.open(path)
 
 
 def encrypted(path: Path) -> bool:
@@ -124,7 +162,7 @@ def _opens_account(line: str) -> bool:
 
 
 def decrypt_to(
-    path: Path, out_dir: Path, password_lookup=secrets.bt_statement_password, only: str | None = None
+    path: Path, out_dir: Path, password_lookup=secrets.bt_statement_password, only: str | None = None, plain=False
 ) -> tuple[str, str, Path]:
     """Decrypt statement into out_dir as an UNPROTECTED PDF.
 
@@ -132,7 +170,7 @@ def decrypt_to(
     text matches the company whose password opened it.
     """
     path = Path(path)
-    key, pdf = open_encrypted(path, password_lookup, only)
+    key, pdf = open_encrypted(path, password_lookup, only, plain)
     month = month_from_filename(path.name)
     tmp = out_dir / f".tmp-{path.stem}.pdf"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -147,10 +185,10 @@ def decrypt_to(
         if not names_cui(text, company.cui):
             raise StatementError(f"decrypted with {key} password but CUI {company.cui} not in text")
         if month is None:
-            m = re.search(r"din (\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})", text)
-            if not m:
+            start = _pdf_period(text)[0]  # a monthly period, or an older daily statement's day
+            if not start:
                 raise StatementError("cannot determine statement month")
-            month = parse_dmy(m.group(1)).strftime("%Y-%m")
+            month = start.strftime("%Y-%m")
         final = out_dir / f"Extras_BT_{key}_{month}.pdf"
         tmp.replace(final)
         return key, month, final
@@ -275,6 +313,10 @@ class Account:
     # the opening balance plus the lines it holds equals it. None when the format has none (CSV, the bank feed).
     closing: Decimal | None = None
     closing_day: date | None = None
+    # The period the bank printed above this account's section (a BT PDF names one per section); None elsewhere.
+    period: tuple[date, date] | None = None
+    # An older daily statement's number (`EXTRAS CONT Numarul: N din dd/mm/yyyy`): BT numbers them one by one.
+    serial: int | None = None
 
     @property
     def balanced(self) -> bool:
@@ -372,24 +414,41 @@ def parse_text(text: str, company: str) -> Statement:
         cur, cur_lines = None, []
 
     period_start, period_end, one_period = _pdf_period(text)
+    section = serial = None  # a statement header's period (and a daily one's number) since the last account opened
+    carried = False  # after a page footer, until a header, an account or a table: the account's closing rows may come
 
     lines = text.splitlines()
     for i, ln in enumerate(lines):
         s = ln.strip()
+        header = None if in_table else _section_header(ln)
+        if carried and (header or _opens_account(ln)):
+            carried = False  # another statement or account: the closing rows that follow are not this account's
+        if not in_table and header:
+            section, serial = header
         if _opens_account(ln):
             close()
             nxt = lines[i + 1] if i + 1 < len(lines) else ""
-            acct = _pdf_account(nxt)
+            acct, cur_date = _pdf_account(nxt), None  # a section's lines are dated by its own rows only
+            # its own header, else the file's one period; a section under none, in a file of several, has none
+            acct.period = section or ((period_start, period_end) if one_period and period_start else None)
+            acct.serial = serial if section else None
+            section = serial = None
             accounts.append(acct)
             in_table = False
             continue
         columns = _pdf_columns(ln)
         if columns is not None:
             debit_end, credit_end = columns
-            in_table = acct is not None
+            in_table, carried = acct is not None, False
             continue
         if s.startswith("BANCA TRANSILVANIA S.A."):
+            carried = carried or (in_table and id(acct) not in final)
             in_table = False  # page footer; current tx may continue on next page
+            continue
+        if carried and (row := _closing_row(ln)):  # the totals or final balance alone on the next page
+            close()
+            _carried_balance(acct, row, opening, final)
+            carried = row.group("title").strip() != "SOLD FINAL CONT"
             continue
         if not in_table or not s:
             continue
@@ -405,6 +464,8 @@ def parse_text(text: str, company: str) -> Statement:
                     in_table = False
                 continue
             close()
+            if cur_date is None:
+                raise StatementError("PDF line without a booking date; download a complete statement")
             a1_end = row.end("a1")
             direction = "debit" if abs(a1_end - debit_end) <= abs(a1_end - credit_end) else "credit"
             cur = Tx(
@@ -426,10 +487,46 @@ def parse_text(text: str, company: str) -> Statement:
         if cur is not None:
             cur_lines.append(s)
     close()
-    _pdf_trust(accounts, opening, final, one_period, period_end)
+    _pdf_trust(accounts, opening, final)
+    if periods := [a.period for a in accounts if a.period]:  # the sections' days, not a period printed elsewhere
+        period_start, period_end = min(p[0] for p in periods), max(p[1] for p in periods)
     return Statement(
         company=company, period_start=period_start, period_end=period_end, accounts=accounts, one_period=one_period
     )
+
+
+def _section_header(line: str) -> tuple[tuple[date, date], int | None] | None:
+    """A statement header's period, and an older daily one's number."""
+    if m := re.search(_HEADER, line):
+        return (parse_dmy(m.group(1)), parse_dmy(m.group(2))), None
+    if m := re.search(_DAILY, line):
+        return (parse_dmy(m.group(2)),) * 2, int(m.group(1))
+    return None
+
+
+_CLOSING = re.compile(
+    rf"^\s*(?P<title>RULAJ TOTAL CONT|SOLD FINAL CONT)\s{{2,}}(?P<a1>{_AMT})(?:\s{{2,}}(?P<a2>{_AMT}))?\s*$"
+)
+
+
+def _closing_row(line: str) -> re.Match[str] | None:
+    """A row of an account's totals (two amounts) or final balance (one), nothing else on it: it may follow a page
+    break."""
+    row = _CLOSING.match(line)
+    return row if row and bool(row.group("a2")) == (row.group("title") == "RULAJ TOTAL CONT") else None
+
+
+def _carried_balance(acct: Account, row: re.Match[str], opening: dict, final: dict) -> None:
+    """A closing row read after a page break. Totals the bank printed already are never replaced: two that disagree
+    leave the account unproven and unbalanced for good (its totals and final balance are marked unknown, and nothing
+    later sets them)."""
+    if id(acct) in final and final[id(acct)] is None:
+        return
+    if row.group("title").strip() == "RULAJ TOTAL CONT" and acct.total_debit is not None:
+        if (acct.total_debit, acct.total_credit) != (parse_amount(row.group("a1")), parse_amount(row.group("a2"))):
+            final[id(acct)], acct.total_debit, acct.total_credit = None, None, None
+        return
+    _pdf_balance(acct, row, row.group("title").strip(), opening, final)
 
 
 def _pdf_columns(line: str) -> tuple[int, int] | None:
@@ -439,14 +536,22 @@ def _pdf_columns(line: str) -> tuple[int, int] | None:
     return None
 
 
+_PERIOD = r"din (\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})"
+_HEADER = r"(?i)\bextras\b.*?" + _PERIOD  # a statement's own header ("EXTRAS CONT ... din"), not a line's text
+
+
+# An older daily statement's header names its number and its one day.
+_DAILY = r"EXTRAS CONT\s+Numarul:\s*(\d+)\s+din (\d{2}/\d{2}/\d{4})(?!\s*-\s*\d)"
+
+
 def _pdf_period(text: str) -> tuple[date | None, date | None, bool]:
-    pattern = r"din (\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})"
     period_start = period_end = None
-    m = re.search(pattern, text)
-    if m:
+    periods = set(re.findall(_PERIOD, text)) | {(d, d) for _, d in re.findall(_DAILY, text)}
+    if m := re.search(_PERIOD, text):
         period_start, period_end = parse_dmy(m.group(1)), parse_dmy(m.group(2))
-    # A closing balance is dated by the statement's period: only when the whole file names one period.
-    one_period = len(set(re.findall(pattern, text))) == 1
+    elif m := re.search(_DAILY, text):
+        period_start = period_end = parse_dmy(m.group(2))
+    one_period = len(periods) == 1
 
     return period_start, period_end, one_period
 
@@ -470,31 +575,87 @@ def _pdf_balance(
 ) -> None:
     if title.startswith("SOLD ANTERIOR") and acct.txs == [] and id(acct) not in opening:
         opening[id(acct)] = parse_amount(row.group("a1"))
-    if title.startswith("SOLD FINAL CONT"):
+    if title.startswith("SOLD FINAL CONT") and final.get(id(acct), 0) is not None:  # None: contradicted totals
         final[id(acct)] = parse_amount(row.group("a1"))
     if title.startswith("RULAJ TOTAL CONT") and row.group("a2"):
         acct.total_debit = parse_amount(row.group("a1"))
         acct.total_credit = parse_amount(row.group("a2"))
 
 
-def _pdf_trust(
-    accounts: list[Account],
-    opening: dict[int, Decimal],
-    final: dict[int, Decimal],
-    one_period: bool,
-    period_end: date | None,
-) -> None:
-    for a in accounts:  # the closing balance counts only when the opening one and the lines add up to it, to the cent
+def _pdf_trust(accounts: list[Account], opening: dict[int, Decimal], final: dict[int, Decimal]) -> None:
+    """The closing balance counts only when the opening one and the lines add up to it, to the cent; it is dated by
+    the period printed above its section, so a section without one, or with a line outside it, proves nothing."""
+    for a in accounts:
         start, end = opening.get(id(a)), final.get(id(a))
         a.trustworthy = bool(
-            one_period
+            a.period
+            and all(a.period[0] <= t.date <= a.period[1] for t in a.txs)
             and start is not None
             and end is not None
             and a.balanced
             and start + a.total_credit - a.total_debit == end
         )
         if a.trustworthy:
-            a.closing, a.closing_day = end, period_end
+            a.closing, a.closing_day = end, a.period[1]
+
+
+SEVERAL_MONTHS = (
+    "Statement of several months that can't be split safely by month; download each month's statement from the bank"
+)
+
+
+def several_months(st: Statement) -> bool:
+    """A PDF whose sections name periods of different months: BT's quarterly statement."""
+    return len({d.strftime("%Y-%m") for a in st.accounts if a.period for d in a.period}) > 1
+
+
+def split_months(path: Path, company: str, st: Statement, folder: Path) -> list[tuple[str, Path, Statement]]:
+    """A statement of several months, split by its pages into one PDF per month, each read again as a statement of
+    its own: (month, file, statement). Refused unless every section covers days of one month, no page holds two
+    months, each part names the firm in its own header (a stored part is read again on its own) and the parts read
+    back to exactly the file's sections, lines and balances."""
+    if any(not a.period or a.period[0].strftime("%Y-%m") != a.period[1].strftime("%Y-%m") for a in st.accounts):
+        raise StatementError(SEVERAL_MONTHS)
+    folder.mkdir(parents=True, exist_ok=True)
+    parts = []
+    with pikepdf.open(path) as pdf:
+        for month, pages in _pages_by_month(pdf_text(path), len(pdf.pages), st).items():
+            out = folder / f"Extras_BT_{company}_{month}.pdf"
+            with pikepdf.new() as piece:
+                piece.pages.extend(pdf.pages[i] for i in pages)
+                piece.save(out, deterministic_id=True)  # the same file splits into the same bytes: a duplicate
+            text = pdf_text(out)
+            if not names_cui(text, companies.get(company).cui):
+                raise StatementError(SEVERAL_MONTHS)
+            parts.append((month, out, parse_text(text, company)))
+    if Counter(map(_section, st.accounts)) != Counter(_section(a) for *_, p in parts for a in p.accounts) or any(
+        a.period[0].strftime("%Y-%m") != month for month, _, p in parts for a in p.accounts
+    ):
+        raise StatementError(SEVERAL_MONTHS)
+    return parts
+
+
+def _pages_by_month(text: str, count: int, st: Statement) -> dict[str, list[int]]:
+    """Each page under the month of the periods it prints, a page printing none under the one before (the first
+    month for a header page)."""
+    pages = text.split("\f")
+    if len(pages) < count:
+        raise StatementError(SEVERAL_MONTHS)
+    month = min(a.period[0] for a in st.accounts).strftime("%Y-%m")
+    out: dict[str, list[int]] = {}
+    for i, page in enumerate(pages[:count]):
+        named = {parse_dmy(m.group(1)).strftime("%Y-%m") for m in re.finditer(_PERIOD, page)}
+        if len(named) > 1:
+            raise StatementError(SEVERAL_MONTHS)
+        month = named.pop() if named else month
+        out.setdefault(month, []).append(i)
+    return out
+
+
+def _section(a: Account) -> tuple:
+    return (a.iban, a.currency, a.period, a.closing, a.total_debit, a.total_credit, a.trustworthy) + tuple(
+        tx_key(t) for t in a.txs
+    )
 
 
 def parse_pdf(path: Path, company: str) -> Statement:

@@ -21,12 +21,13 @@ from fiscalm.bank.intake import (
     import_lock,
     refuse_incomplete,
     refuse_overlap,
+    refuse_unchained,
     statement_ibans,
 )
 from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import Ledger, finance_home
 from fiscalm.payments.orders import parse_payment_pdf
-from fiscalm.pdftext import sha256
+from fiscalm.pdftext import pdf_text, sha256
 
 MATCH_DAYS = 12
 
@@ -59,7 +60,7 @@ def ingest_file(
         }
     try:
         with path.open("rb") as stream:
-            prefix = stream.read(4096).lstrip(b"\xef\xbb\xbf \t\r\n")
+            raw = stream.read(4096)
     except OSError:
         return {
             "file": str(path),
@@ -69,6 +70,8 @@ def ingest_file(
     if allowed_companies is not None:
         return ingest_op(ledger, path, allowed_companies)
     from fiscalm.bank.mt940 import looks_like
+
+    prefix = raw.lstrip(b"\xef\xbb\xbf \t\r\n")
 
     if prefix.startswith(b"<") or path.suffix.lower() == ".xml" or looks_like(prefix):
         if not operator:
@@ -81,9 +84,16 @@ def ingest_file(
             return {"file": str(path), "status": "error", "errors": [str(exc)]}
         except statements.StatementError as exc:
             return {"file": str(path), "status": "refused", "errors": [str(exc)]}
+    if not raw.startswith(b"%PDF-"):
+        csv = path.suffix.lower() == ".csv"
+        return {"file": str(path), "status": "refused", "errors": [_NOT_ACCOUNT_CSV if csv else _UNSUPPORTED]}
     if _bt_pdf(path):
-        return ingest_statement(ledger, path, home, password_lookup)
+        return ingest_statement(ledger, path, home, password_lookup, plain=operator)
     return ingest_op(ledger, path)
+
+
+_NOT_ACCOUNT_CSV = "A CSV statement names no account: upload it on its account in the app"
+_UNSUPPORTED = "Unsupported file: use a BT PDF, CAMT.053 XML, MT940 or a payment order PDF"
 
 
 def ingest_files(ledger: Ledger, paths: list[Path], home: Path | None = None, password_lookup=None) -> list[dict]:
@@ -92,19 +102,34 @@ def ingest_files(ledger: Ledger, paths: list[Path], home: Path | None = None, pa
     home = home or finance_home()
     pdfs = [Path(p) for p in paths if _bt_pdf(Path(p))]
     rest = [ingest_file(ledger, Path(p), home, password_lookup, operator=True) for p in paths if Path(p) not in pdfs]
-    return rest + (ingest_statements(ledger, pdfs, home, password_lookup) if pdfs else [])
+    return rest + (ingest_statements(ledger, pdfs, home, password_lookup, plain=True) if pdfs else [])
 
 
 def _bt_pdf(path: Path) -> bool:
-    """A BT statement: its monthly "allmerge" PDF, or any PDF that needs a password (older per-account or daily ones)."""
+    """A BT statement: its monthly "allmerge" PDF, any PDF that needs a password (older per-account or daily ones), or
+    a plain PDF whose text is a BT account statement, whatever its name (downloaded from BT24 or a shared folder)."""
     if path.is_symlink() or not path.is_file():
         return False
-    return bool(re.search(r"allmerge.*\.pdf$", path.name, re.I)) or statements.encrypted(path)
+    try:
+        with path.open("rb") as stream:
+            if stream.read(5) != b"%PDF-":
+                return False
+    except OSError:  # ingest_file reports it
+        return False
+    if re.search(r"allmerge.*\.pdf$", path.name, re.I) or statements.encrypted(path):
+        return True
+    try:
+        return statements.is_bt_statement(pdf_text(path))
+    except RuntimeError:  # unreadable: the payment order reader refuses it on its own
+        return False
 
 
 def ingest_op(ledger: Ledger, path: Path, allowed_companies: list[str] | None = None) -> dict:
     """A mailed OP may name only a firm configured for its sender, before any ledger write."""
-    res = parse_payment_pdf(path)
+    try:
+        res = parse_payment_pdf(path)
+    except RuntimeError:  # a damaged or oversized PDF: this file is refused, the others of the call still run
+        return {"file": str(path), "status": "refused", "errors": ["Cannot read the PDF; check the file"]}
     if not res.ok:
         return {"file": str(path), "status": "refused", "errors": res.errors}
     item = res.item
@@ -165,19 +190,21 @@ def ingest_statements(
     source: str | None = None,
     tmp_dir: Path | None = None,
     one_set: bool = False,
+    plain: bool = False,
 ) -> list[dict]:
     """BT PDFs, grouped by company and month: each group is one statement (one file per account, or daily ones,
     `intake.combine`), checked whole and stored whole or not at all. One result per group, and one per file that
     isn't a statement of ours. `only`: the company the files are for (an upload); no other company's password is
     tried. `check(st)`: a last refusal on a group's statement before anything is stored (raises
-    statements.StatementError). `one_set`: the files must make one group, or nothing is stored."""
+    statements.StatementError). `one_set`: the files must make one group, or nothing is stored. `plain`: a PDF without
+    a password is read too (a person brought it: the CLI or an upload, never mail)."""
     tmp = tmp_dir or home / "state" / "tmp"  # an upload's own staging is already confined (bank.upload._confined)
     tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not tmp_dir and not _inside(home, tmp):  # a symlink on the way would put decrypted copies outside the data root
         error = "Unsafe statement storage directory; remove symlinks and retry"
         return [{"file": str(path), "status": "error", "errors": [error]} for path in paths]
     work = tmp / f"set-{secrets.token_hex(8)}"
-    kw = {"password_lookup": password_lookup} if password_lookup else {}
+    kw = ({"password_lookup": password_lookup} if password_lookup else {}) | {"plain": plain}
     if only is not None:
         kw["only"] = only
     with import_lock():
@@ -185,41 +212,78 @@ def ingest_statements(
             failed, opened = [], []
             for i, path in enumerate(paths):
                 o = _open_statement(Path(path), work / str(i), kw)
-                (opened if isinstance(o, _Opened) else failed).append(o)
+                if isinstance(o, dict):
+                    failed.append(o)
+                else:
+                    opened.extend(o)
             groups: dict[tuple[str, str], list[_Opened]] = {}
             for o in opened:
                 groups.setdefault((o.company, o.month), []).append(o)
             if one_set and (failed or len(groups) > 1):
-                return failed[:1] or [_refused(opened, "Statement set: files of different months or companies")]
-            return failed + [_store_set(ledger, g, home, check, source) for g in groups.values()]
+                several = len(paths) == 1 and not failed  # one file, split by month: each month is uploaded alone
+                error = (
+                    statements.SEVERAL_MONTHS if several else "Statement set: files of different months or companies"
+                )
+                return failed[:1] or [_refused(opened, error)]
+            # month by month: a month that starts after the 1st is checked against the one before it
+            others = _checked(groups, check)  # the months imported together prove each other's edges
+            return failed + [_store_set(ledger, groups[k], home, check, source, others) for k in sorted(groups)]
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
 
-def _open_statement(path: Path, out_dir: Path, kw: dict) -> _Opened | dict:
+def _open_statement(path: Path, out_dir: Path, kw: dict) -> list[_Opened] | dict:
+    """The file's statement, or one per month for a statement of several months (split by month, each part its own
+    document); a dict says why the file is not read."""
     try:
         company, month, out = statements.decrypt_to(path, out_dir, **kw)
     except statements.SecretsUnavailable as e:
         return {"file": str(path), "status": "error", "errors": [str(e)]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "not_ours", "errors": [str(e)]}
+    except (ValueError, ArithmeticError):  # a printed date or amount that isn't one
+        return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement"]}
     try:
         st = statements.parse(out, company)
-        if st.month and st.month != month:  # the month comes from what the bank printed, never from a file name
+        if not st.period_start or not st.period_end:
+            raise statements.StatementError("Cannot verify statement period")
+        if statements.several_months(st):
+            parts = statements.split_months(out, company, st, out_dir / "months")
+            if month not in {m for m, *_ in parts}:  # a name's month, or the first printed: one of its months
+                raise statements.StatementError("Statement file name names another month than its period")
+            return [_Opened(path, company, m, piece, s, sha256(piece)) for m, piece, s in parts]
+        if st.month != month:  # the month comes from what the bank printed, never from a file name
             raise statements.StatementError("Statement file name names another month than its period")
+    except (ValueError, ArithmeticError):
+        return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement"]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "refused", "errors": [str(e)]}
-    return _Opened(path, company, month, out, st, sha256(path))
+    return [_Opened(path, company, month, out, st, sha256(path))]
+
+
+def _checked(groups: dict[tuple[str, str], list[_Opened]], check) -> list[statements.Statement]:
+    """Each month of the call as one statement, only those that pass their own checks: a refused file proves no
+    neighbour's edge."""
+    out = []
+    for parts in groups.values():
+        try:
+            st = combine([o.st for o in parts])
+            _set_checks(st, parts, check)
+        except statements.StatementError:
+            continue
+        out.append(st)
+    return out
 
 
 def _refused(parts: list[_Opened], error: str, status: str = "refused", **extra) -> dict:
     return {"file": ", ".join(str(o.path) for o in parts), "status": status, "errors": [error], **extra}
 
 
-def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: str | None) -> dict:
+def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: str | None, others=()) -> dict:
     try:
         st = combine([o.st for o in parts])
         _set_checks(st, parts, check)
+        refuse_unchained(ledger, st, others)  # under the import lock
         for o in parts:
             refuse_overlap(ledger, o.st, o.digest, siblings={p.digest for p in parts})
     except StoredStatementUnavailable as exc:

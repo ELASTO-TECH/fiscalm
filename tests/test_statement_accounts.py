@@ -12,9 +12,10 @@ from pdf_fake import bt_statement
 from test_camt import complete, fake_pdf, parse, write, xml
 
 from fiscalm import companies, integrations, pack, recon
-from fiscalm.bank import intake as statement_intake, statements, upload
+from fiscalm.bank import banking_days, intake as statement_intake, statements, upload
 from fiscalm.ledger import finance_home
 from fiscalm.mail import imap as imapread, invoices as mail_invoices
+from fiscalm.pdftext import pdf_text
 
 ING = "RO00INGB0000000000000009"
 X1, X2, Y = "RO00XXXX0000000000000001", "RO00XXXX0000000000000002", "RO00YYYY0000000000000002"
@@ -296,6 +297,299 @@ def test_the_operator_imports_one_months_bt_pdfs_together(ledger, tmp_path, peri
     assert tuple(days) == (len(periods), 2)  # every file's lines are on record, for both accounts
     again = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
     assert [r["status"] for r in again] == ["duplicate"]
+
+
+@pytest.mark.parametrize("firm", ["NORD", "STUDIO9"])
+def test_the_operator_imports_a_plain_bt_pdf_under_any_name_and_a_csv_is_refused_on_its_own(ledger, tmp_path, firm):
+    """A BT24 download: no password, any name. The CUI in its header names the firm, so no password is read."""
+    co = companies.get(firm)
+    accounts = [(c, i, Decimal("100.00"), [("05/10/2026", f"SET-{c}", Decimal("10.00"))]) for c, i in co.ibans.items()]
+    plain = bt_statement(tmp_path / "statement_5.pdf", co.cui, ("01/10/2026", "31/10/2026"), accounts, password=None)
+    wise = tmp_path / "statement_USD.csv"
+    wise.write_text("Date,Amount\n2026-01-01,1.00\n")
+
+    def no_password(key):
+        raise AssertionError("a plain PDF needs no password")
+
+    bad = bt_statement(tmp_path / "Extras.pdf", co.cui, ("31/02/2026", "31/03/2026"), accounts, password=None)
+    amount = [(c, i, o, [(d, "X valoare tranzactie: 1.2.3 RON", a) for d, _, a in m]) for c, i, o, m in accounts]
+    worse = bt_statement(tmp_path / "Extras2.pdf", co.cui, ("01/10/2026", "31/10/2026"), amount, password=None)
+    csv, date_, amount_, pdf = recon.ingest_files(ledger, [wise, bad, worse, plain], password_lookup=no_password)
+    assert (csv["status"], csv["errors"]) == ("refused", [recon._NOT_ACCOUNT_CSV])
+    assert date_["status"] == amount_["status"] == "refused"  # an impossible date or amount: that file alone
+    assert (pdf["status"], pdf["company"], pdf["month"]) == ("added", firm, "2026-10")
+    assert not ledger.payments()  # never read as a payment order
+
+
+def test_mail_never_imports_an_unprotected_pdf(ledger, sec, tmp_path, monkeypatch):
+    """A statement mail proves its sender only by the password its PDF needs: a plain one is nobody's."""
+    integrations.set_statement_password(ledger, "NORD", "bt", "synthetic")
+    inbox = {"host": "imap.example.test", "username": "u", "password": "x", "from_address": "books@example.com"}
+    account = integrations.add(ledger, "mail", "Synthetic inbox", inbox)["id"]
+    nord = companies.get("NORD")
+    accounts = [(c, i, Decimal("100.00"), []) for c, i in nord.ibans.items()]
+    plain = bt_statement(tmp_path / "p.pdf", nord.cui, ("01/10/2026", "31/10/2026"), accounts, password=None)
+    assert bring(ledger, "mail", [plain], monkeypatch, account) == "not_ours"
+    assert not ledger.documents(kind="statement")
+
+
+@pytest.mark.parametrize(
+    "day,banking",
+    [
+        (date(2026, 4, 10), False),  # Orthodox Good Friday (Easter 12 April 2026)
+        (date(2024, 5, 6), False),  # Orthodox Easter Monday (5 May 2024, not the Western 31 March)
+        (date(2024, 6, 24), False),  # Rusalii Monday, Easter + 50
+        (date(2025, 1, 6), False),  # Bobotează, a holiday since 2024
+        (date(2023, 1, 6), True),  # not yet in 2023
+        (date(2017, 4, 14), True),  # Good Friday became a holiday in 2018
+        (date(2008, 6, 16), True),  # Rusalii Monday became a holiday in 2009 (Legea 202/2008)
+        (date(2009, 6, 8), False),
+        (date(2026, 11, 30), False),
+        (date(2026, 10, 1), True),
+    ],
+)
+def test_banking_days_follow_romanian_legal_holidays(day, banking):
+    assert banking_days.banking_day(day) is banking
+
+
+def test_a_neighbouring_month_on_record_for_the_account_must_show_where_it_closed(ledger, tmp_path):
+    """Review: April is on record for RON and EUR, but its file shows only EUR: May's chain can't be checked."""
+    nord = companies.get("NORD")
+    eur = [("EUR", nord.ibans["EUR"], Decimal("90.00"), [("01/04/2022", "A-EUR", Decimal("10.00"))])]
+    folder = recon.month_dir("NORD", "2022-04") / "extrase"
+    folder.mkdir(parents=True)
+    april = bt_statement(folder / "april.pdf", nord.cui, ("01/04/2022", "30/04/2022"), eur, password=None)
+    ledger.add_document("a" * 64, "NORD", "2022-04", "statement", str(april), accounts=list(nord.ibans.values()))
+    ledger.set_meta("statement_stored_sha:" + "a" * 64, recon.sha256(april))
+    (result,) = recon.ingest_files(ledger, [month_file(tmp_path, *MAY)], password_lookup=lambda co: "synthetic")
+    assert result["status"] == "error" and "does not show this account" in result["errors"][0]
+
+
+def test_a_neighbouring_month_counts_only_as_its_stored_bytes(ledger, tmp_path):
+    """Review: April's stored copy replaced by another file with the same balance proves nothing for May."""
+    stored = recon.ingest_files(
+        ledger, [month_file(tmp_path, "01/04/2022", "30/04/2022", "90.00")], password_lookup=lambda co: "synthetic"
+    )
+    assert stored[0]["status"] == "added"
+    (doc,) = ledger.documents(kind="statement")
+    (tmp_path / "other").mkdir()
+    other = month_file(tmp_path / "other", "01/04/2022", "30/04/2022", "90.00", password=None)  # same balances
+    Path(doc["path"]).write_bytes(other.read_bytes().replace(b"M-RON", b"X-RON"))
+    (result,) = recon.ingest_files(ledger, [month_file(tmp_path, *MAY)], password_lookup=lambda co: "synthetic")
+    assert result["status"] == "error" and "restore" in result["errors"][0]
+
+
+def month_file(folder, lo: str, hi: str, opening: str = "100.00", *first, password="synthetic"):
+    """NORD's BT PDF for lo..hi, each section under its own period: `first` sections, then RON and EUR, each opening at
+    `opening` and crediting 10.00 on `lo`."""
+    nord = companies.get("NORD")
+    own = [(c, nord.ibans[c], Decimal(opening), [(lo, f"M-{c}", Decimal("10.00"))], (lo, hi)) for c in ("RON", "EUR")]
+    return bt_statement(folder / f"extras-{lo.replace('/', '')}.pdf", nord.cui, (lo, hi), [*first, *own], password)
+
+
+def usd(opening: str, lo: str = "10/10/2026"):
+    return ("USD", USD, Decimal(opening), [(lo, "M-USD", Decimal("5.00"))], (lo, "31/10/2026"))
+
+
+MAY = ("02/05/2022", "31/05/2022")
+OCTOBER = ("01/10/2026", "31/10/2026", "100.00")
+
+
+@pytest.mark.parametrize(
+    "case,files,usd_fields,refusal",
+    [
+        ("1 May 2022 is a Sunday", [MAY], None, None),
+        ("1 December is a holiday", [("02/12/2021", "31/12/2021")], None, None),
+        ("2 May 2022 is a banking day", [("03/05/2022", "31/05/2022")], None, "full calendar month"),
+        ("chains with April", [("01/04/2022", "30/04/2022", "90.00"), MAY], None, None),
+        ("April closes elsewhere", [("01/04/2022", "30/04/2022"), MAY], None, "chain"),
+        ("May first, then April", [MAY, ("01/04/2022", "30/04/2022")], None, "chain"),
+        ("USD opened on the 10th at zero", [(*OCTOBER, usd("0.00"))], {"opened": "2026-10-10"}, None),
+        ("USD opened on the 10th, not at zero", [(*OCTOBER, usd("7.00"))], {"opened": "2026-10-10"}, "full calendar"),
+        ("USD opened in October, day unknown", [(*OCTOBER, usd("0.00"))], {"opened": "2026-10"}, "full calendar"),
+        ("USD opened on the 8th, a Thursday", [(*OCTOBER, usd("0.00"))], {"opened": "2026-10-08"}, "full calendar"),
+        ("USD not marked opened", [(*OCTOBER, usd("0.00"))], {}, "full calendar month"),
+        ("USD retired on 1 May, owed for May", [MAY], {"retired": "2022-05-01"}, "missing configured accounts"),
+    ],
+)
+def test_a_month_starts_after_the_1st_only_when_no_day_with_movements_is_left_out(
+    ledger, tmp_path, monkeypatch, case, files, usd_fields, refusal
+):
+    """BT prints the month from its first banking day, or from the day an account opened: that is the whole month
+    when the days before could hold no movement and the balances open where the previous stored month closed."""
+    if usd_fields is not None:
+        nord_with(monkeypatch, (USD, "USD", "bt", usd_fields))
+    *before, (lo, hi, *rest) = files
+    for b in before:  # the previous month, imported first
+        assert (
+            recon.ingest_files(ledger, [month_file(tmp_path, *b)], password_lookup=lambda co: "synthetic")[0]["status"]
+            == "added"
+        )
+    (result,) = recon.ingest_files(
+        ledger, [month_file(tmp_path, lo, hi, *rest)], password_lookup=lambda co: "synthetic"
+    )
+    if refusal:
+        assert result["status"] == "refused" and refusal in result["errors"][0]
+        assert len(ledger.documents(kind="statement")) == len(before)
+    else:
+        assert (result["status"], result["month"]) == ("added", hi[6:] + "-" + hi[3:5])
+
+
+def quarter(folder, pages=True):
+    """NORD's Q2 2022 in one BT PDF: RON and EUR each month, chained, and USD from the 10th of May, when it opened."""
+    nord, sections, balance = companies.get("NORD"), [], Decimal("100.00")
+    for month, last in (("04", 30), ("05", 31), ("06", 30)):
+        days = (f"01/{month}/2022", f"{last}/{month}/2022")
+        sections += [
+            (c, nord.ibans[c], balance, [(days[0], f"Q-{c}-{month}", Decimal("10.00"))], days) for c in ("RON", "EUR")
+        ]
+        lo = "10/05/2022" if month == "05" else days[0]
+        if month != "04":
+            usd_opening = Decimal(0) if month == "05" else Decimal("5.00")
+            sections += [(("USD", USD, usd_opening, [(lo, f"Q-USD-{month}", Decimal("5.00"))], (lo, days[1])))]
+        balance += 10
+    return bt_statement(folder / "statement_Q2.pdf", nord.cui, ("01/04/2022", "30/06/2022"), sections, pages=pages)
+
+
+@pytest.mark.parametrize("pages", [True, False], ids=["a month per page", "months on one page"])
+def test_a_quarterly_bt_pdf_is_stored_as_its_three_months_or_refused(ledger, sec, tmp_path, monkeypatch, pages):
+    """Each month is split out by its pages, read again, and imported as that month's statement, with the accounts
+    owed that month (USD opened in May is not owed for April)."""
+    nord_with(monkeypatch, (USD, "USD", "bt", {"opened": "2022-05-10"}))
+    files = [quarter(tmp_path, pages)]
+    results = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
+    if not pages:
+        assert [r["status"] for r in results] == ["refused"] and "several months" in results[0]["errors"][0]
+        assert not ledger.documents(kind="statement")
+        return
+    assert [(r["status"], r["month"], r["transactions"]) for r in results] == [
+        ("added", "2022-04", 2),
+        ("added", "2022-05", 3),
+        ("added", "2022-06", 3),
+    ]
+    assert sorted(d["month"] for d in ledger.documents(kind="statement")) == ["2022-04", "2022-05", "2022-06"]
+    again = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
+    assert [r["status"] for r in again] == ["duplicate"] * 3
+    integrations.set_statement_password(ledger, "NORD", "bt", "synthetic")
+    with pytest.raises(upload.Refused) as e:  # the app stores one month per upload
+        upload.accept_pdfs(ledger, "NORD", "", [files[0].read_bytes()])
+    assert "mai multe luni" in e.value.message
+
+
+def daily(folder, days, balance="100.00", first=1):
+    """NORD's older daily BT PDFs, one per day with movements (`dd/mm/yyyy`), numbered from `first`: RON and EUR each
+    gain 10.00 a day, balances chained."""
+    nord, files, balance = companies.get("NORD"), [], Decimal(balance)
+    for n, day in enumerate(days, start=first):
+        own = [(c, nord.ibans[c], balance, [(day, f"D-{c}-{n}", Decimal("10.00"))], (day,), n) for c in nord.ibans]
+        files.append(bt_statement(folder / f"daily-{day.replace('/', '')}.pdf", nord.cui, (day, day), own))
+        balance += 10
+    return files
+
+
+JANUARY = ["13/01/2020", "20/01/2020", "28/01/2020"]
+
+
+@pytest.mark.parametrize(
+    "case,refusal",
+    [
+        ("January, then February's first", None),
+        ("January alone", "last statement"),
+        ("a numbered statement lost", "full calendar month"),
+        ("balances that don't chain", "do not chain"),
+        ("February's first is not the next number", "last statement"),
+        ("January's first follows a December not on record", "first or last statement"),
+    ],
+)
+def test_older_daily_bt_pdfs_make_a_month_only_when_numbers_and_balances_leave_no_statement_out(
+    ledger, tmp_path, case, refusal
+):
+    """BT issued them only for days with movements, numbered one by one: the days between need no statement, but
+    every number must be there, the balances must chain, and the month's last one is proven by the next month's first."""
+    late = "December" in case
+    files = daily(tmp_path, JANUARY, first=2 if late else 1)
+    if case == "a numbered statement lost":
+        files.pop(1)
+    if case == "balances that don't chain":
+        files[1:] = daily(tmp_path, JANUARY[1:], "500.00", first=2)
+    if case != "January alone":
+        number = 5 if "next number" in case or late else 4
+        files += daily(tmp_path, ["05/02/2020"], "130.00", first=number)
+    january, *february = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
+    if refusal:
+        assert january["status"] == "refused" and refusal in january["errors"][0]
+        assert not [d for d in ledger.documents(kind="statement") if d["month"] == "2020-01"]
+        return
+    assert (january["status"], january["month"], january["transactions"]) == ("added", "2020-01", 6)
+    # February's own last statement waits for March's first
+    assert february[0]["status"] == "refused" and "last statement" in february[0]["errors"][0]
+
+
+@pytest.mark.parametrize(
+    "case,files",
+    [
+        ("a new year's next number", [("02/12/2019", 1), ("20/12/2019", 2), ("15/01/2020", 3), ("05/02/2020", 4)]),
+        ("a number skipped on consecutive days", [("13/01/2020", 1), ("14/01/2020", 3), ("05/02/2020", 4)]),
+    ],
+)
+def test_only_the_next_number_of_the_same_year_proves_nothing_was_left_out(ledger, tmp_path, case, files):
+    """Review: numbering may restart with a year, so January proves nothing about December's last days; and two
+    statements on consecutive days must be numbered one after the other."""
+    paths = [daily(tmp_path, [day], str(100 + 10 * n), first=number)[0] for n, (day, number) in enumerate(files)]
+    first, *_ = recon.ingest_files(ledger, paths, password_lookup=lambda co: "synthetic")
+    assert first["status"] == "refused" and ("last statement" in first["errors"][0]) == ("year" in case)
+    month = files[0][0][6:] + "-" + files[0][0][3:5]
+    assert month not in {d["month"] for d in ledger.documents(kind="statement")}
+
+
+def test_a_quarterly_pdf_with_an_account_twice_in_a_month_is_refused_alone(ledger, tmp_path):
+    """Review: two April sections of RON, one unproven (a line outside its period), never crash the import."""
+    ron, april = companies.get("NORD").ibans["RON"], ("01/04/2022", "30/04/2022")
+    sections = [("RON", ron, Decimal(100), [(day, day, Decimal(10))], april) for day in ("05/04/2022", "05/05/2022")]
+    sections += [("RON", ron, Decimal(110), [], ("01/05/2022", "31/05/2022"))]
+    pdf = bt_statement(tmp_path / "q.pdf", "11111111", ("01/04/2022", "31/05/2022"), sections, pages=True)
+    results = recon.ingest_files(ledger, [pdf], password_lookup=lambda co: "synthetic")
+    assert {r["status"] for r in results} == {"refused"} and not ledger.documents(kind="statement")
+
+
+def test_a_neighbour_is_what_is_stored_or_what_passes_its_own_checks(ledger, tmp_path):
+    """Review: a second April that is refused (April is on record) proves nothing for May; a file without a period
+    is refused alone."""
+    stored = month_file(tmp_path, "01/04/2022", "30/04/2022", "90.00")  # closes at 100.00
+    assert recon.ingest_files(ledger, [stored], password_lookup=lambda co: "synthetic")[0]["status"] == "added"
+    (tmp_path / "again").mkdir()
+    other = month_file(tmp_path / "again", "01/04/2022", "30/04/2022", "190.00")  # closes at 200.00
+    nord = companies.get("NORD")
+    dateless = bt_statement(
+        tmp_path / "extL_Jun_2022_allmerge.pdf", nord.cui, ("", ""), [("RON", nord.ibans["RON"], Decimal(0), [])]
+    )
+    results = recon.ingest_files(
+        ledger, [other, month_file(tmp_path, *MAY, "200.00"), dateless], password_lookup=lambda co: "synthetic"
+    )
+    assert [r["status"] for r in results] == ["refused"] * 3
+    assert "chain" in results[2]["errors"][0] and "period" in results[0]["errors"][0]
+
+
+@pytest.mark.parametrize("final,trusted", [("next page", True), ("missing", False)])
+def test_a_final_balance_after_a_page_break_still_proves_the_month(ledger, tmp_path, monkeypatch, final, trusted):
+    """The final balance alone on the next page, after the footer and the bank's info block, still closes the
+    account; a statement without one proves nothing. A statement stored before, read again, records its lines."""
+    nord, month = companies.get("NORD"), ("01/10/2026", "31/10/2026")
+    moves = [("05/10/2026", "P-1", Decimal("2000.00")), ("12/10/2026", "P-2", Decimal("-1000.00"))]
+    sections = [(c, i, Decimal("10000.00"), moves) for c, i in nord.ibans.items()]
+    pdf = bt_statement(tmp_path / "oct.pdf", nord.cui, month, sections, final=final)
+    st = statements.parse_text(pdf_text(statements.decrypt_to(pdf, tmp_path / "d", lambda co: "synthetic")[2]), "NORD")
+    assert [a.trustworthy for a in st.accounts] == [trusted, trusted]
+    real_trust = statements._pdf_trust
+    monkeypatch.setattr(
+        statements, "_pdf_trust", lambda accounts, *a: [setattr(x, "trustworthy", False) for x in accounts]
+    )
+    assert recon.ingest_files(ledger, [pdf], password_lookup=lambda co: "synthetic")[0]["status"] == "added"
+    assert not ledger.db.execute("SELECT 1 FROM statement_txs").fetchone()  # stored by an earlier version: no lines
+    monkeypatch.setattr(statements, "_pdf_trust", real_trust)
+    assert recon.ingest_files(ledger, [pdf], password_lookup=lambda co: "synthetic")[0]["status"] == "duplicate"
+    lines = ledger.db.execute("SELECT COUNT(*) FROM statement_txs").fetchone()[0]
+    assert lines == (4 if trusted else 0)
 
 
 @pytest.mark.parametrize(

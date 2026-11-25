@@ -589,8 +589,23 @@ Supported bank statements: BT monthly PDF (encrypted or unprotected) and ISO 200
 (camt.053.001.02 through .08), selected by content. Older BT exports come as one PDF per account, or as daily PDFs
 of one account: pass all of a month's files to one `fiscalm ingest FILE...`, or pick them together in Încarcă extras. They are checked as one statement (the
 whole calendar month, every account the firm held at BT that month, each day once, no gap, balances chaining from
-file to file) and stored together, or none is stored. A BT PDF is recognised by "allmerge" in its name
-or by its password. CAMT.053 is accepted by an administrator in Tranzacții, or from the operator CLI:
+file to file) and stored together, or none is stored. A BT PDF is recognised by "allmerge" in its name,
+by its password, or by its text (an unprotected BT statement under any name, whose header CUI names the firm; no
+password is read for it). `fiscalm ingest` refuses a CSV on its own: it is uploaded on its account. A BT account's
+month may start after the 1st, as older statements print it, only when no day with movements is left out: the days
+before are no banking day (weekends and Romanian legal holidays, Orthodox Easter included, `bank.banking_days`), or
+the account opened on that day (`fiscalm company opened --month YYYY-MM-DD`; a month alone is not enough) at a zero
+balance. The month's accounts are those held from its 1st. A BT statement of several months (quarterly) is split by
+its pages into one statement per month, each stored and checked as that month's, with the accounts owed that month; a
+file whose pages can't be split that way, or whose parts don't read back to exactly its sections, is refused (and the
+app takes one month per upload). Older daily BT statements (`EXTRAS CONT Numarul: N din dd/mm/yyyy`, one per day with
+movements) make a month when every number is there and balances chain from file to file; the month's first one is
+number 1 or follows the previous month's last, and its last one is followed by the next month's first, so a month of
+daily statements is imported together with its neighbours, the latest one waiting for the next month. Numbers prove
+continuity only within a year (the numbering may restart): a December of daily statements is refused (import its
+monthly statement instead). Its opening balance must be proven by the
+statement and equal the previous month's stored closing balance for that account, when one is on record, whichever
+of the two months is imported first. CAMT.053 is accepted by an administrator in Tranzacții, or from the operator CLI:
 `fiscalm ingest FILE` (store and reconcile) or `fiscalm statement FILE` (inspect). Mail and public
 receipt links do not accept CAMT. XML is unsigned text: a matching IBAN and consistent balances
 do not authenticate its author. Only full calendar months are accepted; a different document

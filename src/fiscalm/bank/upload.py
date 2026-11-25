@@ -145,6 +145,7 @@ KNOWN = (
         "CSV columns not found",
         "Fișierul CSV nu are coloanele alese pentru acest cont. Descarcă-l din bancă în același format.",
     ),
+    ("several months", "Extrasul cuprinde mai multe luni. Încarcă din bancă extrasul fiecărei luni."),
     ("files of different months", "Fișierele sunt din luni diferite. Încarcă împreună extrasele unei singure luni."),
     ("appears twice", "Un cont apare de două ori pentru aceleași zile. Încarcă fiecare extras o singură dată."),
     ("every file must name one period", RESTATE),
@@ -297,6 +298,7 @@ def _pdfs(L: Ledger, company: str, bank: str, staging: Path, paths: list[Path]) 
             source="statement-import",
             tmp_dir=staging,
             one_set=True,
+            plain=True,
         )
     except (ValueError, ArithmeticError, IndexError, KeyError, pikepdf.PdfError):  # a damaged or hostile PDF
         raise Refused(422, NOT_READ) from None

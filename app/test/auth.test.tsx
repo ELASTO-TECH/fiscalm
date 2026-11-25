@@ -2,7 +2,7 @@
 import { renderToString } from "react-dom/server";
 import { hydrateRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
-import { useContext, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -17,7 +17,7 @@ import { Sheet } from "@/components/Sheets";
 import { Codes, PasskeyEnrollment } from "@/components/Enrollment";
 import { SignOut, UserAccount } from "@/components/UserAccount";
 import { Authentication, PasswordCode } from "@/components/Authentication";
-import { base, getBootstrap, postAccess, postFile, HTTPS_REQUIRED, SESSION_CHANGED, SESSION_ENDED, postAuth } from "@/lib/api";
+import { base, getBootstrap, postAccess, postFile, HTTPS_REQUIRED, REAUTHENTICATE, SESSION_CHANGED, SESSION_ENDED, postAuth } from "@/lib/api";
 import { answer, at, deferred, fixture, fixtureIdentity, json, renderSignedIn, server } from "./helpers";
 
 const page = <Authentication bootstrap pending={<ShellSkeleton />}><App /></Authentication>;
@@ -815,6 +815,13 @@ it.each(["before", "after"])("does not repeat the operation for another account 
   expect(api.posts().filter(c => c.url === "/web/api/token-create")).toHaveLength(1);
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(screen.getByLabelText("Denumire")).toHaveValue("");
+});
+
+it("listens for a step-up as soon as the signed-in screen mounts", async () => {
+  let handled: boolean | undefined;
+  // A child's mount effect runs before any passive effect of the screen around it.
+  const Asks = () => { useEffect(() => { handled = !window.dispatchEvent(new CustomEvent(REAUTHENTICATE, { cancelable: true, detail: { finish: () => {} } })); }, []); return <p>Conținut privat</p>; };
+  server(); render(<Authentication><Asks /></Authentication>); await waitFor(() => expect(handled).toBe(true));
 });
 
 it("does not open another confirmation loop when the retried request is refused again", async () => {

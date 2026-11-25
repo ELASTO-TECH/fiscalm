@@ -176,7 +176,7 @@ def test_http_upload_is_for_administrators_only(server, ledger, monkeypatch):
 def fake_pdf_import(monkeypatch, accounts, parse_error=None, decrypt_error=None):
     """decrypt_to and parse stubbed: the upload's PDF 'opens' (as an unencrypted one would) and reads as `accounts`."""
 
-    def decrypt(path, out_dir, password_lookup=None, only=None):
+    def decrypt(path, out_dir, password_lookup=None, only=None, plain=False):
         if decrypt_error:
             raise decrypt_error
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -201,6 +201,7 @@ def fake_pdf_import(monkeypatch, accounts, parse_error=None, decrypt_error=None)
         ("CUI:{}", True),
         ("CUI:{}9", False),  # a longer number that starts with the CUI is another firm
         ("CUI:99999999\nCONT 123 Valuta\nTransfer;Atelier Nord;CUI:{}", False),  # ours only in a transaction
+        ("CUI:{}\nCUI:33333333", False),  # two firms named: nobody's, even uploaded for one of them
     ],
 )
 def test_a_pdf_names_the_firm_with_or_without_a_space_but_never_by_a_prefix(tmp_path, header, ours):
@@ -209,10 +210,10 @@ def test_a_pdf_names_the_firm_with_or_without_a_space_but_never_by_a_prefix(tmp_
     lines = [*header.format(companies.get("NORD").cui).split("\n"), "din 01/10/2026 - 31/10/2026"]
     pdf.write_bytes(text_pdf(lines))
     if ours:
-        assert statements.decrypt_to(pdf, tmp_path / "out", lambda _key: "", "NORD")[:2] == ("NORD", "2026-10")
+        assert statements.decrypt_to(pdf, tmp_path / "out", None, "NORD", plain=True)[:2] == ("NORD", "2026-10")
     else:
         with pytest.raises(statements.StatementError):
-            statements.decrypt_to(pdf, tmp_path / "out", lambda _key: "", "NORD")
+            statements.decrypt_to(pdf, tmp_path / "out", None, "NORD", plain=True)
 
 
 def test_the_holder_check_ends_where_the_parser_starts_an_account():

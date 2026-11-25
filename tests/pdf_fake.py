@@ -31,17 +31,34 @@ def text_pdf(lines: list[str], *, font: str = "Helvetica") -> bytes:
     return bytes(out)
 
 
-def bt_statement(path, cui: str, period: tuple[str, str], accounts, password: str = "synthetic"):
+def bt_statement(
+    path,
+    cui: str,
+    period: tuple[str, str],
+    accounts,
+    password: str | None = "synthetic",
+    pages=False,
+    final="same page",
+):
     """A synthetic encrypted BT statement PDF laid out as pdftotext reads BT's: the holder's CUI, the period
-    (dd/mm/yyyy, dd/mm/yyyy) and one section per account, (currency, iban, opening, lines), each line
-    (dd/mm/yyyy, reference, Decimal amount: below zero a debit)."""
+    (dd/mm/yyyy, dd/mm/yyyy) and one section per account, (currency, iban, opening, lines[, its own period printed
+    above it: (first, last), or (day,) with its number after it, as older daily statements print]), each line
+    (dd/mm/yyyy, reference, Decimal amount: below zero a debit). `password=None`: a plain PDF, as BT24 downloads.
+    `pages`: each section on a page of its own, as a statement of several months prints them. `final`: "next page"
+    prints the final balance after the page footer and the bank's info block, "missing" leaves it out."""
 
     def at(text: str, amount, end: int) -> str:  # an amount right-aligned under its column (Debit ends at 68)
         shown = f"{abs(amount):,.2f}"
         return text.ljust(end - len(shown)) + shown
 
-    lines = [f"CUI:{cui}", f"din {period[0]} - {period[1]}"]
-    for currency, iban, opening, moves in accounts:
+    sheets = [["BANCA TRANSILVANIA S.A.", f"CUI:{cui}"]]
+    if not accounts or len(accounts[0]) < 5:  # the file's period, unless each section prints its own
+        sheets[0] += [f"EXTRAS CONT Numarul: 6 din {period[0]} - {period[1]}"]
+    for n, (currency, iban, opening, moves, *own) in enumerate(accounts):
+        if pages and n:  # each month's statement printed whole: its own header first
+            sheets.append(["BANCA TRANSILVANIA S.A.", f"CUI:{cui}"])
+        lines = sheets[-1]
+        lines += [f"EXTRAS CONT Numarul: {(own + [6])[1]} din {' - '.join(own[0])}"] if own else []
         debit = sum((-a for *_, a in moves if a < 0), opening * 0)
         credit = sum((a for *_, a in moves if a > 0), opening * 0)
         lines += ["CONT 123 Valuta", f"{currency} Cod IBAN: {iban}"]
@@ -53,13 +70,22 @@ def bt_statement(path, cui: str, period: tuple[str, str], accounts, password: st
                 f"Plata;Synthetic Partner SRL;REF: {ref}",
             ]
         lines += [at(at(" " * 12 + "RULAJ TOTAL CONT", debit, 68), credit, 84)]
-        lines += [at(" " * 12 + "SOLD FINAL CONT", opening + credit - debit, 68)]
+        if final != "same page":  # the footer, then a new page: the bank's info block, no column header
+            lines += ["BANCA TRANSILVANIA S.A. - synthetic footer".ljust(80) + "4/5"]
+            sheets.append([" " * 30 + "BANCA TRANSILVANIA", " " * 30 + "Info clienti: 0800 000 000"])
+            lines = sheets[-1]
+            lines += [" " * 30 + "Tiparit: 2026-11-01 20:26:35", ""]
+        if final != "missing":
+            lines += [at(" " * 12 + "SOLD FINAL CONT", opening + credit - debit, 68)]
     with pikepdf.Pdf.new() as pdf:
-        page = pdf.add_blank_page(page_size=(612, 72 + 12 * len(lines)))
         font = pikepdf.Dictionary(Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1, BaseFont=pikepdf.Name.Courier)
-        page.Resources = pikepdf.Dictionary(Font=pikepdf.Dictionary(F1=pdf.make_indirect(font)))
-        top = 36 + 12 * len(lines)
-        text = f"BT /F1 10 Tf 12 TL 40 {top} Td " + " ".join("(" + ln + ") Tj T*" for ln in lines) + " ET"
-        page.Contents = pdf.make_stream(text.encode())
-        pdf.save(path, encryption=pikepdf.Encryption(owner="synthetic-owner", user=password, R=6))
+        font = pdf.make_indirect(font)
+        for lines in sheets:
+            page = pdf.add_blank_page(page_size=(612, 72 + 12 * len(lines)))
+            page.Resources = pikepdf.Dictionary(Font=pikepdf.Dictionary(F1=font))
+            top = 36 + 12 * len(lines)
+            text = f"BT /F1 10 Tf 12 TL 40 {top} Td " + " ".join("(" + ln + ") Tj T*" for ln in lines) + " ET"
+            page.Contents = pdf.make_stream(text.encode())
+        crypt = pikepdf.Encryption(owner="synthetic-owner", user=password, R=6) if password else False
+        pdf.save(path, encryption=crypt)
     return path
