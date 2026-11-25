@@ -414,16 +414,16 @@ def _open_credits(L: Ledger, st: statements.Statement) -> list[statements.Tx]:
 
 
 def _collect_singles(L: Ledger, pool: _Pool, st: statements.Statement, credits: list) -> list[str]:
-    first = {statements.tx_key(t): pool.candidates(t, ()) for t in credits}
-    # every statement line counts, even two that share a key (same day, amount and text, no bank reference)
-    claims = Counter(r["message_id"] for t in credits for r, _ in first[statements.tx_key(t)])
+    # per statement line, never per key: two lines may share one (same day, amount and text, other payers)
+    first = [pool.candidates(t, ()) for t in credits]
+    claims = Counter(r["message_id"] for c in first for r, _ in c)
     # accounts that show a client on a line of this statement are nobody's anonymous payment
     shown = {t.counterparty_iban for t in st.settlement_txs if t.counterparty_iban and pool.from_client(t)}
     done: list[str] = []
     # Unambiguous credits first, those showing their client, then those naming their invoice, then the rest: once
     # they collected theirs, a plain twin may fit a single one. A credit keeps the evidence it had at the start.
-    for t in sorted(credits, key=lambda t: (len(c := first[statements.tx_key(t)]) != 1, _rank(c))):
-        was = {r["message_id"]: how for r, how in first[statements.tx_key(t)]}
+    for i in sorted(range(len(credits)), key=lambda i: (len(first[i]) != 1, _rank(first[i]))):
+        t, was = credits[i], {r["message_id"]: how for r, how in first[i]}
         cands = [(r, how) for r, how in pool.candidates(t, done) if _kept(was.get(r["message_id"]), how)]
         if len(cands) != 1 or not pool.settles(cands[0][0]["message_id"]):
             continue
@@ -453,10 +453,10 @@ def _collect(L: Ledger, pool: _Pool, t: statements.Tx, rows: tuple, how: str, no
 
 
 def _not_a_payment(t: statements.Tx) -> bool:
-    """A card refund (a card number, or POS in the bank's text when the format drops the card) or the bank's own
+    """A card refund (a card number, or POS in the bank's text or booking title when the format drops the card) or the bank's own
     money: never a client's payment."""
     statements.classify_tx(t)
-    card = t.card_last4 or "POS" in re.split(r"[^A-Z]+", t.description.upper())
+    card = t.card_last4 or "POS" in re.split(r"[^A-Z]+", f"{t.title} {t.description}".upper())
     return bool(card) or t.category in (statements.BANK_FEE, statements.INTEREST)
 
 
@@ -488,11 +488,13 @@ class _Pool:
         here = [r for r in L.issued_rows(status=("collected",), company=company) if r["collected_tx"] in keys]
         self.rows = [*self.open, *here, *old]
         self.closed = {r["message_id"] for r in here}
-        self.known = [
-            (r["message_id"], _ident_re(r["number"]), number_of(r["number"]))
+        named = [
+            r
             for r in [*L.issued_rows(company=company), *old]
             if r["doc_type"] == "invoice" and r["status"] != "duplicate"
         ]
+        self.known = [(r["message_id"], _ident_re(r["number"]), number_of(r["number"])) for r in named]
+        self.numbers = {r["message_id"]: r["number"] or "" for r in named}
         self.accounts = client_accounts(L, company)
         self.clients = {
             (r["client_name"] or "", r["client_cui"] or "")
@@ -543,8 +545,8 @@ class _Pool:
         full identifier is on the credit, so 'NRD 0042' never also names 'STD 0042'."""
         desc = _norm(t.description)
         full = {mid for mid, rx, _ in self.known if rx and rx.search(desc)}
-        if full:
-            return full, True
+        if full:  # a number without a series ('10') may be a date or a quantity: it names, never by itself picks
+            return full, all(re.search(r"[A-Z]", _norm(self.numbers[m])) for m in full)
         by_digits = {
             mid for mid, _, digits in self.known if digits and re.search(rf"(?<!\d){digits}(?!\d)", t.description)
         }

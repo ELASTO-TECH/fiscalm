@@ -169,3 +169,9 @@ def test_an_mt940_is_imported_by_the_operator_and_through_an_upload(ledger, tmp_
 def test_the_transaction_type_tells_fees_and_interest(kind, category):
     lines = [f":61:2610251025D250,00{kind}NONREF//bank-1", ":86:?20Linie sintetica"]
     assert parse_mt940(block(lines=lines), "NORD").txs[0].category == category
+
+
+def test_the_booking_text_is_the_title_and_stays_out_of_the_key():
+    lines = [":61:2610251025C250,00NTRFNONREF//bank-1", ":86:?00POS refund?20Merchant refund"]
+    tx = parse_mt940(block(lines=lines, closing="C261031RON1250,00"), "NORD").txs[0]
+    assert (tx.title, tx.description) == ("POS refund", "Merchant refund")

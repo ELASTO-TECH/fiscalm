@@ -61,16 +61,18 @@ def _fields(block: str) -> list[tuple[str, str]]:
     return out
 
 
-def _details(text: str) -> tuple[str, str, str]:
-    """(description, counterparty name, counterparty IBAN) from a :86: field, structured (?20..?33) or free."""
+def _details(text: str) -> tuple[str, str, str, str]:
+    """(description, counterparty name, counterparty IBAN, booking text ?00) from a :86: field, structured
+    (?00..?33) or free. The booking text ('POS refund') stays out of the description, which keys the line."""
     flat = text.replace("\r", "").replace("\n", "")
     if re.match(r"^\d{3}\?", flat) or flat.startswith("?"):
         parts = dict((m[1], m[2]) for m in re.finditer(r"\?(\d{2})([^?]*)", flat))
         desc = " ".join(parts[k] for k in sorted(parts) if "20" <= k <= "29" or "60" <= k <= "63").strip()
         name = (parts.get("32", "") + parts.get("33", "")).strip()
         iban = re.sub(r"\s+", "", parts.get("31", "")).upper()
-        return desc, name, iban if re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{8,30}", iban) else ""
-    return re.sub(r"\s+", " ", text).strip(), "", ""
+        iban = iban if re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{8,30}", iban) else ""
+        return desc, name, iban, parts.get("00", "").strip()
+    return re.sub(r"\s+", " ", text).strip(), "", "", ""
 
 
 def parse_mt940(data: bytes, company: str = "") -> Statement:
@@ -146,10 +148,12 @@ def _transactions(f: list[tuple[str, str]], iban: str, currency: str) -> list[Tx
             raise StatementError("MT940 zero amount refused")
         refs = (m[7] or "").split("\n")[0].strip()
         info = f[i + 1][1] if i + 1 < len(f) and f[i + 1][0] == "86" else ""
-        desc, name, other = _details(info)
+        desc, name, other, booked = _details(info)
         tx = Tx(
             date=booking,
-            title=desc[:80],  # the :61: type (NTRF, NCHG) is a SWIFT booking code, never a name; it sets `category`
+            title=(booked or desc)[
+                :80
+            ],  # the :61: type (NTRF, NCHG) is a SWIFT booking code, never a name; it sets `category`
             description=desc,
             direction="credit" if m[3] == "C" else "debit",
             amount=amount,

@@ -304,6 +304,10 @@ def test_two_credits_of_one_amount_collect_nothing_by_amount(ledger, home, sec, 
     b = _credit("1190.00", date(2026, 10, 21), counterparty="OMEGA", iban=OTHER_IBAN, desc="y")
     assert issued.match_statement(ledger, _st(a, b)) == []
     assert issued.match_statement(ledger, _st(a, a)) == []  # two lines alike (one key) are two credits too
+    _stored(ledger, monkeypatch, **{"7002": ubl(number="NRD 0043", total="5.00", client="GAMMA LABS SRL")})
+    gamma = _credit("1190.00", date(2026, 10, 20), counterparty="GAMMA LABS SRL", iban=OTHER_IBAN, desc="x")
+    assert statements.tx_key(gamma) == statements.tx_key(a)  # another payer on a line keyed like a's
+    assert issued.match_statement(ledger, _st(a, gamma, b)) == []  # a and b still both claim it
     assert issued.match_statement(ledger, _st(a, _credit("1190.00", date(2026, 10, 22)))) == ["7001"]  # the client's
     assert "name" in ledger.issued("7001")["collected_note"]
 
@@ -333,9 +337,17 @@ def test_an_account_shown_on_the_statement_pays_no_one_else_by_amount(ledger, ho
     assert issued.match_statement(ledger, _st(partial, abbreviated)) == []  # its partial payment showed Beta
 
 
-@pytest.mark.parametrize("desc,collected", [("comanda 0042", []), ("NRD 0042 si NRD 0043", []), ("NRD 0042", ["7001"])])
-def test_only_one_whole_identifier_picks_among_amount_twins(ledger, home, sec, monkeypatch, desc, collected):
-    _stored(ledger, monkeypatch, **{"7001": ubl(), "7002": ubl(number="NRD 0043", client="GAMMA SRL")})
+@pytest.mark.parametrize(
+    "numbers,desc,collected",
+    [
+        (("NRD 0042", "NRD 0043"), "comanda 0042", []),
+        (("NRD 0042", "NRD 0043"), "NRD 0042 si NRD 0043", []),
+        (("NRD 0042", "NRD 0043"), "NRD 0042", ["7001"]),
+        (("10", "99"), "servicii 2026-10-20", []),  # a date is no invoice number
+    ],
+)
+def test_only_one_whole_identifier_picks_among_amount_twins(ledger, home, sec, monkeypatch, numbers, desc, collected):
+    _stored(ledger, monkeypatch, **{"7001": ubl(number=numbers[0]), "7002": ubl(number=numbers[1], client="GAMMA SRL")})
     anonymous = _credit("1190.00", date(2026, 10, 21), counterparty="Y", iban="", desc="plata")
     named = _credit("1190.00", date(2026, 10, 20), counterparty="NEW PAYER", iban=OTHER_IBAN, desc=desc)
     assert issued.match_statement(ledger, _st(anonymous, named)) == collected
@@ -382,7 +394,8 @@ def test_wrong_client_amount_debit_or_own_transfer_never_collects(ledger, home, 
     other = _credit("1190.00", date(2026, 10, 20), counterparty="DELTA SOFTWARE SRL", iban=OTHER_IBAN, desc="servicii")
     card_refund = _credit("1190.00", date(2026, 10, 20), counterparty="BETA SOFTWARE SRL", iban="", desc="RETUR")
     card_refund.card_last4 = "4242"
-    pos = _credit("1190.00", date(2026, 10, 20), counterparty="", iban="", desc="POS refund")  # MT940 drops the card
+    pos = _credit("1190.00", date(2026, 10, 20), counterparty="", iban="", desc="Merchant refund")  # MT940: no card
+    pos.title = "POS refund"  # its ?00 booking text
     amount = _credit("1189.99", date(2026, 10, 20))
     early = _credit("1190.00", date(2026, 9, 1))
     debit = _credit("1190.00", date(2026, 10, 20))
