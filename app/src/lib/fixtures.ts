@@ -173,12 +173,13 @@ function fixtureProposed(s: State, t: Transaction): TransactionInvoiceChoice[] {
     total: r.total, currency: r.currency || "RON", partner: r.partner, selected: false, position });
   if (r && paid && cents(paid) === cents(r.left)) return [pick(r, 0)];
   // else the AI integration's invoices, while all are open, in one currency, and what is left of them is the amount
-  const ids = t.explanation || t.proposal?.kind !== "ai" ? [] : t.proposal.invoices;
+  const ai = !t.explanation && t.proposal?.kind === "ai" ? t.proposal : undefined, ids = ai?.invoices ?? [];
   const rows = ids.flatMap((id) => source.filter((x) => x.id === id && (x.status === "open" || x.status === "marked") && cents(x.left) > 0n));
   const cur = new Set(rows.map((x) => x.currency || "RON")), one = cur.size === 1 ? [...cur][0] : "";
   const due = t.currency === one ? t.amount : t.orig?.currency === one ? t.orig.amount : null;
   const sum = rows.reduce((n, x) => n + cents(x.left), 0n);
-  return ids.length && rows.length === ids.length && due && sum === cents(due.replace("-", "")) ? rows.map(pick) : [];
+  const theirs = rows.every((x) => x.partner === ai?.as.partner);
+  return ids.length && rows.length === ids.length && theirs && due && sum === cents(due.replace("-", "")) ? rows.map(pick) : [];
 }
 
 const textOrder = (a: string, b: string) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0;

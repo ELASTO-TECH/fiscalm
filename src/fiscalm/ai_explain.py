@@ -91,7 +91,7 @@ def explain(L: Ledger, company: str, full: dict, ask: Callable | None = None) ->
 
 def _prompt(full: dict, rows: list[dict], lines: list[dict]) -> str:
     def line(r: dict) -> dict:
-        keep = ("id", "date", "direction", "amount", "currency", "counterparty", "details", "card")
+        keep = ("id", "date", "direction", "amount", "currency", "orig", "counterparty", "details", "card")
         return {k: r.get(k) for k in keep}
 
     def invoice(r: dict, kind: str) -> dict:

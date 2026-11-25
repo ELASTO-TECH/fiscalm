@@ -139,8 +139,10 @@ def proposed(full: dict, tx: dict) -> list[dict]:
 
 
 def _guessed(full: dict, tx: dict) -> list[dict]:
+    """The AI proposal's invoices (ai_explain) while they still add up and are all still its partner's."""
     p = tx.get("proposal") or {}
-    return exactly(full, tx, p.get("invoices", [])) if p.get("kind") == "ai" else []
+    picks = exactly(full, tx, p.get("invoices", [])) if p.get("kind") == "ai" else []
+    return picks if all(r["partner"] == p["as"]["partner"] for r in picks) else []
 
 
 def exactly(full: dict, tx: dict, ids: list[str]) -> list[dict]:

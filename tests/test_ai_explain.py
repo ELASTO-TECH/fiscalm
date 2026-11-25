@@ -89,6 +89,9 @@ def test_a_sure_label_is_applied_only_where_no_open_document_fits_and_the_rest_w
     full = api.state(ledger, "NORD")
     offer = transaction_choices.project(full, {"id": payer})["pages"]["proposed"]["data"]
     assert [r["id"] for r in offer] == ["101", "102"]
+    stale = ledger.ai_proposals("NORD")[payer] | {"partner": "p-other"}  # the invoices are now another partner's
+    ledger.keep_ai_proposals("NORD", {payer: stale})
+    assert transaction_choices.project(api.state(ledger, "NORD"), {"id": payer})["pages"]["proposed"]["data"] == []
     assert (
         ledger.issued("101")["status"] == "open"
         and ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 1
