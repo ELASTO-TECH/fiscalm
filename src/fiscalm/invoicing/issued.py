@@ -524,8 +524,7 @@ def _sets(mine: list, names: set[str], kind: str) -> list[tuple]:
     if names:
         named = tuple(c for c in mine if c[0]["message_id"] in names)
         return [named] if kind == "series" and len(named) == len(names) else []
-    most = min(BATCH_MAX, len(mine)) if len(mine) <= BATCH_SCAN else 0
-    sets = [c for k in range(2, most + 1) for c in combinations(mine, k)]
+    sets = [c for k in range(2, min(BATCH_MAX, len(mine)) + 1) for c in combinations(mine, k)]
     return sets + ([tuple(mine)] if len(mine) > BATCH_MAX else [])
 
 
@@ -536,10 +535,17 @@ def _full_tax_id(r) -> str:
     return (full[2:] if re.fullmatch(r"RO\d+", full) else full) or tax_token(r["client_cui"]) or ""
 
 
+def _bare_cui_on(cui: str, text: str) -> bool:
+    """A Romanian CUI written alone or as RO<cui>, never inside another country's VAT id ('DE<cui>')."""
+    return len(cui) >= 6 and re.search(rf"(?<![A-Z0-9])(?:RO)?{cui}(?!\d)", text.upper()) is not None
+
+
 def _client_key(r) -> str:
-    """The client an invoice is for: its firm's full tax id, or a private buyer's name."""
-    if not firm_id(tax_token(r["client_cui"])):
-        return "name:" + " ".join(efactura.firm_core(r["client_name"]))
+    """The client an invoice is for: its firm's full tax id, or a private buyer's name and personal id if any."""
+    token = tax_token(r["client_cui"]) or ""
+    if not firm_id(token):
+        personal = "" if re.fullmatch(r"0*", token) else f"|{token}"
+        return "name:" + " ".join(efactura.firm_core(r["client_name"])) + personal
     return "tax:" + _full_tax_id(r)
 
 
@@ -624,7 +630,7 @@ class _Pool:
                 # the account, and also the words: a known account never hides another client named on the line
                 if credit_from_client(self.L, self.company, name, cui, t, accounts=self.accounts) == "iban"
                 or same_firm(name, t.counterparty)
-                or (_cui_on(tax_token(cui), said) and (full.isdigit() or full in text))
+                or (full in text if not full.isdigit() else _bare_cui_on(full, said))
             }
         return self._who[id(t)]
 
@@ -639,7 +645,10 @@ class _Pool:
         credit shows no client or several, or names an invoice of a known series that the firm doesn't have."""
         if _not_a_payment(t) or self.unknown_ref(t) or not (mine := self.of_client(t, done)):
             return None
-        exact = [c for c in _sets(mine, *self.named(t)) if len(c) > 1 and sum(self.owed(r) for r, _ in c) == t.amount]
+        names, kind = self.named(t)
+        if not names and len(mine) > BATCH_SCAN:  # not searched: it competes for every invoice, never settles
+            return [tuple(r for r, _ in mine)] * 2, mine[0][1], _client_key(mine[0][0])
+        exact = [c for c in _sets(mine, names, kind) if len(c) > 1 and sum(self.owed(r) for r, _ in c) == t.amount]
         sets = [tuple(r for r, _ in c) for c in exact]
         if len(sets) == 1 and not all(self.settles(r["message_id"]) and r["status"] == "open" for r in sets[0]):
             sets = sets * 2  # a rival in the only set: it competes, never settles

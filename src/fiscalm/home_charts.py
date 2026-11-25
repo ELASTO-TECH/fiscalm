@@ -288,9 +288,16 @@ def _allocations(tx: dict, found: dict, reports: dict) -> list:
     if e.get("settlement") in reports:
         return [(p["invoice"], Decimal(p["gross"])) for p in reports[e["settlement"]]["lines"]]
     ids = e.get("issued", []) if e["kind"] == "collection" else e.get("invoices", [])
-    if len(ids) == 1 and ids[0] in found:
+    if ids and all(i in found for i in ids):  # one credit, one invoice or one exact set: the bank amount once
         amount = _bank_amount(tx, found[ids[0]])
-        return [(ids[0], amount)] if amount is not None else []
+        nets = [_net(found[i]) for i in ids]
+        if amount is None:
+            return []
+        return (
+            list(zip(ids, nets, strict=True))
+            if sum(nets) == amount
+            else [(ids[0], amount), *((i, Decimal(0)) for i in ids[1:])]
+        )
     return []
 
 

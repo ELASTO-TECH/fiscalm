@@ -451,6 +451,9 @@ def _gamma(mid, number, total):
         ("an unknown reference with digits in its series", []),
         ("an account showing another client at any amount", []),
         ("a foreign vat id of another firm", []),
+        ("a foreign vat id with a romanian cui's digits", []),
+        ("two private buyers one name", []),
+        ("a competing credit over the scan limit", []),
     ],
 )
 def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec, monkeypatch, case, collected):
@@ -501,6 +504,19 @@ def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec,
         _stored(ledger, monkeypatch, **de | at)
         assert ledger.mark_issued_collected("7003", "statement", "tx-earlier")
         credits = [c("1000.00", "AT123456789", counterparty="AUSTRIA FIRMA GMBH", iban=OTHER_IBAN)]
+    elif case == "a foreign vat id with a romanian cui's digits":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+        credits = [c("1000.00", "DE66666666", counterparty="AUSLAND GMBH", iban=OTHER_IBAN)]
+    elif case == "two private buyers one name":
+        cnp = {"7001": ("1800101000001", "400.00"), "7002": ("2800101000002", "600.00")}
+        people = {
+            m: ubl(number=f"NRD 00{m[-2:]}", total=t, client="ION POPESCU", client_cui=p) for m, (p, t) in cnp.items()
+        }
+        _stored(ledger, monkeypatch, **people)
+        credits = [c("1000.00", counterparty="ION POPESCU")]
+    elif case == "a competing credit over the scan limit":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00", *["2000.00"] * 19))
+        credits = [c("1000.00", "NRD 0050 NRD 0051"), c("1000.00", "y")]
     else:
         b2b = {"7001": "400.00", "7002": "600.00"}
         _stored(ledger, monkeypatch, **{m: ubl(number=f"B2B-00{m[-2:]}", total=t) for m, t in b2b.items()})
