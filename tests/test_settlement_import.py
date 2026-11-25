@@ -780,7 +780,6 @@ def test_mailed_payer_is_decided_again_under_the_write_lock(ledger, mail_account
     mail.add_attachment(header + b"TEST-7;100,00;2,00\n", "text", "csv", filename="r.csv")
     msg = imap.parse(mail_account["id"], bytes(mail), date.today())
     assert settlement_from_mail(ledger, msg) == "settlement:refused:1"
-    assert bank_upload._mailed_date(ledger, "NORD", "gone", "gone", [["Data"], ["01.10.2026"]]) == ""  # deleted
 
 
 def settlement_from_mail(L, msg):
@@ -801,6 +800,7 @@ def test_an_unreadable_workbook_never_stops_the_mails_invoices(ledger, mail_acco
     for bad in (bytes(broken), bytes(damaged)):
         with pytest.raises(ReportError):
             table(bad, "xlsx")
+    assert bank_upload._mailed_date(ledger, "NORD", "gone", "gone", [["Data"], ["01.10.2026"]]) == ""  # deleted
     described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
     bank_upload.accept_report(
         ledger, "NORD", b"Factura;Ramburs;Comision\nT;1,00;0\n", "text/csv", description=described, **UPLOAD
