@@ -333,7 +333,7 @@ describe("Firme", () => {
       ? pending.promise : json({ ok: true, message: "", state: null, done: { offers: [] } })) });
     await userEvent.click(p.getByRole("button", { name: "Modifică NORD" }));
     const closed = within(p.getByRole("list", { name: "Conturi închise" }));
-    expect(closed.getByText("deschis din 03.2024, închis pe 31.10.2026")).toBeInTheDocument();
+    expect(closed.getByText("Altă bancă, deschis din 03.2024, închis pe 31.10.2026")).toBeInTheDocument();
     await userEvent.click(closed.getByText("Date cont"));
     const form = within(p.getByRole("form", { name: "Datele contului EUR ••••0002" }));
     expect(form.getByRole("button", { name: "Salvează datele" })).toBeDisabled(); // nothing changed yet
@@ -344,10 +344,15 @@ describe("Firme", () => {
     // the closing day it didn't touch stays out: another person's change to it is never undone
     await waitFor(() => expect(saved()).toEqual([{ url: "/web/api/company-account-dates", method: "POST",
       body: { key: "NORD", account: "acc2", opened: "2024-03-14" } }]));
-    // until the answer and the dates read again, nothing can be typed that the refreshed form would drop
-    expect(form.getByLabelText("Închis pe")).toHaveAttribute("readonly");
-    expect(form.getByLabelText(/Deschis din/)).toHaveAttribute("readonly");
+    // a day typed while the answer is on its way is kept; the field saved shows the engine's date again (here the
+    // list read again still says 03.2024, as another person may have set it meanwhile) and stays editable
+    await userEvent.clear(form.getByLabelText("Închis pe"));
+    await userEvent.type(form.getByLabelText("Închis pe"), "2026-10-30");
     await act(async () => pending.resolve(await answer({ key: "NORD", iban_last4: "0002", opened: "2024-03-14", retired: "2026-10-31" }, "Datele contului au fost salvate.")));
+    await waitFor(() => expect(form.getByLabelText(/Deschis din/)).toHaveValue("2024-03"));
+    expect(form.getByLabelText(/Deschis din/)).not.toHaveAttribute("readonly");
+    expect(form.getByLabelText("Închis pe")).toHaveValue("2026-10-30");
+    expect(form.getByRole("button", { name: "Salvează datele" })).toBeEnabled();
   });
 
   it("lists a firm in one row with one button, and sets a bank's statement password write-only in its Bănci", async () => {

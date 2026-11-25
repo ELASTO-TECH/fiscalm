@@ -467,54 +467,55 @@ function datesLine(a: CompanyAccount): string {
 
 /** One account in Bănci și conturi: its currency and last digits, its dates, whether payments leave from it, Date cont. */
 function AccountRow({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; reload: () => void }) {
+  // a closed account is listed with the others closed, whatever its bank: the bank tells two alike apart
+  const line = [a.retired ? a.bank_name || "Altă bancă" : "", datesLine(a)].filter(Boolean).join(", ");
   return (
     <li className="flex flex-wrap items-center gap-2 border-0 border-t border-solid border-line py-2 text-sm first:border-t-0">
       <span className={`mr-auto ${a.retired ? "text-muted" : ""}`}>
-        {a.currency} ••••{a.iban_last4}{datesLine(a) ? <small className="block text-xs text-muted">{datesLine(a)}</small> : null}
+        {a.currency} ••••{a.iban_last4}{line ? <small className="block text-xs text-muted">{line}</small> : null}
       </span>
       {a.pays ? <span className={`rounded-badge px-1.5 py-0.5 text-xs font-medium ${statePillStyle.ok}`}>Plățile pleacă de aici</span> : null}
-      {/* keyed on the dates read: the editor starts again from them when they change */}
-      <AccountDates key={`${a.opened ?? ""}|${a.retired ?? ""}`} c={c} a={a} reload={reload} />
+      <AccountDates c={c} a={a} reload={reload} />
     </li>
   );
 }
 
-/** Date cont: the month or day an account opened and the day it closed ("" forgets one). Only a date the person
- * changed is sent: the other keeps what the engine has, so a form shown before another person's change never undoes
- * it; the form starts again from the dates read whenever they change. The engine checks both: an account can't open after it
- * closed, closes only on a day already past or today, and the one payment files debit closes only once another takes
- * its place. A statement of a month the account wasn't open doesn't owe it. */
+/** Date cont: the month or day an account opened and the day it closed ("" forgets one). A field nobody touched shows
+ * the date the engine has and is never sent, so a form shown before another person's change never undoes it; a
+ * touched one sends what it holds. After a save a field shows the engine's date again, unless it was typed in since.
+ * The engine checks both: an account can't open after it closed, closes only on a day already past or today, and the
+ * one payment files debit closes only once another takes its place. A statement of a month the account wasn't open
+ * doesn't owe it. */
 function AccountDates({ c, a, reload }: { c: CompanyEntry; a: CompanyAccount; reload: () => void }) {
   const { busy } = useApp();
   const send = useSend(reload);
-  const [opened, setOpened] = useState(a.opened ?? "");
-  const [retired, setRetired] = useState(a.retired ?? "");
-  // locked from the save until the dates read again remount the form (or the engine refuses): nothing typed meanwhile
-  // is lost
-  const [saving, setSaving] = useState(false);
+  const [opened, setOpened] = useState<string | null>(null); // null: untouched, show the engine's
+  const [retired, setRetired] = useState<string | null>(null);
   const id = `dates-${c.key}-${a.id}`;
   const changed: Record<string, string> = {
-    ...(opened.trim() !== (a.opened ?? "") ? { opened: opened.trim() } : {}),
-    ...(retired !== (a.retired ?? "") ? { retired } : {}),
+    ...(opened !== null && opened.trim() !== (a.opened ?? "") ? { opened: opened.trim() } : {}),
+    ...(retired !== null && retired !== (a.retired ?? "") ? { retired } : {}),
   };
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    if (busy || saving || !Object.keys(changed).length) return;
-    setSaving(true);
-    const r = await send("company-account-dates", { key: c.key, account: a.id, ...changed });
-    if (!r?.ok) setSaving(false);
+    const sent = changed;
+    if (busy || !Object.keys(sent).length) return;
+    const r = await send("company-account-dates", { key: c.key, account: a.id, ...sent });
+    if (!r?.ok) return;
+    setOpened((v) => (v !== null && v.trim() === sent.opened ? null : v)); // typed in since: kept
+    setRetired((v) => (v !== null && v === sent.retired ? null : v));
   };
   return (
     <details className="basis-full">
       <Summary>Date cont</Summary>
       <Form className="mt-2" onSubmit={save} aria-label={`Datele contului ${a.currency} ••••${a.iban_last4}`}>
         <Label htmlFor={`${id}-opened`}>Deschis din (luna AAAA-LL sau ziua AAAA-LL-ZZ)</Label>
-        <Input id={`${id}-opened`} value={opened} onChange={(e) => setOpened(e.target.value)} autoComplete="off" readOnly={saving}
+        <Input id={`${id}-opened`} value={opened ?? a.opened ?? ""} onChange={(e) => setOpened(e.target.value)} autoComplete="off"
           maxLength={10} placeholder="2024-03" />
         <Label htmlFor={`${id}-retired`}>Închis pe</Label>
-        <Input id={`${id}-retired`} type="date" value={retired} onChange={(e) => setRetired(e.target.value)} readOnly={saving} />
+        <Input id={`${id}-retired`} type="date" value={retired ?? a.retired ?? ""} onChange={(e) => setRetired(e.target.value)} />
         <Actions>
-          <Button type="submit" className="btn g" disabled={busy || saving || !Object.keys(changed).length}>Salvează datele</Button>
+          <Button type="submit" className="btn g" disabled={busy || !Object.keys(changed).length}>Salvează datele</Button>
         </Actions>
       </Form>
     </details>
