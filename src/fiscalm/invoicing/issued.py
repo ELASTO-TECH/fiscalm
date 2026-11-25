@@ -544,15 +544,7 @@ class _Pool:
         here = [r for r in L.issued_rows(status=("collected",), company=company) if r["collected_tx"] in keys]
         self.rows = [*self.open, *here, *old]
         self.closed = {r["message_id"] for r in here}
-        named = [
-            r
-            for r in [*L.issued_rows(company=company), *old]
-            if r["doc_type"] == "invoice" and r["status"] != "duplicate"
-        ]
-        self.known = [(r["message_id"], _ident_re(r["number"]), number_of(r["number"])) for r in named]
-        self.numbers = {r["message_id"]: r["number"] or "" for r in named}
-        self.series_refs = {(m[1], int(m[2])) for n in self.numbers.values() if (m := _SERIES_REF.fullmatch(_norm(n)))}
-        self.series = {s for s, _ in self.series_refs}
+        self._numbers([*L.issued_rows(company=company), *old])
         self.accounts = client_accounts(L, company)
         self.clients = {
             (r["client_name"] or "", r["client_cui"] or "")
@@ -560,6 +552,14 @@ class _Pool:
             if r["doc_type"] == "invoice"
         }
         self._from_client: dict[int, bool] = {}
+
+    def _numbers(self, rows: list) -> None:
+        """Every invoice number a credit may name: whole identifiers, digits, and the firm's series."""
+        named = [r for r in rows if r["doc_type"] == "invoice" and r["status"] != "duplicate"]
+        self.known = [(r["message_id"], _ident_re(r["number"]), number_of(r["number"])) for r in named]
+        self.numbers = {r["message_id"]: r["number"] or "" for r in named}
+        self.series_refs = {(m[1], int(m[2])) for n in self.numbers.values() if (m := _SERIES_REF.fullmatch(_norm(n)))}
+        self.series = {s for s, _ in self.series_refs}
 
     def owed(self, r) -> Decimal:
         mid = r["message_id"]
@@ -600,8 +600,17 @@ class _Pool:
         with how the credit shows the client and who the client is. A set settles only when it is the only one and
         all of it is open (never marked, history, partly linked or collected by this statement). None when the
         credit shows no client or several, or names an invoice of a known series that the firm doesn't have."""
-        if _not_a_payment(t) or self.unknown_ref(t):
+        if _not_a_payment(t) or self.unknown_ref(t) or not (mine := self.of_client(t, done)):
             return None
+        exact = [c for c in _sets(mine, *self.named(t)) if len(c) > 1 and sum(self.owed(r) for r, _ in c) == t.amount]
+        sets = [tuple(r for r, _ in c) for c in exact]
+        if len(sets) == 1 and not all(self.settles(r["message_id"]) and r["status"] == "open" for r in sets[0]):
+            sets = sets * 2  # a rival in the only set: it competes, never settles
+        return (sets, mine[0][1], _client_key(mine[0][0])) if sets else None
+
+    def of_client(self, t: statements.Tx, done) -> list[tuple]:
+        """(invoice, how) for every invoice in the credit's currency and window of the one client it shows; none
+        when it shows no client or several."""
         mine = [
             (r, how)
             for r in self.rows
@@ -610,13 +619,7 @@ class _Pool:
             and _in_window(r, t)
             and (how := self.client_of(r, t))
         ]
-        if len({_client_key(r) for r, _ in mine}) != 1:
-            return None
-        exact = [c for c in _sets(mine, *self.named(t)) if len(c) > 1 and sum(self.owed(r) for r, _ in c) == t.amount]
-        sets = [tuple(r for r, _ in c) for c in exact]
-        if len(sets) == 1 and not all(self.settles(r["message_id"]) and r["status"] == "open" for r in sets[0]):
-            sets = sets * 2  # a rival in the only set: it competes, never settles
-        return (sets, mine[0][1], _client_key(mine[0][0])) if sets else None
+        return mine if len({_client_key(r) for r, _ in mine}) == 1 else []
 
     def unknown_ref(self, t: statements.Tx) -> bool:
         """The credit names an invoice of one of the firm's series ('NRD 0099') that the firm doesn't have (yet)."""
