@@ -301,7 +301,9 @@ def add_invoices(
     file_id: int | None = None,
     name: str | None = None,
     approve_invoice: Callable,
+    accounts: dict[str, str] | None = None,
 ) -> int:
+    """`accounts`: the IBAN a person picked for an invoice listing several (efactura.approve's `account`)."""
     with pay_lock(), ledger.tx():
         if file_id is None:
             file_id = ledger.create_payment_file(company, name or "")
@@ -314,7 +316,8 @@ def add_invoices(
             row = ledger.efactura(mid)
             if not row or row["company"] != company:
                 raise FileRefusal("Factura nu aparține firmei.")
-            item = approve_invoice(ledger, mid, origin="person", unfiled=True)["item_id"]
+            account = (accounts or {}).get(mid)
+            item = approve_invoice(ledger, mid, origin="person", unfiled=True, account=account)["item_id"]
             if not ledger.attach_payment_file(file_id, company, item, origin="person"):
                 raise FileRefusal("Factura este deja într-un fișier sau s-a schimbat.")
         return file_id

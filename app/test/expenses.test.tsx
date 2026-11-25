@@ -474,6 +474,22 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
       { action: "payment_file_create", co: "NORD", name: "Furnizori noiembrie", invoice_ids: ["102"] }]));
   });
 
+  it("asks which account to pay for an invoice listing several, and sends the pick with the invoice", async () => {
+    const s = withFiles();
+    const telecom = s.invoices.find((r) => r.supplier === "Telecom Rapid SRL")!;
+    telecom.accounts = [{ index: 0, bank: "BTRL", last4: "2222" }, { index: 2, bank: "INGB", last4: "1111" }];
+    const api = await choose("open", { state: () => json(s), onPost: ok(s) });
+    await userEvent.click(box("Telecom Rapid SRL"));
+    await put();
+    const dialog = await chooser();
+    const send = within(dialog).getByRole("button", { name: "Pune în fișier" });
+    expect(send).toBeDisabled(); // nothing is guessed
+    await userEvent.click(within(dialog).getByRole("radio", { name: "INGB •••• 1111" }));
+    await userEvent.click(send);
+    await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
+      { action: "payment_file_add", file_id: 9, invoice_ids: [telecom.id], accounts: { [telecom.id]: 2 } }]));
+  });
+
   it("asks again when the chosen file is imported elsewhere meanwhile, and sends nothing until then", async () => {
     let s = withFiles();
     const api = await choose("open", { state: () => json(s), onPost: ok(s) });

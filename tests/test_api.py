@@ -92,6 +92,7 @@ TOP = {
 INVOICE = {
     "payment_file",
     "previous_iban_last4",
+    "accounts",
     "paid_method",
     "paid_detail",
     "credits",

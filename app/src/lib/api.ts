@@ -273,8 +273,8 @@ export function docFile(co: Co, f: DocFile, png = false): string {
 /** The payment files' own actions (POST payment-files): exact bodies, the firm resolved by the engine from the file, so only
  * `payment_file_create` names it (docs/openapi.json). */
 export type FileAction =
-  | { action: "payment_file_add"; file_id: number; invoice_ids: string[] }
-  | { action: "payment_file_create"; co: Co; name: string; invoice_ids: string[] }
+  | { action: "payment_file_add"; file_id: number; invoice_ids: string[]; accounts?: Record<string, number> }
+  | { action: "payment_file_create"; co: Co; name: string; invoice_ids: string[]; accounts?: Record<string, number> }
   | { action: "payment_file_rename"; file_id: number; name: string }
   | { action: "payment_file_remove"; file_id: number; payment_id: string }
   | { action: "payment_file_delete"; file_id: number }

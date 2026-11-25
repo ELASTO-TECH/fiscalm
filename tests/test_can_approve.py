@@ -67,7 +67,7 @@ def test_each_refusal_disables_approval_everywhere(ledger, home, monkeypatch, co
     go_live(home)
     REFUSING[code](ledger, monkeypatch)
     assert efactura.payment_refusal(ledger, ledger.efactura("3001")).code == code
-    assert _can_approve(ledger) == (False, False)
+    assert _can_approve(ledger) == ((True, True) if code == "several_ibans" else (False, False))  # a person picks
     unrecorded = api.state(ledger, "NORD")["refused"]
     assert unrecorded == []
     ledger.set_meta("efactura_autopay_refused:3001", "stored before; the reason shown is the current one")
@@ -210,3 +210,24 @@ def test_a_credit_note_still_refuses_an_original_whose_due_date_is_unreadable(le
     _credited(ledger, monkeypatch, note_due)
     assert json.loads(ledger.efactura("3001")["issues"])
     assert efactura.payment_refusal(ledger, ledger.efactura("3001")).code == "credited"
+
+
+def test_a_person_picks_one_of_several_unproved_accounts_and_fiscalm_remembers_it_once_paid(ledger, home, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(), "3002": ubl(number="X2")})
+    for mid in ("3001", "3002"):
+        _set(ledger, "ibans=?,supplier_iban=?", json.dumps([OTHER_IBAN, SUPPLIER_IBAN]), OTHER_IBAN, mid=mid)
+    invoice = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]
+    assert invoice["can_approve"] and invoice["accounts"] == [
+        {"index": 0, "bank": OTHER_IBAN[4:8], "last4": OTHER_IBAN[-4:]},
+        {"index": 1, "bank": SUPPLIER_IBAN[4:8], "last4": SUPPLIER_IBAN[-4:]},
+    ]
+    for picks in ({}, {"3001": 2}, {"3001": True}, {"3002": 1}):
+        body = {"name": "Picked", "invoice_ids": ["3001"], "accounts": picks}
+        assert actions.act("payment_file_create", "NORD", body)["ok"] is False
+    body = {"name": "Picked", "invoice_ids": ["3001"], "accounts": {"3001": 1}}
+    assert actions.act("payment_file_create", "NORD", body)["ok"] is True
+    item = ledger.efactura("3001")["item_id"]
+    assert ledger.payment(item)["payee_iban"] == SUPPLIER_IBAN
+    assert efactura.payment_refusal(ledger, ledger.efactura("3002")).code == "several_ibans"
+    ledger.mark_paid(item, "statement", "synthetic-debit")  # a statement proves the picked account
+    assert efactura.payment_item(ledger, "3002").payee_iban == SUPPLIER_IBAN

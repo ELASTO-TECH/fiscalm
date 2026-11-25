@@ -10686,6 +10686,28 @@
               "type": "string"
             }
           },
+          "accounts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "bank": {
+                  "type": "string"
+                },
+                "last4": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "index",
+                "bank",
+                "last4"
+              ]
+            }
+          },
           "overdue": {
             "type": "boolean"
           },
@@ -10745,6 +10767,7 @@
           "covered",
           "left",
           "previous_iban_last4",
+          "accounts",
           "overdue",
           "can_approve",
           "can_mark_paid",
@@ -12786,6 +12809,28 @@
                     "type": "string"
                   }
                 },
+                "accounts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "index": {
+                        "type": "integer"
+                      },
+                      "bank": {
+                        "type": "string"
+                      },
+                      "last4": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "index",
+                      "bank",
+                      "last4"
+                    ]
+                  }
+                },
                 "overdue": {
                   "type": "boolean"
                 },
@@ -12847,6 +12892,7 @@
                 "covered",
                 "left",
                 "previous_iban_last4",
+                "accounts",
                 "overdue",
                 "can_approve",
                 "can_mark_paid",
@@ -17079,6 +17125,28 @@
                                 "type": "string"
                               }
                             },
+                            "accounts": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "index": {
+                                    "type": "integer"
+                                  },
+                                  "bank": {
+                                    "type": "string"
+                                  },
+                                  "last4": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "index",
+                                  "bank",
+                                  "last4"
+                                ]
+                              }
+                            },
                             "overdue": {
                               "type": "boolean"
                             },
@@ -17140,6 +17208,7 @@
                             "covered",
                             "left",
                             "previous_iban_last4",
+                            "accounts",
                             "overdue",
                             "can_approve",
                             "can_mark_paid",
@@ -17571,6 +17640,28 @@
                                         "type": "string"
                                       }
                                     },
+                                    "accounts": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "index": {
+                                            "type": "integer"
+                                          },
+                                          "bank": {
+                                            "type": "string"
+                                          },
+                                          "last4": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "index",
+                                          "bank",
+                                          "last4"
+                                        ]
+                                      }
+                                    },
                                     "overdue": {
                                       "type": "boolean"
                                     },
@@ -17632,6 +17723,7 @@
                                     "covered",
                                     "left",
                                     "previous_iban_last4",
+                                    "accounts",
                                     "overdue",
                                     "can_approve",
                                     "can_mark_paid",

@@ -1406,7 +1406,7 @@ def check_payment(
 
 
 def payee_iban(r, facts: PaymentFacts, account: str | None = None) -> str:
-    """`account` when given (the IBAN a payment already pays, or an item was built with), else the one account
+    """`account` when given (the IBAN a person picked, a payment already pays, or an item was built with), else the one account
     payee_choices leaves; several left: refused, nothing is guessed. A given account must be one of the invoice's own
     valid Romanian IBANs: every one is the supplier's, signed in this invoice; the choice rule only picks a default, so
     proof arriving later never makes a queued account wrong."""
@@ -1414,7 +1414,7 @@ def payee_iban(r, facts: PaymentFacts, account: str | None = None) -> str:
     if account is not None and account not in _ro_ibans(r):
         raise ApproveError("several_ibans", "the account is not one of the invoice's")
     if account is None and len(ibans) > 1:
-        raise ApproveError("several_ibans", "the invoice lists several IBANs; pay it by hand after checking which one")
+        raise ApproveError("several_ibans", "the invoice lists several IBANs; pick the account to pay")
     iban = account or ibans[0]
     if companies.company_by_iban(iban):
         raise ApproveError("own_iban", "payee IBAN is one of our own accounts")
@@ -1423,6 +1423,14 @@ def payee_iban(r, facts: PaymentFacts, account: str | None = None) -> str:
 
 def _ro_ibans(r) -> list[str]:
     return [i for i in json.loads(r["ibans"] or "[]") if i.startswith("RO") and iban_valid(i)]
+
+
+def account_at(r, index: object) -> str:
+    """The invoice's own IBAN at `index` of its stored list: the app names a pick by position, never by the IBAN."""
+    ibans = json.loads(r["ibans"] or "[]")
+    if type(index) is not int or not 0 <= index < len(ibans):
+        raise ApproveError("several_ibans", "the picked account is not one of the invoice's")
+    return ibans[index]
 
 
 def payee_choices(r, facts: PaymentFacts) -> list[str]:
@@ -1493,10 +1501,11 @@ def current_refusal(L: Ledger, row, facts: PaymentFacts | None = None) -> str:
     return "ready" if exc is None else shown_refusal(exc.code)
 
 
-def approve(L: Ledger, message_id: str, *, origin: str, unfiled: bool = False) -> dict:
+def approve(L: Ledger, message_id: str, *, origin: str, unfiled: bool = False, account: str | None = None) -> dict:
     """Put the invoice in the payment file. `origin`: 'person' when someone picked it (they know whether they already
-    paid it), 'auto' for the autopay rule (its payment waits for last month's statement, payments.engine)."""
-    item = payment_item(L, message_id, unfiled=unfiled)
+    paid it), 'auto' for the autopay rule (its payment waits for last month's statement, payments.engine). `account`:
+    the IBAN a person picked when the invoice lists several (payee_iban)."""
+    item = payment_item(L, message_id, unfiled=unfiled, account=account)
     row = L.efactura(message_id)
     if unfiled and row["status"] == "linked" and row["item_id"] == item.item_id:
         # The caller attaches under its writer transaction; attach_payment_file rechecks pending/unfiled state.
@@ -1791,7 +1800,7 @@ def _reopen(L: Ledger, message_id: str) -> str | None:
 APPROVE_RO = {
     "supplier_inactive": "Furnizorul figurează inactiv la ANAF (verificat pe {checked_at}). Verifică situația cu contabilul înainte de plată.",
     "not_ron": "Factura nu este în lei. Fișierul de plăți permite doar plăți din contul în lei. Plătește factura din aplicația băncii.",
-    "several_ibans": "Factura are mai multe IBAN-uri. Plătește manual, după ce verifici contul cu furnizorul.",
+    "several_ibans": "Factura are mai multe IBAN-uri. Alege contul în care plătești.",
     "no_valid_iban": "Factura nu are un IBAN românesc valid. Plătește manual.",
     "own_iban": "IBAN-ul din factură este al firmei. Verifică factura.",
     "invoice_issues": "Factura are probleme de citire. Verifică în SPV.",
