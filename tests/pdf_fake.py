@@ -70,9 +70,11 @@ def bt_statement(
                 f"Plata;Synthetic Partner SRL;REF: {ref}",
             ]
         lines += [at(at(" " * 12 + "RULAJ TOTAL CONT", debit, 68), credit, 84)]
-        if final != "same page":
-            lines += ["BANCA TRANSILVANIA S.A. - synthetic footer".ljust(80) + "4/5", " " * 30 + "BANCA TRANSILVANIA"]
-            lines += [" " * 30 + "Info clienti: 0800 000 000", " " * 30 + "Tiparit: 2026-11-01 20:26:35", ""]
+        if final != "same page":  # the footer, then a new page: the bank's info block, no column header
+            lines += ["BANCA TRANSILVANIA S.A. - synthetic footer".ljust(80) + "4/5"]
+            sheets.append([" " * 30 + "BANCA TRANSILVANIA", " " * 30 + "Info clienti: 0800 000 000"])
+            lines = sheets[-1]
+            lines += [" " * 30 + "Tiparit: 2026-11-01 20:26:35", ""]
         if final != "missing":
             lines += [at(" " * 12 + "SOLD FINAL CONT", opening + credit - debit, 68)]
     with pikepdf.Pdf.new() as pdf:

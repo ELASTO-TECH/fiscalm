@@ -375,6 +375,28 @@ def test_a_bt_pdfs_month_is_its_sections_and_a_line_needs_its_day():
             statements.parse_text(text, "NORD")
 
 
+@pytest.mark.parametrize(
+    "after_footer,trusted",
+    [
+        ("            SOLD FINAL CONT                    1,150.00", True),
+        (
+            "Extras de cont din 01/11/2026 - 30/11/2026\n            SOLD FINAL CONT     1,150.00",
+            False,
+        ),  # next statement's
+        ("            RULAJ TOTAL CONT     60.00     200.00\n            SOLD FINAL CONT     1,150.00", False),
+        ("            SOLD FINAL CONT estimat            1,150.00", False),
+        ("", False),  # really missing
+    ],
+)
+def test_after_a_page_footer_only_the_accounts_own_closing_rows_count(after_footer, trusted):
+    """Review: across a page break the final balance is read only for the account still open, by its exact row; a
+    second set of totals that disagrees, or another statement's header between, proves nothing."""
+    head, _ = bt_text().rsplit("            SOLD FINAL CONT", 1)
+    text = head + "BANCA TRANSILVANIA S.A. - footer      4/5\n\f      BANCA TRANSILVANIA\n\n" + after_footer + "\n"
+    (account,) = statements.parse_text(text, "NORD").accounts
+    assert account.trustworthy is trusted
+
+
 def test_the_newest_balance_of_a_month_wins_and_two_that_disagree_prove_none(ledger, home):
     home = home / "NORD"
     home.mkdir(exist_ok=True)
