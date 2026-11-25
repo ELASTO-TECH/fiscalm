@@ -370,8 +370,9 @@ def test_a_bt_pdfs_month_is_its_sections_and_a_line_needs_its_day():
     """Review: a period printed on a cover page names no month; a line before any date is no statement line."""
     assert statements.parse_text("Extras de cont din 01/09/2026 - 30/09/2026\n" + bt_text(), "NORD").month == "2026-10"
     undated = bt_text().replace("01/10/2026  SOLD", "            SOLD").replace("05/10/2026  Inc", "            Inc")
-    with pytest.raises(statements.StatementError, match="booking date"):
-        statements.parse_text(undated, "NORD")
+    for text in (undated, bt_text() + undated.split("\n", 1)[1]):  # alone, or after a section that had dates
+        with pytest.raises(statements.StatementError, match="booking date"):
+            statements.parse_text(text, "NORD")
 
 
 def test_the_newest_balance_of_a_month_wins_and_two_that_disagree_prove_none(ledger, home):

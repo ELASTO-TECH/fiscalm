@@ -421,7 +421,7 @@ def parse_text(text: str, company: str) -> Statement:
         if _opens_account(ln):
             close()
             nxt = lines[i + 1] if i + 1 < len(lines) else ""
-            acct = _pdf_account(nxt)
+            acct, cur_date = _pdf_account(nxt), None  # a section's lines are dated by its own rows only
             # its own header, else the file's one period; a section under none, in a file of several, has none
             acct.period = section or ((period_start, period_end) if one_period and period_start else None)
             section = None
