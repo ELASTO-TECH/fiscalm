@@ -469,13 +469,13 @@ def _refuse_break(before: statements.Account, after: statements.Account, numbere
 def month_missing(L: Ledger, company: str, month: str) -> list[str] | None:
     """The accounts the month's stored statements leave out at their banks (missing_accounts of them together); a
     statement of one account is imported on its own, and this says which ones are still to come. None when a stored
-    statement's accounts can't be learned (learn_accounts), or the firm is unknown: nobody can say the month is
-    complete."""
+    statement names no account (stored before accounts were recorded), or the firm is unknown: nobody can say the
+    month is complete. Reads only the ledger, never a stored file."""
     if company not in companies.all(L):
         return None
     co = companies.get(company, L=L)
     docs = [d for d in L.documents(company=company, month=month, kind="statement") if not d["path"].endswith(".csv")]
-    learned = [learn_accounts(L, d) for d in docs]
+    learned = [json.loads(d["accounts"] or "[]") for d in docs]
     if not all(learned):
         return None
     owned = [co.account(i) for ibans in learned for i in ibans]

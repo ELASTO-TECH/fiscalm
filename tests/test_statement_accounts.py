@@ -56,7 +56,7 @@ def test_an_account_in_another_currency_than_the_firms_is_refused(ledger, tmp_pa
 
 def test_the_pack_takes_a_months_statements_only_with_every_account_of_their_banks(ledger, tmp_path):
     """October's RON alone doesn't ride along with November's pack; with October's EUR both go, and a statement
-    whose accounts can't be learned leaves its month waiting."""
+    that names no account leaves its month waiting."""
     nord = companies.get("NORD")
     ron, eur = nord.ibans["RON"], nord.ibans["EUR"]
     ledger.add_document("oct-ron", "NORD", "2026-10", "statement", "/x/oct-ron.xml", accounts=[ron])
@@ -68,8 +68,6 @@ def test_the_pack_takes_a_months_statements_only_with_every_account_of_their_ban
     assert statement_intake.month_missing(ledger, "NORD", "2026-12") is None and not pack.ready(
         ledger, "NORD", "2026-12"
     )
-    ledger.add_document("sep", "NORD", "2026-09", "statement", str(write(tmp_path, complete())))
-    assert statement_intake.month_missing(ledger, "NORD", "2026-09") == []  # read once to learn its accounts
 
 
 @pytest.mark.parametrize(
