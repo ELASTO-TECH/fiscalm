@@ -289,9 +289,10 @@ def schemas() -> dict:
             "reason": {"enum": [None, *REASONS, *LABELS]},
             "difference": MONEY,
             "rule": {
-                "enum": [None, "saved", "bank", "transfer"],
+                "enum": [None, "saved", "bank", "transfer", "ai"],
                 "description": "Made by no person: a saved rule (saved), the bank's own fee or interest line (bank), or "
-                "both ends of a transfer between the firm's accounts, one naming the other's account (transfer). "
+                "both ends of a transfer between the firm's accounts, one naming the other's account (transfer), or a Fără "
+                "document label the AI integration was sure of on a line no open document fits by amount (ai). "
                 "Undoing or changing it leaves the transaction to people.",
             },
         }
@@ -328,6 +329,13 @@ def schemas() -> dict:
                     "kind": {"const": "remembered"},
                     "memory": STRING,
                     "as": obj({"kind": {"enum": list(KINDS)}, **nullable("partner", "reason", "note")}),
+                }
+            ),
+            obj(
+                {
+                    "kind": {"const": "ai", "description": "The AI integration's checked proposal; never applied."},
+                    "as": obj({"kind": {"enum": list(KINDS)}, **nullable("partner", "reason", "note")}),
+                    "invoices": {**STRINGS, "description": "Open invoices whose remaining total is the amount."},
                 }
             ),
             {"type": "null"},

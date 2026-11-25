@@ -639,6 +639,15 @@ def bank_coverage(db: sqlite3.Connection) -> None:
     )
 
 
+def ai_transaction_proposals(db: sqlite3.Connection) -> None:
+    # What the AI integration proposed for a statement line still to explain (ai_explain): kind label | advance |
+    # documents | none ('none': asked, nothing to propose, so it is not asked again). invoices: a JSON list of ids.
+    db.execute(
+        "CREATE TABLE tx_ai (tx_key TEXT PRIMARY KEY, company TEXT NOT NULL, kind TEXT NOT NULL, partner TEXT, "
+        "invoices TEXT NOT NULL DEFAULT '[]', reason TEXT, note TEXT, at TEXT NOT NULL)"
+    )
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     baseline,
     transaction_links,
@@ -683,6 +692,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     drop_receipt_items,
     credit_references_reread,
     bank_coverage,
+    ai_transaction_proposals,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

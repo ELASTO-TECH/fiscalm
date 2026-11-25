@@ -131,8 +131,35 @@ def _open(full: dict, tx: dict) -> list[dict]:
 def proposed(full: dict, tx: dict) -> list[dict]:
     """The open invoice the bank's details name by its number, when the transaction is exactly what is left of it in
     its currency: at most one, never applied. A number that names several open invoices, or another amount, proposes
-    nothing. The details are only compared with the firm's own invoice numbers."""
-    if tx.get("explanation") or not tx.get("details"):
+    nothing. The details are only compared with the firm's own invoice numbers. Without one, the invoices the AI
+    integration proposed (ai_explain), while every one is still open and what is left of them is the amount."""
+    if tx.get("explanation"):
+        return []
+    return _named(full, tx) or _guessed(full, tx)
+
+
+def _guessed(full: dict, tx: dict) -> list[dict]:
+    p = tx.get("proposal") or {}
+    return exactly(full, tx, p.get("invoices", [])) if p.get("kind") == "ai" else []
+
+
+def exactly(full: dict, tx: dict, ids: list[str]) -> list[dict]:
+    """The picks of invoices `ids` when every one is open for the transaction, all in one currency, and what is left of
+    them is its amount in that currency to the cent; else none."""
+    left = {r["id"]: r for r in _open(full, tx)}
+    rows = [left[i] for i in dict.fromkeys(ids) if i in left]
+    currencies = {r.get("currency") or "RON" for r in rows}
+    if not rows or len(rows) != len(ids) or len(currencies) != 1:
+        return []
+    orig = tx.get("orig") or {}
+    amount = {tx["currency"]: tx["amount"], orig.get("currency"): orig.get("amount")}.get(currencies.pop())
+    if not amount or sum(Decimal(r["left"]) for r in rows) != Decimal(amount):
+        return []
+    return [pick(r, r["left"], False) | {"position": n} for n, r in enumerate(rows)]
+
+
+def _named(full: dict, tx: dict) -> list[dict]:
+    if not tx.get("details"):
         return []
     text = f" {links.plain(tx['details'])} "
     found = [r for r in _open(full, tx) if links.names_number(text, r["number"] or "")]

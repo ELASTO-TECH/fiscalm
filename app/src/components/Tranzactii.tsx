@@ -58,8 +58,9 @@ export function said(t: Transaction, s: State): Said | null {
     return { text: `Se potrivește cu ${nOf(p.invoices.length, "o factură", "facturi")}`, to: { tab: "sarcini" }, proposal: true };
   }
   if (p?.kind === "settlement") return { text: "Decontare de verificat", to: { set: p.settlement }, proposal: true };
-  if (p?.kind === "remembered") {
-    return { text: `Regulă salvată: ${keptText(p.as, s.partners.find((x) => x.id === p.as.partner)).toLowerCase()}`, proposal: true };
+  if (p?.kind === "remembered" || p?.kind === "ai") {
+    const text = keptText(p.as, s.partners.find((x) => x.id === p.as.partner)).toLowerCase();
+    return { text: `${p.kind === "ai" ? "Propunere AI" : "Regulă salvată"}: ${text}`, proposal: true };
   }
   if (p?.kind === "receipt") {
     const d = doc(p.document);

@@ -158,6 +158,28 @@ it("proposes the one invoice the details name at its exact amount, confirmed in 
   expect(new URLSearchParams(location.search).get("tx")).toBe(POPESCU);
 });
 
+it("starts from the AI integration's proposal: its invoices confirmed in one tap, or its label preselected", async () => {
+  const full = fixture(), t = full.transactions.rows.find((r) => r.id === POPESCU)!;
+  const open = full.issued.filter((r) => r.status === "open" && r.currency === "RON" && !r.rejected && r.local_id !== r.id);
+  const [a, b] = open.filter((r) => r.partner === open.find((x) => open.some((y) => y !== x && y.partner === x.partner))!.partner);
+  const as = { kind: "documents" as const, partner: a.partner, reason: null, note: null };
+  Object.assign(t, { details: "Plata", amount: (Number(a.left) + Number(b.left)).toFixed(2), proposal: { kind: "ai", as, invoices: [a.id, b.id] } });
+  at(`?co=NORD&tab=tranzactii&tx=${POPESCU}`);
+  const api = renderApp({ state: () => json(summaryResult(full)), detail: (url) => json(detailResult(full, query(url))),
+    transactionChoices: (url) => json(choicesResult(full, query(url))), onPost: () => json({ ok: false, message: "Refuzat" }) });
+  const s = await sheet();
+  expect(s.getByText("Propunere")).toBeInTheDocument();
+  await userEvent.click(s.getByRole("button", { name: `Confirmă: facturile ${a.number}, ${b.number}` }));
+  expect(api.posts()[0].body).toEqual({ co: "NORD", tx: POPESCU, invoices: `${a.id},${b.id}` });
+  cleanup();
+  Object.assign(t, { proposal: { kind: "ai", as: { kind: "label", partner: null, reason: "other", note: "Impozit" }, invoices: [] } });
+  renderApp({ state: () => json(summaryResult(full)), detail: (url) => json(detailResult(full, query(url))),
+    transactionChoices: (url) => json(choicesResult(full, query(url))) });
+  const l = await sheet();
+  expect(l.getByRole("radio", { name: "Altceva" })).toBeChecked();
+  expect(l.getByRole("textbox", { name: "Notă pentru contabil" })).toHaveValue("Impozit");
+});
+
 it("opens another firm's transaction from a metadata-only ALL view and posts for that firm", async () => {
   const full = fixtureAll(), s = full.parts.find((p) => p.co === "STUDIO9")!, t = s.transactions.rows.find((t) => t.can_link && !t.explanation && (!t.card || t.card_owner))!;
   at(`?co=ALL&tx=${t.id}`);

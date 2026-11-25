@@ -18,6 +18,7 @@ from pathlib import Path
 from fiscalm import (
     PRODUCT,
     __version__,
+    ai_explain,
     archive,
     backup,
     companies,
@@ -1221,12 +1222,18 @@ def build_parser() -> argparse.ArgumentParser:
         return 0
 
     sy.set_defaults(fn=shopify_sync)
-    tr = sub.add_parser("tx-rules", help="explain free statement lines by saved rules and the bank's own fee lines")
+    tr = sub.add_parser(
+        "tx-rules", help="explain free statement lines by saved rules, the bank's own fee lines, transfers and the AI"
+    )
 
     def tx_rules(a, L: Ledger) -> int:
-        # the rows as Tranzacții shows them: a rule explains only a row left with nothing else proposed
-        rows = {co: api.state(L, co)["transactions"]["rows"] for co in companies.all(L)}
-        print(json.dumps({co: len(links.apply_rules(L, co, rows[co])) for co in rows}))
+        # the rows as Tranzacții shows them: a rule explains only a row left with nothing else proposed; the AI
+        # integration is asked about what the rules left (ai_explain)
+        out = {}
+        for co in companies.all(L):
+            ruled = len(links.apply_rules(L, co, api.state(L, co)["transactions"]["rows"]))
+            out[co] = {"rules": ruled, **ai_explain.explain(L, co, api.state(L, co))}
+        print(json.dumps(out))
         return 0
 
     tr.set_defaults(fn=tx_rules)

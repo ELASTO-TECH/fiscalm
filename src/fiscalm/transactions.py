@@ -270,11 +270,18 @@ def _remembered_proposals(
     for r in rows:
         r["remember"] = links.shown_keys(efactura.line_keys(txs[r["id"]], own)) if r["can_link"] else {}
     loose_txs = [txs[r["id"]] for r in loose]
+    guessed = L.ai_proposals(co)
     for r, partner, kept_as in zip(
         loose, links.suggest(L, co, loose_txs, partners or {}), links.proposals(co, loose_txs, kept, L), strict=True
     ):
-        r["partner"] = (
-            kept_as["as"]["partner"] if kept_as and kept_as["as"]["kind"] == "documents" else None
-        ) or partner
-        r["proposal"] = r["proposal"] or kept_as
+        r["proposal"] = r["proposal"] or kept_as or (_guessed(guessed.get(r["id"])) if r["can_link"] else None)
+        said = r["proposal"]["as"] if r["proposal"] and r["proposal"]["kind"] in ("remembered", "ai") else {}
+        r["partner"] = (said.get("partner") if said.get("kind") == "documents" else None) or partner
     return loose, kept
+
+
+def _guessed(p: dict | None) -> dict | None:
+    """The AI integration's checked proposal (ai_explain), shaped like a remembered one, with the invoices it names."""
+    if not p or p["kind"] == "none":
+        return None
+    return {"kind": "ai", "as": {k: p[k] for k in ("kind", "partner", "reason", "note")}, "invoices": p["invoices"]}

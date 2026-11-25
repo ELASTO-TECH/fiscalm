@@ -12030,6 +12030,64 @@
                           ]
                         },
                         {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "ai",
+                              "description": "The AI integration's checked proposal; never applied."
+                            },
+                            "as": {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "enum": [
+                                    "documents",
+                                    "label",
+                                    "transfer",
+                                    "advance"
+                                  ]
+                                },
+                                "partner": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "reason": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "note": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "partner",
+                                "reason",
+                                "note"
+                              ]
+                            },
+                            "invoices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              },
+                              "description": "Open invoices whose remaining total is the amount."
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "as",
+                            "invoices"
+                          ]
+                        },
+                        {
                           "type": "null"
                         }
                       ]
@@ -16031,9 +16089,10 @@
               null,
               "saved",
               "bank",
-              "transfer"
+              "transfer",
+              "ai"
             ],
-            "description": "Made by no person: a saved rule (saved), the bank's own fee or interest line (bank), or both ends of a transfer between the firm's accounts, one naming the other's account (transfer). Undoing or changing it leaves the transaction to people."
+            "description": "Made by no person: a saved rule (saved), the bank's own fee or interest line (bank), or both ends of a transfer between the firm's accounts, one naming the other's account (transfer), or a Fără document label the AI integration was sure of on a line no open document fits by amount (ai). Undoing or changing it leaves the transaction to people."
           }
         },
         "required": [
@@ -18832,6 +18891,64 @@
                                 "kind",
                                 "memory",
                                 "as"
+                              ]
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "const": "ai",
+                                  "description": "The AI integration's checked proposal; never applied."
+                                },
+                                "as": {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "enum": [
+                                        "documents",
+                                        "label",
+                                        "transfer",
+                                        "advance"
+                                      ]
+                                    },
+                                    "partner": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    },
+                                    "reason": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    },
+                                    "note": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "partner",
+                                    "reason",
+                                    "note"
+                                  ]
+                                },
+                                "invoices": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  },
+                                  "description": "Open invoices whose remaining total is the amount."
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "as",
+                                "invoices"
                               ]
                             },
                             {

@@ -157,7 +157,8 @@ function fixtureOffered(s: State, t: Transaction, partner: string): TransactionI
     })].map((r, position) => ({ ...r, position }));
 }
 
-/** transaction_choices.proposed: the one open invoice the details name by number, at exactly what is left of it. */
+/** transaction_choices.proposed: the one open invoice the details name by number, at exactly what is left of it; else
+ * the AI integration's invoices that add up to it. */
 function fixtureProposed(s: State, t: Transaction): TransactionInvoiceChoice[] {
   const plain = (v: string) => (fold(v).match(/[0-9a-z]+/g) ?? []).join(" "), text = ` ${plain(t.details ?? "")} `;
   const named = (n: string) => { const p = plain(n);
@@ -168,8 +169,16 @@ function fixtureProposed(s: State, t: Transaction): TransactionInvoiceChoice[] {
     && named(r.number));
   const r = found.length === 1 ? found[0] : undefined, currency = r ? r.currency || "RON" : "";
   const paid = t.currency === currency ? t.amount : t.orig?.currency === currency ? t.orig.amount : null;
-  return r && paid && cents(paid) === cents(r.left) ? [{ id: r.id, number: r.number, date: r.issue_date, left: r.left, total: r.total,
-    currency, partner: r.partner, selected: false, position: 0 }] : [];
+  const pick = (r: typeof source[number], position: number) => ({ id: r.id, number: r.number, date: r.issue_date, left: r.left,
+    total: r.total, currency: r.currency || "RON", partner: r.partner, selected: false, position });
+  if (r && paid && cents(paid) === cents(r.left)) return [pick(r, 0)];
+  // else the AI integration's invoices, while all are open, in one currency, and what is left of them is the amount
+  const ids = t.explanation || t.proposal?.kind !== "ai" ? [] : t.proposal.invoices;
+  const rows = ids.flatMap((id) => source.filter((x) => x.id === id && (x.status === "open" || x.status === "marked") && cents(x.left) > 0n));
+  const cur = new Set(rows.map((x) => x.currency || "RON")), one = cur.size === 1 ? [...cur][0] : "";
+  const due = t.currency === one ? t.amount : t.orig?.currency === one ? t.orig.amount : null;
+  const sum = rows.reduce((n, x) => n + cents(x.left), 0n);
+  return ids.length && rows.length === ids.length && due && sum === cents(due) ? rows.map(pick) : [];
 }
 
 const textOrder = (a: string, b: string) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0;

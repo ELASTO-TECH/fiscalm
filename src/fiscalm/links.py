@@ -519,6 +519,8 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
     invoices it fits) or waiting for its invoice is left to people. Written by Ledger.link_tx under the write lock,
     which checks again what a person may have decided since the rows were read and leaves a line naming an open
     invoice to a person (_untouched). Returns the keys explained."""
+    # the AI's proposal (ai_explain) yields to every rule
+    rows = [r | {"proposal": None} if (r["proposal"] or {}).get("kind") == "ai" else r for r in rows]
     free = {r["id"] for r in rows if not (r["explanation"] or r["proposal"] or r["awaiting"]) and r["can_link"]}
     done = []
     for r in rows:
@@ -546,6 +548,17 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
             continue
         done.append(r["id"])
     return done
+
+
+def apply_ai_label(L: Ledger, company: str, key: str, label: str, note: str) -> bool:
+    """A Fără document label the AI integration is sure of (ai_explain), written as an explanation no person made
+    (rule 'ai'): refused as a person's label would be, and while anybody decided otherwise since (_untouched)."""
+    build = _untouched(L, company, key, None, _labelled(L, company, key, label, note))
+    try:
+        L.link_tx(company, key, "", build, need(L, company), None, "ai")
+    except LinkRefused:
+        return False
+    return True
 
 
 def _free_other_end(L: Ledger, company: str, key: str, free: set[str]) -> str | None:
