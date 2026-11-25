@@ -399,6 +399,52 @@ def test_a_private_name_from_a_client_account_collects_nothing(ledger, home, sec
     assert issued.match_statement(ledger, _st(person)) == []
 
 
+def _owed(*totals):
+    return {f"70{i + 1:02d}": ubl(number=f"NRD 00{i + 50}", total=t, issue="2026-10-11") for i, t in enumerate(totals)}
+
+
+@pytest.mark.parametrize(
+    "totals,desc,collected",
+    [
+        (("400.00", "600.00"), "plata", ["7001", "7002"]),  # the client's two open invoices, one transfer
+        (("400.00", "600.00", "300.00", "700.00"), "plata", []),  # 400+600 and 300+700: which ones is a guess
+        (("400.00", "600.00", "300.00", "700.00"), "NRD 0050 NRD 0051", ["7001", "7002"]),  # it names them
+        (("400.00", "600.00", "300.00", "700.00"), "0050 0051", []),  # digits alone pick no set
+        (("100.00",) * 6 + ("400.00",), "plata", ["7001", "7002", "7003", "7004", "7005", "7006", "7007"]),  # all
+        (("1000.00", "400.00", "600.00"), "plata", ["7001"]),  # one invoice of the amount comes first
+    ],
+)
+def test_one_credit_collects_the_one_exact_set_of_its_clients_invoices(
+    ledger, home, sec, monkeypatch, totals, desc, collected
+):
+    _stored(ledger, monkeypatch, **_owed(*totals))
+    t = _credit("1000.00", date(2026, 10, 20), desc=desc)
+    assert sorted(issued.match_statement(ledger, _st(t))) == collected
+    if collected:
+        assert {ledger.issued(m)["collected_tx"] for m in collected} == {statements.tx_key(t)}
+        assert ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 1
+
+
+def test_a_set_needs_its_client_and_one_credit(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+    anonymous = _credit("1000.00", date(2026, 10, 20), counterparty="XYZ", iban=OTHER_IBAN, desc="NRD 0050 NRD 0051")
+    assert issued.match_statement(ledger, _st(anonymous)) == []
+    twins = [_credit("1000.00", date(2026, 10, d)) for d in (20, 21)]  # both would pay the same pair: neither does
+    assert issued.match_statement(ledger, _st(*twins)) == []
+
+
+def test_a_set_is_collected_whole_or_not_at_all(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **_owed("400.00", "600.00", "300.00"))
+    assert ledger.mark_issued_collected("7002", "statement", "tx-earlier")
+    assert ledger.mark_issued_collected(("7001", "7002"), "statement", "tx-set") is False
+    assert ledger.issued("7001")["status"] == "open" and "tx-set" not in ledger.used_txs()
+    won, _ = race(
+        ledger.path, lambda other, k: other.mark_issued_collected(("7001", "7003")[k:] + ("7001",)[:k], "s", f"tx-{k}")
+    )
+    assert sorted(won) == [False, True] and ledger.issued("7001")["status"] == "collected"
+    assert ledger.db.execute("SELECT count(*) FROM settled_tx WHERE tx_key LIKE 'tx-_'").fetchone()[0] == 1
+
+
 def test_cui_on_credit_and_then_the_learned_iban(ledger, home, sec, monkeypatch):
     _stored(
         ledger,

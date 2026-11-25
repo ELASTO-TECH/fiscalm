@@ -44,7 +44,10 @@ fallbacks and workflows when replacing them; do not preserve installation-specif
    A debit pays one invoice or payment; a credit collects one issued invoice, or one complete batch.
    A credit collects the one open issued invoice it fits by exact amount: from its client, or, from a bank account
    that shows no other client, naming it or alone of its amount with no other credit of the statement fitting it
-   too (maintainer decision, 2026-11-25).
+   too. A credit from an identified client that fits no single invoice collects the one exact set of that client's
+   open invoices it names by whole identifier, or the only set of 2 to 5 of them (or all of them) summing to it;
+   it is reserved once, collects the whole set or nothing, and an ambiguous set settles none (maintainer
+   decision, 2026-11-25).
    A settlement is identified by firm + payer + report reference. The credit, report and every invoice
    belong to that same firm; a line naming another firm refuses the whole report.
    A batch requires an identified payer, a report from that payer dated within a fixed window before a trustworthy statement credit,

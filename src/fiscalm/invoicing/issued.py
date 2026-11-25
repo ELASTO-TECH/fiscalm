@@ -13,8 +13,9 @@ invoice there could be "paid" by a debit or added to the payment file. Here noth
 
 Collected (`incasata`): a statement CREDIT with the amount still owed, from this client (its CUI on the credit,
 its exact name, or the IBAN an earlier collection of the same client came from), or naming it, or the only
-invoice of its amount (match_statement). Every doubt leaves it open: a credit that fits several invoices settles
-none, and one credit settles one invoice, ever (`settled_tx`).
+invoice of its amount (match_statement); or, from an identified client, the one exact set of its open invoices
+the credit pays. Every doubt leaves it open: a credit that fits several invoices or sets settles none, and one
+credit settles one invoice or one set, ever (`settled_tx`).
 Collected another way (OP, cash, card, other): `mark_collected`, undone with `unmark_collected`; it waits as
 "marcata" until a statement credit confirms it (cash never will: manual proof comes later).
 Credit notes reduce what the invoice they reference (BillingReference) still owes.
@@ -28,6 +29,7 @@ import re
 from collections import Counter
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from itertools import combinations
 from pathlib import Path
 
 from fiscalm import companies, history_invoices, integrations
@@ -383,7 +385,9 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         collected stay rivals when it is read again;
       - a credit that names a known invoice (its full identifier, or 3+ digits of it) settles only that one,
         and nothing when that invoice is already closed; without its client, only one whole identifier counts;
-      - a credit that fits several invoices settles none; one credit settles one invoice, ever.
+      - a credit that fits several invoices settles none; one credit settles one invoice, ever;
+      - a credit from an identified client that fits no single invoice settles the one exact set of that client's
+        invoices it pays (_Pool.batch), all of them or none, when no other credit of the statement fits any of them.
     Invoices the user marked collected are candidates too: a credit confirms their mark. History invoices (from
     before the firm's start, fiscalm.history) and invoices partly covered by the user's links are rivals that never
     settle. The paying account is remembered for the client only when the credit showed the client's CUI firm."""
@@ -394,7 +398,12 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         pool = _Pool(L, st.company, {statements.tx_key(t) for t in st.settlement_txs})
         if not pool.open:
             return batch_done
-        return batch_done + _collect_singles(L, pool, st, _open_credits(L, st))
+        credits = _open_credits(L, st)
+        # per statement line, never per key: two lines may share one (same day, amount and text, other payers)
+        first = [pool.candidates(t, ()) for t in credits]
+        claims = Counter(r["message_id"] for c in first for r, _ in c)
+        done = _collect_singles(L, pool, st, credits, first, claims)
+        return batch_done + done + _collect_sets(L, pool, credits, first, claims, done)
 
 
 def _open_credits(L: Ledger, st: statements.Statement) -> list[statements.Tx]:
@@ -415,10 +424,9 @@ def _open_credits(L: Ledger, st: statements.Statement) -> list[statements.Tx]:
     ]
 
 
-def _collect_singles(L: Ledger, pool: _Pool, st: statements.Statement, credits: list) -> list[str]:
-    # per statement line, never per key: two lines may share one (same day, amount and text, other payers)
-    first = [pool.candidates(t, ()) for t in credits]
-    claims = Counter(r["message_id"] for c in first for r, _ in c)
+def _collect_singles(
+    L: Ledger, pool: _Pool, st: statements.Statement, credits: list, first: list, claims: Counter
+) -> list[str]:
     # accounts that show a client on a line of this statement are nobody's anonymous payment
     shown = {t.counterparty_iban for t in st.settlement_txs if t.counterparty_iban and pool.from_client(t)}
     done: list[str] = []
@@ -437,12 +445,25 @@ def _collect_singles(L: Ledger, pool: _Pool, st: statements.Statement, credits: 
     return done
 
 
+def _collect_sets(L: Ledger, pool: _Pool, credits: list, first: list, claims: Counter, done: list) -> list[str]:
+    """A credit that fits no single invoice may pay several of its client's (maintainer decision, 2026-11-25):
+    the one exact set (_Pool.batch), when no other credit of the statement reaches any of its invoices."""
+    plans = [(t, plan) for t, c in zip(credits, first, strict=True) if not c and (plan := pool.batch(t, done))]
+    taken = Counter(r["message_id"] for _, (rows, _) in plans for r in rows)
+    out: list[str] = []
+    for t, (rows, how) in plans:
+        alone = all(taken[r["message_id"]] == 1 and not claims[r["message_id"]] for r in rows)
+        if alone and _collect(L, pool, t, rows, how, f"{how} {len(rows)} invoices REF {t.ref}"):
+            out += [r["message_id"] for r in rows]
+    return out
+
+
 def _collect(L: Ledger, pool: _Pool, t: statements.Tx, rows: tuple, how: str, note: str) -> bool:
     """Collect these invoices with the credit. Its account is remembered only when it showed a firm client, and
     the next credit of the statement from it sees it known."""
     learned = how in CLIENT_PROOF and firm_id(tax_token(rows[0]["client_cui"])) and t.counterparty_iban
     if not L.mark_issued_collected(
-        rows[0]["message_id"],
+        tuple(r["message_id"] for r in rows) if len(rows) > 1 else rows[0]["message_id"],
         f"statement {t.date} {note}",
         statements.tx_key(t),
         t.counterparty_iban if learned else "",
@@ -463,6 +484,30 @@ def _not_a_payment(t: statements.Tx) -> bool:
 def _kept(was: str | None, how: str) -> bool:
     """The evidence a credit had at the start still holds: the same, or its client shown (another way)."""
     return was == how or (was in (*CLIENT_PROOF, "ref") and how in CLIENT_PROOF)
+
+
+BATCH_MAX = 5  # one transfer pays at most this many of a client's invoices, unless it pays all of them
+BATCH_SCAN = 20  # a client with more open invoices than this: only all of them, or the ones named, are tried
+
+
+def _in_window(r, t: statements.Tx) -> bool:
+    issued_on = date.fromisoformat(r["issue_date"])
+    return issued_on - timedelta(days=COLLECT_DAYS_BEFORE) <= t.date <= issued_on + timedelta(days=COLLECT_DAYS_AFTER)
+
+
+def _sets(mine: list, names: set[str], kind: str) -> list[tuple]:
+    """The sets of a client's invoices a credit may pay: the ones it names by whole identifier (digits, or one named
+    that is closed, unknown or another client's: none for sure), else every 2 to BATCH_MAX of them, and all."""
+    if names:
+        named = tuple(c for c in mine if c[0]["message_id"] in names)
+        return [named] if kind == "series" and len(named) == len(names) else []
+    most = min(BATCH_MAX, len(mine)) if len(mine) <= BATCH_SCAN else 0
+    sets = [c for k in range(2, most + 1) for c in combinations(mine, k)]
+    return sets + ([tuple(mine)] if len(mine) > BATCH_MAX else [])
+
+
+def _client_key(r) -> str:
+    return firm_id(tax_token(r["client_cui"])) or " ".join(efactura.firm_core(r["client_name"]))
 
 
 def _rank(cands: list) -> int:
@@ -515,15 +560,9 @@ class _Pool:
         """How the credit fits this invoice: by its client (CLIENT_PROOF), by its amount alone, or not ("")."""
         if _not_a_payment(t):
             return ""
-        if not _amount_matches(t, self.owed(r), r["currency"]):
+        if not _amount_matches(t, self.owed(r), r["currency"]) or not _in_window(r, t):
             return ""
-        issued_on = date.fromisoformat(r["issue_date"])
-        if not (
-            issued_on - timedelta(days=COLLECT_DAYS_BEFORE) <= t.date <= issued_on + timedelta(days=COLLECT_DAYS_AFTER)
-        ):
-            return ""
-        cui = r["client_cui"] or ""
-        if how := credit_from_client(self.L, self.company, r["client_name"], cui, t, accounts=self.accounts):
+        if how := self.client_of(r, t):
             return how
         if not t.counterparty_iban or t.counterparty_iban in self.accounts:
             return ""  # no transfer from a bank account (a card refund, the bank's own money), or another client's
@@ -538,6 +577,30 @@ class _Pool:
                 for name, cui in self.clients
             )
         return self._from_client[id(t)]
+
+    def client_of(self, r, t: statements.Tx) -> str:
+        cui = r["client_cui"] or ""
+        return credit_from_client(self.L, self.company, r["client_name"], cui, t, accounts=self.accounts)
+
+    def batch(self, t: statements.Tx, done) -> tuple[tuple, str] | None:
+        """The one exact set of one client's open invoices a credit pays (_sets), in its currency. None when the
+        credit shows no client or several, when several sets fit, or when a set holds a rival that never settles."""
+        if _not_a_payment(t):
+            return None
+        mine = [
+            (r, how)
+            for r in self.rows
+            if r["message_id"] not in done
+            and r["currency"] == t.currency
+            and _in_window(r, t)
+            and (how := self.client_of(r, t))
+        ]
+        if len({_client_key(r) for r, _ in mine}) != 1:
+            return None
+        exact = [c for c in _sets(mine, *self.named(t)) if len(c) > 1 and sum(self.owed(r) for r, _ in c) == t.amount]
+        if len(exact) != 1 or not all(self.settles(r["message_id"]) for r, _ in exact[0]):
+            return None
+        return tuple(r for r, _ in exact[0]), exact[0][0][1]
 
     def named(self, t: statements.Tx) -> tuple[set[str], str]:
         """Invoices the credit names, and how: "series" (a whole identifier, 'NRD 0042'), "digits" (3+ digits of one,

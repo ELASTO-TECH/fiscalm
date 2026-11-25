@@ -171,6 +171,10 @@ class AuthorizationRefused(Exception):
     """A write guard refused authority; never treat it as a file/parser OSError."""
 
 
+class _SetChanged(Exception):
+    """An invoice of a set changed since it was read: the whole collection rolls back."""
+
+
 class Ledger:
     def __init__(self, path: Path | None = None, *, readonly: bool = False, timeout: float = 5.0):
         self._write_guard: Callable[[Ledger], None] | None = None
@@ -2288,28 +2292,40 @@ class Ledger:
             return invoices
 
     def mark_issued_collected(
-        self, message_id: str, note: str, tx: str, from_iban: str = "", into_iban: str = ""
+        self, message_id: str | tuple[str, ...], note: str, tx: str, from_iban: str = "", into_iban: str = ""
     ) -> bool:
-        """A statement credit collected this invoice. `tx` (statements.tx_key) can never settle anything else.
-        `into_iban`: the company account the credit landed in."""
+        """A statement credit collected this invoice, or (a tuple) exactly this set of one firm's invoices: all of
+        them or none. `tx` (statements.tx_key) can never settle anything else. `into_iban`: the company account the
+        credit landed in."""
+        mids = (message_id,) if isinstance(message_id, str) else tuple(message_id)
         note = audit.note(note)
-        with self.tx() as db:
-            if not self._card_proof("issued", message_id, tx):
-                return False
-            if not self._reserve(db, tx, f"issued {message_id}"):
-                return False
-            cur = db.execute(
-                "UPDATE issued SET status='collected', collected_at=?, collected_note=?, collected_tx=?, "
-                "collected_from_iban=?, collected_into_iban=? "
-                f"WHERE message_id=? AND status IN ('open','marked') AND parse_error IS NULL AND {unlinked('issued')}",
-                (now(), note, tx, from_iban or None, into_iban or None, message_id),
-            )
-            self._release_unless(db, tx, cur.rowcount)
-            if cur.rowcount:
+        try:
+            with self.tx() as db:
+                firms = db.execute(
+                    f"SELECT count(DISTINCT company) FROM issued WHERE message_id IN ({','.join('?' * len(mids))})",
+                    mids,
+                ).fetchone()[0]
+                if not mids or len(set(mids)) != len(mids) or firms != 1:
+                    return False
+                if not all(self._card_proof("issued", m, tx) for m in mids):
+                    return False
+                if not self._reserve(db, tx, "issued " + " ".join(mids)):
+                    return False
+                for m in mids:
+                    if not db.execute(
+                        "UPDATE issued SET status='collected', collected_at=?, collected_note=?, collected_tx=?, "
+                        "collected_from_iban=?, collected_into_iban=? WHERE message_id=? AND status IN ('open','marked') "
+                        f"AND parse_error IS NULL AND {unlinked('issued')}",
+                        (now(), note, tx, from_iban or None, into_iban or None, m),
+                    ).rowcount:
+                        raise _SetChanged  # rolls back the reservation and every invoice before it
                 from fiscalm.commerce.webhooks import capture
 
-                capture(self, message_id=message_id)
-        return cur.rowcount > 0
+                for m in mids:
+                    capture(self, message_id=m)
+        except _SetChanged:
+            return False
+        return True
 
     def mark_issued_manual(self, message_id: str, note: str, method: str) -> bool:
         """The user: collected by `method` (issued.COLLECTED_METHODS) with no statement credit to point to yet."""
