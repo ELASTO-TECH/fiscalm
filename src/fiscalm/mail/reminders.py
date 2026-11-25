@@ -149,9 +149,11 @@ class StatementView:
         out = []
         window = since.isoformat(), today.isoformat()
         for r in self._lines[1]:
+            if r["tx_key"] in explained:
+                continue
             others = [statements.Tx.from_dict(json.loads(x)) for x in json.loads(r["readings"] or "[]")]
             days = [r["day"], *(t.date.isoformat() for t in others)]  # a later read may correct the booking date
-            if r["tx_key"] in explained or not any(window[0] <= d <= window[1] for d in days):
+            if not any(window[0] <= d <= window[1] for d in days):
                 continue
             if not r["tx"]:
                 raise Refused(STATEMENTS)
@@ -198,7 +200,10 @@ def _explained(rows: list) -> set[str]:
     for keys in copies.values():
         for k in keys:
             wanted[k] = wanted.get(k, 0) + 1
-    excused |= {t for t, keys in copies.items() if keys and all(k in done and wanted[k] == 1 for k in keys)}
+    split = {t["tx_key"] for t in twins if not _one_money(t)}  # readings that disagree on the money: never excused
+    excused |= {
+        t for t, keys in copies.items() if keys and t not in split and all(k in done and wanted[k] == 1 for k in keys)
+    }
     return done | excused
 
 
@@ -215,6 +220,13 @@ def _copy(twin, line) -> bool:
         and same_account
         and apart <= BOUNDARY_DAYS
     )
+
+
+def _one_money(line) -> bool:
+    """Every reading of the line carries the same amount, currency and account as the stored one."""
+    stored = json.loads(line["tx"]) if line["tx"] else {}
+    money = lambda d: (d.get("amount"), d.get("currency"), d.get("iban"))  # noqa: E731
+    return all(money(json.loads(x)) == money(stored) for x in json.loads(line["readings"] or "[]"))
 
 
 def _days(line) -> set[date]:

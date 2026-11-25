@@ -169,6 +169,7 @@ def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, c
         ("two_twins_original_and_its_duplicate", False),
         ("duplicate", False),
         ("twin_redated_to_an_unexplained_copy", False),  # a later read moves it next to an unexplained line
+        ("twin_read_again_with_other_money", False),  # its readings disagree on the amount
     ],
 )
 def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
@@ -192,6 +193,7 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
         if twin in extra:
             _reserve(L, twin, "twin feed")
     if case in (
+        "twin_read_again_with_other_money",
         "twin_of_explained",
         "two_twins_one_explained",
         "twin_and_explained_line_of_one_source",
@@ -205,6 +207,15 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
         _reserve(L, settled, "issued other")
         if case == "two_twins_original_and_its_duplicate":
             _reserve(L, blank, "duplicate:" + statements.tx_key(settled))
+    if case == "twin_read_again_with_other_money":  # the bank reference read again with other money
+        other = dict(
+            json.loads(
+                L.db.execute("SELECT tx FROM statement_txs WHERE tx_key=?", (statements.tx_key(named),)).fetchone()[0]
+            ),
+            amount="70.00",
+        )
+        L.db.execute("INSERT INTO statement_tx_readings VALUES(?,?)", (statements.tx_key(named), json.dumps(other)))
+        L.db.commit()
     if case == "twin_redated_to_an_unexplained_copy":  # the twin first sat beside `blank`, explained; then on 20.11
         _reserve(L, blank, "issued other")
         late = _client_credit(L, iid, day=date(2026, 11, 20), counterparty="", iban="", desc="Incasare 4")
