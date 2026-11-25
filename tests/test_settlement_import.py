@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from test_settlements import collect, setup, statement
+from test_settlements import collect, setup, statement, store_bank
 
 from fiscalm import companies
 from fiscalm.api import actions
@@ -325,3 +325,34 @@ def test_one_report_writes_its_fees_one_way():
     with pytest.raises(ReportError):
         parse(data, "csv", "fan", mapping, ";")
     assert [x["fee"] for x in parse(data.replace(b";5,00", b";-5,00"), "csv", "fan", mapping, ";")] == ["5.00", "5.00"]
+
+
+def test_first_fan_borderou_settles_on_its_own(ledger):
+    """Issue #49: a first FAN borderou with a phone column, `-` cells and Romanian amounts, matching open invoices
+    and the bank credit to the cent, settles without a person's confirmation."""
+    for n, total in ((1, "1250.50"), (2, "300.00")):
+        ledger.add_issued(
+            dict(
+                message_id=f"fan-{n}",
+                company="NORD",
+                number=f"FAN-{n}",
+                issue_date="2026-10-01",
+                currency="RON",
+                total=total,
+                doc_type="invoice",
+                status="open",
+                raw_path="",
+            )
+        )
+    store_bank(ledger, statement(amount=Decimal("1538.00")))  # 1550.50 collected minus 12.50 fee
+    data = (
+        b"AWB;Telefon destinatar;Numar factura;Ramburs;Comision ramburs;Observatii\n"
+        b"1000000001;+40700000000;FAN-1;1.250,50;-12,50;-\n"
+        b"1000000002;+40700000001;FAN-2;300,00;-;-\n"
+    )
+    mapping = dict(reference="Numar factura", gross="Ramburs", fee="Comision ramburs")
+    described = dict(source="fan", name="Synthetic Courier SRL", currency="RON", mapping=mapping)
+    result = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    assert result["message"] == bank_upload.COLLECTED
+    assert {r["message_id"]: r["status"] for r in ledger.issued_rows()} == {"fan-1": "collected", "fan-2": "collected"}
+    assert ledger.db.execute("SELECT count(*) FROM settlement_confirmations").fetchone()[0] == 0
