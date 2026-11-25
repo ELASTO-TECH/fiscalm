@@ -35,9 +35,10 @@ fallbacks and workflows when replacing them; do not preserve installation-specif
    file and documents to download. A human imports payments and sends documents or copied reminder text.
    Mail access is read-only IMAP for incoming invoices; never request write/APPEND capabilities or scopes.
    Don't add a code path that pays, transfers, sends or changes anything in the mail account.
-2. **When in doubt, do nothing.** A debit that fits several invoices settles none. A missing file
-   is never regenerated on its own. An invoice the user marks paid stays "În curs de confirmare" until
-   a statement or a mail proves it. A wrong "paid" hides a debt, so any rule that could settle the wrong item
+2. **When in doubt, do nothing.** A debit that fits several invoices settles none. A debit with the exact amount
+   of exactly one candidate settles it on its own, even when its bank text names no supplier; a person is asked only
+   about real ambiguity (maintainer decision, 2026-11-25). A missing file is never regenerated on its own.
+   An invoice the user marks paid stays "În curs de confirmare" until a statement or a mail proves it. A wrong "paid" hides a debt, so any rule that could settle the wrong item
    must refuse instead.
 3. **One statement transaction settles one item, or exactly the items of one verified settlement report.**
    A debit pays one invoice or payment; a credit collects one issued invoice, or one complete batch.

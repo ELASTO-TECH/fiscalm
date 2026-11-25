@@ -497,7 +497,9 @@ def auto_mark_paid(ledger: Ledger, st: statements.Statement) -> list[str]:
             continue
         left = rivals(t) - {("payment", i) for i in done}
         if len(left) == 1 and (key := left.pop())[0] == "payment":
-            settle(next(p for p in open_items if p["item_id"] == key[1]), t)
+            p = next(p for p in open_items if p["item_id"] == key[1])
+            if efactura.payment_fits(p, t):  # its account and amount, not the amount alone (efactura._payment_rival)
+                settle(p, t)
     return done
 
 
