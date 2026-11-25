@@ -42,6 +42,9 @@ fallbacks and workflows when replacing them; do not preserve installation-specif
    must refuse instead.
 3. **One statement transaction settles one item, or exactly the items of one verified settlement report.**
    A debit pays one invoice or payment; a credit collects one issued invoice, or one complete batch.
+   A credit collects the one open issued invoice it fits by exact amount: from its client, or, from a bank account
+   that shows no other client, naming it or alone of its amount with no other credit of the statement fitting it
+   too (maintainer decision, 2026-11-25).
    A settlement is identified by firm + payer + report reference. The credit, report and every invoice
    belong to that same firm; a line naming another firm refuses the whole report.
    A batch requires an identified payer, a report from that payer dated within a fixed window before a trustworthy statement credit,

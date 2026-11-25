@@ -2,6 +2,7 @@
 
 import io
 import json
+import sqlite3
 import zipfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -277,6 +278,127 @@ def test_ambiguous_credit_settles_nothing(ledger, home, sec, monkeypatch):
     assert {r["status"] for r in issued.issued(ledger, "NORD")["rows"]} == {"neincasata"}
 
 
+@pytest.mark.parametrize(
+    "client,cui,counterparty,desc,how",
+    [
+        ("ION POPESCU", "", "POPESCU ION", "plata NRD 0010", "ref"),  # a private buyer, the invoice named
+        ("ION POPESCU", "", "ION POPESCU", "", "name"),  # a private buyer by name
+        ("BETA SOFTWARE SRL", "RO66666666", "BETA SOFTW", "servicii", "amount"),  # abbreviated, one of its amount
+        ("BETA SOFTWARE SRL", "RO66666666", "MAMA HOLDING SRL", "Plata factura NRD 0010", "ref"),  # someone else pays
+        ("BETA SOFTWARE SRL", "RO66666666", "GAMMA SRL", "Plata factura NRD 0010", "ref"),  # another client pays it
+    ],
+)
+def test_a_credit_collects_the_one_invoice_it_fits(
+    ledger, home, sec, monkeypatch, client, cui, counterparty, desc, how
+):
+    _stored(ledger, monkeypatch, **{"7001": ubl(number="NRD 0010", total="350.00", client=client, client_cui=cui)})
+    _stored(ledger, monkeypatch, **{"7002": ubl(number="NRD 0011", total="1200.00", client="GAMMA SRL")})
+    t = _credit("350.00", date(2026, 10, 20), counterparty=counterparty, iban=OTHER_IBAN, desc=desc)
+    assert issued.match_statement(ledger, _st(t)) == ["7001"]
+    row = ledger.issued("7001")
+    assert f" {how} " in row["collected_note"] and row["collected_from_iban"] is None  # no client CUI shown
+
+
+def test_two_credits_of_one_amount_collect_nothing_by_amount(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"7001": ubl()})
+    a = _credit("1190.00", date(2026, 10, 20), counterparty="ALFA", iban=OTHER_IBAN, desc="x")
+    b = _credit("1190.00", date(2026, 10, 21), counterparty="OMEGA", iban=OTHER_IBAN, desc="y")
+    assert issued.match_statement(ledger, _st(a, b)) == []
+    assert issued.match_statement(ledger, _st(a, a)) == []  # two lines alike (one key) are two credits too
+    _stored(ledger, monkeypatch, **{"7002": ubl(number="NRD 0043", total="5.00", client="GAMMA LABS SRL")})
+    gamma = _credit("1190.00", date(2026, 10, 20), counterparty="GAMMA LABS SRL", iban=OTHER_IBAN, desc="x")
+    assert statements.tx_key(gamma) == statements.tx_key(a)  # another payer on a line keyed like a's
+    assert issued.match_statement(ledger, _st(a, gamma, b)) == []  # a and b still both claim it
+    assert issued.match_statement(ledger, _st(a, _credit("1190.00", date(2026, 10, 22)))) == ["7001"]  # the client's
+    assert "name" in ledger.issued("7001")["collected_note"]
+
+
+def test_a_credit_never_trades_its_client_for_an_amount(ledger, home, sec, monkeypatch):
+    one = dict(total="100.00", issue="2026-10-11")
+    _stored(ledger, monkeypatch, **{"7001": ubl(client="ALPHA SOFT SRL", **one)})
+    _stored(
+        ledger, monkeypatch, **{"7002": ubl(number="NRD 0043", client="BETA LABS SRL", client_cui="RO77777777", **one)}
+    )
+    alpha = [
+        _credit("100.00", date(2026, 10, d), counterparty="ALPHA SOFT SRL", iban="", desc=f"p{d}") for d in (20, 21)
+    ]
+    assert issued.match_statement(ledger, _st(*alpha)) == ["7001"]  # the second Alpha credit never pays Beta
+    assert issued.match_statement(ledger, _st(*alpha)) == []  # nor on the next sync, once Alpha's is closed
+
+
+@pytest.mark.parametrize("gamma_first", [True, False])
+def test_an_account_shown_on_the_statement_pays_no_one_else_by_amount(ledger, home, sec, monkeypatch, gamma_first):
+    _stored(ledger, monkeypatch, **{"7001": ubl(total="200.00", client="BETA LABS SRL", client_cui="RO77777777")})
+    _stored(ledger, monkeypatch, **{"7002": ubl(number="NRD 0043", total="100.00", client="GAMMA SRL")})
+    gamma = _credit("100.00", date(2026, 10, 20), counterparty="X", iban=OTHER_IBAN, desc="CUI 66666666")
+    other = _credit("200.00", date(2026, 10, 21), counterparty="XYZ", iban=OTHER_IBAN, desc="servicii")
+    assert issued.match_statement(ledger, _st(*((gamma, other) if gamma_first else (other, gamma)))) == ["7002"]
+    partial = _credit("40.00", date(2026, 10, 22), counterparty="BETA LABS SRL", iban=CLIENT_IBAN, desc="avans")
+    abbreviated = _credit("200.00", date(2026, 10, 22), counterparty="BL", iban=CLIENT_IBAN, desc="x")
+    assert issued.match_statement(ledger, _st(partial, abbreviated)) == []  # its partial payment showed Beta
+
+
+@pytest.mark.parametrize(
+    "numbers,desc,collected",
+    [
+        (("NRD 0042", "NRD 0043"), "comanda 0042", []),
+        (("NRD 0042", "NRD 0043"), "NRD 0042 si NRD 0043", []),
+        (("NRD 0042", "NRD 0043"), "NRD 0042", ["7001"]),
+        (("10", "99"), "servicii 2026-10-20", []),  # a date is no invoice number
+    ],
+)
+def test_only_one_whole_identifier_picks_among_amount_twins(ledger, home, sec, monkeypatch, numbers, desc, collected):
+    _stored(ledger, monkeypatch, **{"7001": ubl(number=numbers[0]), "7002": ubl(number=numbers[1], client="GAMMA SRL")})
+    anonymous = _credit("1190.00", date(2026, 10, 21), counterparty="Y", iban="", desc="plata")
+    named = _credit("1190.00", date(2026, 10, 20), counterparty="NEW PAYER", iban=OTHER_IBAN, desc=desc)
+    assert issued.match_statement(ledger, _st(anonymous, named)) == collected
+    assert issued.match_statement(ledger, _st(anonymous, named)) == []  # the same statement again: the same answer
+
+
+@pytest.mark.parametrize(
+    "numbers,desc,collected",
+    [(("10", "99"), "servicii 2026-10-20", []), (("NRD 0042", "NRD 0043"), "Plata factura 0042", ["7001"])],
+)
+def test_a_number_without_series_never_chooses_between_a_clients_invoices(
+    ledger, home, sec, monkeypatch, numbers, desc, collected
+):
+    _stored(ledger, monkeypatch, **{"7001": ubl(number=numbers[0], client="ION POPESCU", client_cui="")})
+    _stored(ledger, monkeypatch, **{"7002": ubl(number=numbers[1], client="ION POPESCU", client_cui="")})
+    t = _credit("1190.00", date(2026, 10, 20), counterparty="ION POPESCU", iban="", desc=desc)
+    assert issued.match_statement(ledger, _st(t)) == collected  # digits of a series invoice still pick
+
+
+def test_two_connections_matching_one_statement_collect_once(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"7001": ubl()})
+    st = _st(_credit("1190.00", date(2026, 10, 20), counterparty="X", iban=OTHER_IBAN, desc="servicii"))
+    won, _ = race(ledger.path, lambda other, k: issued.match_statement(other, st))
+    assert sorted(won) == [[], ["7001"]]
+    assert ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 1
+
+
+def test_the_choice_and_the_write_hold_one_write_lock(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"7001": ubl()})
+    seen, build = [], issued._Pool.__init__
+
+    def locked(self, L, *a):  # another connection can't take the write lock while the choice is made
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            sqlite3.connect(L.path, timeout=0).execute("BEGIN IMMEDIATE")
+        seen.append(True)
+        build(self, L, *a)
+
+    monkeypatch.setattr(issued._Pool, "__init__", locked)
+    assert issued.match_statement(ledger, _st(_credit("1190.00", date(2026, 10, 20)))) == ["7001"] and seen == [True]
+
+
+def test_a_private_name_from_a_client_account_collects_nothing(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"7001": ubl(client="GAMMA LABS SRL", client_cui="RO77777777", total="50.00")})
+    _stored(ledger, monkeypatch, **{"7002": ubl(number="NRD 0043", client="ION POPESCU", client_cui="")})
+    gamma = _credit("50.00", date(2026, 10, 20), counterparty="X", iban=OTHER_IBAN, desc="CUI 77777777")
+    assert issued.match_statement(ledger, _st(gamma)) == ["7001"]
+    person = _credit("1190.00", date(2026, 10, 21), counterparty="ION POPESCU", iban=OTHER_IBAN, desc="")
+    assert issued.match_statement(ledger, _st(person)) == []
+
+
 def test_cui_on_credit_and_then_the_learned_iban(ledger, home, sec, monkeypatch):
     _stored(
         ledger,
@@ -296,28 +418,30 @@ def test_cui_on_credit_and_then_the_learned_iban(ledger, home, sec, monkeypatch)
 
 
 def test_wrong_client_amount_debit_or_own_transfer_never_collects(ledger, home, sec, monkeypatch):
-    _stored(ledger, monkeypatch, **{"7001": ubl()})
-    other = _credit(
-        "1190.00",
-        date(2026, 10, 20),
-        counterparty="DELTA SOFTWARE SRL",
-        iban=OTHER_IBAN,
-        desc="Incasare;DELTA SOFTWARE SRL;" + OTHER_IBAN + ";",
+    _stored(
+        ledger,
+        monkeypatch,
+        **{"7001": ubl(), "7002": ubl(number="NRD 0043", client="GAMMA LABS SRL", client_cui="RO77777777")},
     )
-    partial_name = _credit(
-        "1190.00",
-        date(2026, 10, 20),
-        counterparty="BETA CONSTRUCT SRL",
-        iban=OTHER_IBAN,
-        desc="Incasare;BETA CONSTRUCT SRL;" + OTHER_IBAN + ";",
+    gamma = _credit(
+        "1190.00", date(2026, 10, 11), iban=OTHER_IBAN, desc="Incasare;GMLABS;CUI 77777777", counterparty="X"
     )
+    assert issued.match_statement(ledger, _st(gamma)) == ["7002"]  # OTHER_IBAN is now GAMMA's account
+    other = _credit("1190.00", date(2026, 10, 20), counterparty="DELTA SOFTWARE SRL", iban=OTHER_IBAN, desc="servicii")
+    card_refund = _credit("1190.00", date(2026, 10, 20), counterparty="BETA SOFTWARE SRL", iban="", desc="RETUR")
+    card_refund.card_last4 = "4242"
+    # no account it came from: a refund without its card number, interest the bank's text doesn't name
+    no_account = _credit("1190.00", date(2026, 10, 20), counterparty="", iban="", desc="RETUR")
     amount = _credit("1189.99", date(2026, 10, 20))
     early = _credit("1190.00", date(2026, 9, 1))
     debit = _credit("1190.00", date(2026, 10, 20))
     debit.direction = "debit"
     own = _credit("1190.00", date(2026, 10, 20), iban="RO71BTRLEURCRT0000000001")
-    assert issued.match_statement(ledger, _st(other, partial_name, amount, early, debit, own)) == []
+    for t in (other, card_refund, no_account, amount, early, debit, own):
+        assert issued.match_statement(ledger, _st(t)) == []
     assert ledger.issued("7001")["status"] == "open"
+    series = _credit("1190.00", date(2026, 10, 21), desc="plata CARD 0042")  # the client's own words: no refund
+    assert issued.match_statement(ledger, _st(series)) == ["7001"]
 
 
 def test_credit_that_settled_one_invoice_never_settles_another(ledger, home, sec, monkeypatch):
@@ -456,17 +580,12 @@ def test_shared_first_word_is_not_the_same_client(ledger, home, sec, monkeypatch
         iban=OTHER_IBAN,
         desc="Incasare;BETA TECHNOLOGIES SRL;" + OTHER_IBAN + ";servicii BETA SERVICES",
     )
-    assert issued.match_statement(ledger, _st(other)) == []
-    assert ledger.issued("7001")["status"] == "open"
-    # the exact name (legal forms aside) still collects
-    same = _credit(
-        "1190.00",
-        date(2026, 10, 21),
-        counterparty="S.C. BETA SERVICES S.R.L.",
-        iban=OTHER_IBAN,
-        desc="Incasare;S.C. BETA SERVICES S.R.L.;" + OTHER_IBAN + ";",
-    )
-    assert issued.match_statement(ledger, _st(same)) == ["7001"]
+    # not the client: it collects only as the one invoice of its amount, and its account is not learned
+    assert issued.match_statement(ledger, _st(other)) == ["7001"]
+    assert "amount" in ledger.issued("7001")["collected_note"] and not ledger.issued("7001")["collected_from_iban"]
+    # the exact name (legal forms aside) is the client
+    same = _credit("1190.00", date(2026, 10, 21), counterparty="S.C. BETA SERVICES S.R.L.", iban=OTHER_IBAN)
+    assert issued.credit_from_client(ledger, "NORD", "BETA SERVICES SRL", "RO77777777", same) == "name"
 
 
 def test_credit_naming_a_closed_short_number_settles_nothing(ledger, home, sec, monkeypatch):
@@ -671,7 +790,7 @@ def test_a_lone_initial_is_part_of_the_name_not_a_legal_form(ledger, home, sec, 
         iban=OTHER_IBAN,
         desc="Incasare;ALPHA L CONSULTING SRL;" + OTHER_IBAN + ";",
     )
-    assert issued.match_statement(ledger, _st(t)) == []
+    assert issued.credit_from_client(ledger, "NORD", "ALPHA R CONSULTING SRL", "", t) == ""
 
 
 @pytest.mark.parametrize("bad", ["²", "1" * 31, "٣", "0x1", "1e3"])
