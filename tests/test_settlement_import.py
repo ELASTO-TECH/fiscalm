@@ -162,7 +162,7 @@ def test_real_amounts_parse_exactly_or_refuse(gross, fee, net, expected):
         return
     line = parse(data, "csv", "fan", mapping, ";")[0]
     assert (line["reference"], line["gross"], line["fee"], line.get("currency", "")) == ("=TEST-1", *expected)
-    assert money(line["gross"]) + 0 == Decimal(expected[0])  # what is stored reads back exactly
+    assert money(line["gross"], signed=True) == Decimal(expected[0])  # what is stored reads back exactly
     if net:  # a mapped net is stored as gross minus fee, never `-0.00`
         assert line["net"] == f"{Decimal(expected[0]) - Decimal(expected[1]):.2f}"
 
@@ -172,7 +172,7 @@ def test_multi_payout_file_becomes_one_report_per_payout(ledger):
     duplicate."""
     for n in (1, 2):
         ledger.add_issued(dict(message_id=f"m{n}", company="NORD", number=f"TEST-{n}", status="open", raw_path=""))
-    data = b"Borderou;Factura;Ramburs;Comision;Data\nB-1;TEST-1;100,00;2,00;09.10.2026\nB-2;TEST-2;50,00;-1,00;11.10.2026\n"
+    data = b"Borderou;Factura;Ramburs;Comision;Data\nB-1;TEST-1;100,00;2,00;09.10.2026\nB-2;TEST-2;50,00;1,00;11.10.2026\n"
     mapping = dict(batch="Borderou", reference="Factura", gross="Ramburs", fee="Comision", date="Data")
     described = NETOPIA | dict(source="fan", name="Synthetic Courier SRL", mapping=mapping)
     result = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
@@ -185,7 +185,7 @@ def test_multi_payout_file_becomes_one_report_per_payout(ledger):
     partner = ledger.db.execute("SELECT partner FROM partner_settlement_formats").fetchone()[0]
     again = bank_upload.accept_report(ledger, "NORD", data, "text/csv", partner=partner, **UPLOAD)
     assert again["status"] == "duplicate" and len(settlements.state(ledger, "NORD")) == 2
-    mixed = data.replace(b"B-2;TEST-2;50,00;-1,00;11", b"B-1;TEST-2;50,00;-1,00;11")
+    mixed = data.replace(b"B-2;TEST-2;50,00;1,00;11", b"B-1;TEST-2;50,00;1,00;11")
     with pytest.raises(bank_upload.Refused):  # one payout, two days: nothing is stored
         bank_upload.accept_report(ledger, "NORD", mixed, "text/csv", partner=partner, **UPLOAD)
 
