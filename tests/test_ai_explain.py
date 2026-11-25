@@ -144,5 +144,5 @@ def test_a_sure_label_waits_when_an_amount_fits_by_the_write_or_answers_disagree
 
 def test_one_firm_a_run_asks_the_ai_in_turn(ledger):
     assert ai_explain.in_turn(ledger, ["A", "B", "C"]) == ["A", "B", "C"]
-    ai_explain.took_turn(ledger, "B")
+    ledger.set_meta(ai_explain.TURN, "B")
     assert ai_explain.in_turn(ledger, ["A", "B", "C"]) == ["C", "A", "B"]

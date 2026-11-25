@@ -1234,7 +1234,6 @@ def build_parser() -> argparse.ArgumentParser:
         for co in ai_explain.in_turn(L, firms):  # one request a run: a slow provider delays no rule and no firm's turn
             out[co] |= ai_explain.explain(L, co, api.state(L, co))
             if out[co]["sent"]:
-                ai_explain.took_turn(L, co)
                 break
         print(json.dumps(out))
         return 0

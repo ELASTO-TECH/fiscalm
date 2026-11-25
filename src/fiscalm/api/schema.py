@@ -1084,7 +1084,8 @@ def schemas() -> dict:
         "partner applies only to invoices or the initial bundle; selected always uses the current link's partner. "
         "Only the initial bundle has proposed: at most the one open invoice of either partner whose number the bank details "
         "name, when the transaction equals its remaining amount in its currency (never for an explained transaction); "
-        "its partner is the default partner before the one the bank text points to. A proposal is never applied: the user confirms it. "
+        "else the open invoices of an AI proposal whose remaining amounts add up to the transaction in one currency. "
+        "Its partner is the default partner before the one the bank text points to. A proposal is never applied: the user confirms it. "
         "Reads are current, not a cross-request snapshot; replace choices after writes."
     )
     out["CoveredRow"] = {

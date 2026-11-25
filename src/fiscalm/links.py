@@ -24,6 +24,7 @@ import json
 import re
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 
@@ -86,9 +87,10 @@ def need(L: Ledger, company: str) -> Callable[[str], Decimal]:
     """What an item asks for before any explanation: an issued invoice its total less its credit notes, a received
     invoice its total, a payment row its amount. Read when asked, so inside the caller's write transaction."""
     credited: dict[str, Decimal] | None = None
+    received: dict[str, Decimal] | None = None
 
     def of(item: str) -> Decimal:
-        nonlocal credited
+        nonlocal credited, received
         kind, _, ident = item.partition(" ")
         if kind == "receipt":  # a bon asks for nothing: the debit it explains is its amount
             return Decimal(0)
@@ -98,12 +100,10 @@ def need(L: Ledger, company: str) -> Callable[[str], Decimal]:
             r = L.issued(ident)
             return Decimal(r["total"]) - credited.get(ident, Decimal(0)) if r else Decimal(0)
         if kind == "efactura":
+            if received is None:
+                received = efactura.credited(L, company)
             r = L.efactura(ident)
-            return (
-                max(Decimal(0), Decimal(r["total"]) - efactura.credited(L, company).get(ident, Decimal(0)))
-                if r
-                else Decimal(0)
-            )
+            return max(Decimal(0), Decimal(r["total"]) - received.get(ident, Decimal(0))) if r else Decimal(0)
         p = L.payment(ident)
         return Decimal(p["amount"]) if p else Decimal(0)
 
@@ -553,11 +553,18 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
 def apply_ai_label(L: Ledger, company: str, key: str, label: str, note: str) -> bool:
     """A Fără document label the AI integration is sure of (ai_explain), written as an explanation no person made
     (rule 'ai'): refused as a person's label would be, while anybody decided otherwise since (_untouched), and while
-    an open item is exactly the line's amount (fits_open_amount), all under the write lock."""
+    an open item is exactly the line's amount (fits_open_amount), a receipt its amount whatever its sign, or a saved
+    rule now speaks for the line (proposals), all under the write lock."""
     labelled = _labelled(L, company, key, label, note)
 
     def unfit() -> dict:
-        if fits_open_amount(L, company, _transaction(L, company, key)[0]):
+        t = _transaction(L, company, key)[0]
+        size = replace(t, amount=abs(t.amount), orig_amount=None if t.orig_amount is None else abs(t.orig_amount))
+        if (
+            fits_open_amount(L, company, t)
+            or (t.direction == "debit" and recon.match_receipts([size], recon._receipts(L, company)))
+            or proposals(company, [t], L.memories(company), L)[0]
+        ):
             raise LinkRefused("changed")
         return labelled()
 
@@ -662,10 +669,13 @@ def fits_open_amount(L: Ledger, company: str, t: statements.Tx) -> bool:
     if t.orig_amount is not None and t.orig_currency:
         amounts.add((t.orig_currency, abs(t.orig_amount)))
     queries = (
-        ["SELECT 'issued ' || message_id, currency FROM issued WHERE company=? AND status IN ('open','marked')"]
+        [  # an invoice whose total could not be read fits no amount
+            "SELECT 'issued ' || message_id, currency FROM issued WHERE company=? AND status IN ('open','marked') "
+            "AND total IS NOT NULL"
+        ]
         if t.direction == "credit"
         else [
-            "SELECT 'efactura ' || message_id, currency FROM efactura WHERE company=? "
+            "SELECT 'efactura ' || message_id, currency FROM efactura WHERE company=? AND total IS NOT NULL "
             "AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)",
             "SELECT 'payment ' || item_id, 'RON' FROM payments WHERE company=? AND status IN ('pending','exported')",
         ]

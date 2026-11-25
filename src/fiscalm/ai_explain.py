@@ -70,6 +70,7 @@ def explain(L: Ledger, company: str, full: dict, ask: Callable | None = None) ->
     lines = [r for r in lines if r["id"] not in asked][:BATCH]
     if not lines:
         return {"sent": 0, "asked": 0, "applied": 0}
+    L.set_meta(TURN, company)  # this firm's turn is taken even if what follows fails
     try:
         got = (ask or (lambda s, p, sc: ai.ask_json(L, s, p, sc)))(SYSTEM, _prompt(full, rows, lines), SCHEMA)
         ai.check(got, SCHEMA)
@@ -141,11 +142,7 @@ def _checked(full: dict, tx: dict, a: dict) -> dict:
 
 
 def in_turn(L: Ledger, firms: list[str]) -> list[str]:
-    """The firms in the order their lines are asked about: after the one asked last (took_turn), round the list."""
+    """The firms in the order their lines are asked about: after the one asked last (explain), round the list."""
     last = L.get_meta(TURN) or ""
     after = firms.index(last) + 1 if last in firms else 0
     return firms[after:] + firms[:after]
-
-
-def took_turn(L: Ledger, company: str) -> None:
-    L.set_meta(TURN, company)

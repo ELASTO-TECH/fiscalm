@@ -1421,8 +1421,7 @@
                 "partners",
                 "invoices",
                 "payments",
-                "selected",
-                "receipts"
+                "selected"
               ]
             }
           },
@@ -10138,7 +10137,6 @@
     "credit-pick": "local",
     "card-owner": "local",
     "tx-link": "local",
-    "tx-receipt": "local",
     "tx-await": "local",
     "tx-unlink": "local",
     "memory-forget": "local",
@@ -10229,7 +10227,6 @@
     "credit-pick": "member",
     "card-owner": "member",
     "tx-link": "member",
-    "tx-receipt": "member",
     "tx-await": "member",
     "tx-unlink": "member",
     "memory-forget": "member",
@@ -10320,7 +10317,6 @@
     "rule-reminders": "after_days (digit string, 1..365)",
     "card-owner": "tx (an observed card transaction), owner (a companies[].key or personal); first answer wins, never confirms payment",
     "tx-link": "kind (documents, the default; label: Fără document, reason one of bank_fee, interest, personal, other and an optional note for the accountant, required for other, at most 200 characters; transfer: Transfer între conturi; advance: Avans, who the administrator or associate, 1 to 100 characters), tx (a transactions.rows[].id; for an explanation already made, its link.tx), invoices (comma-separated ids: issued[].id for a credit, invoices[].id for a debit) or payment (one payments.*[].item_id, debits only), reason (\"\" or one of rest, courier_fee, bank_fee, fx, other), note (other only, 1 to 200 characters), was (the row's explanation.link.id, \"\" for none), remember (\"\", or one of the row's remember keys: iban, card for a label only, name; never for a transfer)",
-    "tx-receipt": "tx (a card debit in transactions.rows[].id, not explained), id (documents[].id of an upload of this firm whose amount is still null): the upload is this debit's bon and takes its amount, day and card. Local bookkeeping; refused when the debit or the upload is already explained or the upload has data of its own.",
     "tx-await": "tx (a debit in transactions.rows[].id, not explained or settled), on (\"1\" waits, \"0\" stops waiting), note (on=1 only, optional, what is expected, at most 200 characters). Aștept factura: the debit stays to explain, listed last, and reserves nothing. Local operation.",
     "tx-unlink": "tx, was (the explanation's id)",
     "memory-forget": "id (a transactions.remembered[].id)",
@@ -20643,32 +20639,6 @@
                   "total",
                   "next_cursor"
                 ]
-              },
-              "receipts": {
-                "type": "object",
-                "properties": {
-                  "data": {
-                    "type": "array",
-                    "items": {
-                      "$ref": "#/components/schemas/State/properties/documents/items"
-                    },
-                    "maxItems": 200
-                  },
-                  "total": {
-                    "type": "integer"
-                  },
-                  "next_cursor": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "data",
-                  "total",
-                  "next_cursor"
-                ]
               }
             },
             "required": []
@@ -20677,7 +20647,7 @@
         "required": [
           "pages"
         ],
-        "description": "Current transaction-form choices, without linking or settling anything. Without collection, one full owner projection returns initial partners, invoices, payments, selected and receipts pages; with collection, just that page. Each has an exact matching total and offset cursor (default 50, maximum 200). Only partners of the transaction's direction are offered, including a credit holder's complete exposure. Invoices retain the existing open/marked, SPV-ready, non-rejected, positive-left and account/original-currency filters; amounts restore this link's own contribution before editing. Closed items selected by the current link remain available. selected pages all existing invoice choices independently of the primary row's nested-list cap; position preserves invoice order across pages/search. Invoices sort by date then case-folded number; partners by case-folded display name. Prepared payments retain held/in-file/lost/imported order, for debits with RON account or original currency only. Payment page IDs are keyed opaque identifiers; raw item_id is private and never appears in a cursor. receipts lists, for a debit only, the firm's uploaded files with no amount yet (held, unsent, without an invoice), in the documents order: the bon a person may name for it with tx-receipt. q is an accent-insensitive display-text substring (maximum 200 characters); it excludes private payment keys. partner applies only to invoices or the initial bundle; selected always uses the current link's partner. Only the initial bundle has proposed: at most the one open invoice of either partner whose number the bank details name, when the transaction equals its remaining amount in its currency (never for an explained transaction); its partner is the default partner before the one the bank text points to. A proposal is never applied: the user confirms it. Reads are current, not a cross-request snapshot; replace choices after writes."
+        "description": "Current transaction-form choices, without linking or settling anything. Without collection, one full owner projection returns initial partners, invoices, payments and selected pages; with collection, just that page. Each has an exact matching total and offset cursor (default 50, maximum 200). Only partners of the transaction's direction are offered, including a credit holder's complete exposure. Invoices retain the existing open/marked, SPV-ready, non-rejected, positive-left and account/original-currency filters; amounts restore this link's own contribution before editing. Closed items selected by the current link remain available. selected pages all existing invoice choices independently of the primary row's nested-list cap; position preserves invoice order across pages/search. Invoices sort by date then case-folded number; partners by case-folded display name. Prepared payments retain held/in-file/lost/imported order, for debits with RON account or original currency only. Payment page IDs are keyed opaque identifiers; raw item_id is private and never appears in a cursor. q is an accent-insensitive display-text substring (maximum 200 characters); it excludes private payment keys. partner applies only to invoices or the initial bundle; selected always uses the current link's partner. Only the initial bundle has proposed: at most the one open invoice of either partner whose number the bank details name, when the transaction equals its remaining amount in its currency (never for an explained transaction); else the open invoices of an AI proposal whose remaining amounts add up to the transaction in one currency. Its partner is the default partner before the one the bank text points to. A proposal is never applied: the user confirms it. Reads are current, not a cross-request snapshot; replace choices after writes."
       },
       "CoveredRow": {
         "oneOf": [
@@ -21339,7 +21309,7 @@
           "state",
           "related"
         ],
-        "description": "One document, settlement, transaction or eMAG-task sheet, including an issued invoice's local-id alias. Money, identities and capabilities come from the complete company projection. related pages received credit notes, issued reversals or settlement lines in their existing order (default 50, maximum 200); its cursor continues through this same endpoint. The selected invoice contains the current related page. Receipt articles remain complete (at most 40). Other nested historical lists are capped at 50. Reads are current, not a cross-request snapshot. Order id uses the existing company:task_id sheet link; issued context identifies an already issued draft. The app also accepts ALL, reading only candidate owners of global IDs (or the first offered mail company), without retaining other firms' histories. Settlement totals/counts and confirmation capabilities precede paging. For transaction sheets only, transaction contains the complete said descriptor and exact link part/payment counts; related pages covered invoices then prepared payments in source order. Invoice numbers, remaining amounts and currencies have the existing missing-reference fallbacks. The shell keeps the selected transaction, its transfer counterpart, selected partner identities and settlement fee context; no unbounded form-choice arrays are included. The primary transaction's nested lists are capped at 50; use related and its exact total for covered rows. Invoice and issued sheets also carry lines: an invoice written here lists its stored lines, one read from SPV the lines of its stored XML (at most 200, truncated says more exist; descriptions at most 300 characters). unavailable means no stored document could be read, or one was refused or malformed; every line is checked, also those past the 200 returned, so it is never partial. Lines are display only: the totals above remain the invoice's amounts. A line's vat and gross are its net times vat_rate, rounded half up to the cent (null without a rate), so they can differ from the document's VAT by rounding. totals are the document's own: the totals an invoice written here was issued with (payable is its total), or the stored XML's LegalMonetaryTotal and its TaxTotal in the document currency, one tax per subtotal; null when they are missing or not decimal numbers, never summed from the lines. A null unit_price means a valid price per a positive base quantity other than one; a missing price or a malformed base quantity makes the document unavailable. Editable transactions also bundle five initial transaction-choices pages from the same owner projection; immutable transactions carry an empty choices object. Continue/filter through transaction-choices."
+        "description": "One document, settlement, transaction or eMAG-task sheet, including an issued invoice's local-id alias. Money, identities and capabilities come from the complete company projection. related pages received credit notes, issued reversals or settlement lines in their existing order (default 50, maximum 200); its cursor continues through this same endpoint. The selected invoice contains the current related page. Receipt articles remain complete (at most 40). Other nested historical lists are capped at 50. Reads are current, not a cross-request snapshot. Order id uses the existing company:task_id sheet link; issued context identifies an already issued draft. The app also accepts ALL, reading only candidate owners of global IDs (or the first offered mail company), without retaining other firms' histories. Settlement totals/counts and confirmation capabilities precede paging. For transaction sheets only, transaction contains the complete said descriptor and exact link part/payment counts; related pages covered invoices then prepared payments in source order. Invoice numbers, remaining amounts and currencies have the existing missing-reference fallbacks. The shell keeps the selected transaction, its transfer counterpart, selected partner identities and settlement fee context; no unbounded form-choice arrays are included. The primary transaction's nested lists are capped at 50; use related and its exact total for covered rows. Invoice and issued sheets also carry lines: an invoice written here lists its stored lines, one read from SPV the lines of its stored XML (at most 200, truncated says more exist; descriptions at most 300 characters). unavailable means no stored document could be read, or one was refused or malformed; every line is checked, also those past the 200 returned, so it is never partial. Lines are display only: the totals above remain the invoice's amounts. A line's vat and gross are its net times vat_rate, rounded half up to the cent (null without a rate), so they can differ from the document's VAT by rounding. totals are the document's own: the totals an invoice written here was issued with (payable is its total), or the stored XML's LegalMonetaryTotal and its TaxTotal in the document currency, one tax per subtotal; null when they are missing or not decimal numbers, never summed from the lines. A null unit_price means a valid price per a positive base quantity other than one; a missing price or a malformed base quantity makes the document unavailable. Editable transactions also bundle four initial transaction-choices pages from the same owner projection; immutable transactions carry an empty choices object. Continue/filter through transaction-choices."
       },
       "StateListPage": {
         "type": "object",
