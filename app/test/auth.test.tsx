@@ -2,7 +2,7 @@
 import { renderToString } from "react-dom/server";
 import { hydrateRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
-import { useContext, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -817,14 +817,11 @@ it.each(["before", "after"])("does not repeat the operation for another account 
   expect(screen.getByLabelText("Denumire")).toHaveValue("");
 });
 
-it("listens for a step-up from the first paint of the signed-in screen", async () => {
-  server(); const asked = new Promise<boolean>(resolve => {
-    const painted = new MutationObserver(() => {
-      if (!screen.queryByText("Conținut privat")) return; painted.disconnect();
-      resolve(!window.dispatchEvent(new CustomEvent(REAUTHENTICATE, { cancelable: true, detail: { finish: () => {} } })));
-    }); painted.observe(document.body, { childList: true, subtree: true });
-  });
-  render(privateApp); expect(await asked).toBe(true);
+it("listens for a step-up as soon as the signed-in screen mounts", async () => {
+  let handled: boolean | undefined;
+  // A child's mount effect runs before any passive effect of the screen around it.
+  const Asks = () => { useEffect(() => { handled = !window.dispatchEvent(new CustomEvent(REAUTHENTICATE, { cancelable: true, detail: { finish: () => {} } })); }, []); return <p>Conținut privat</p>; };
+  server(); render(<Authentication><Asks /></Authentication>); await waitFor(() => expect(handled).toBe(true));
 });
 
 it("does not open another confirmation loop when the retried request is refused again", async () => {
