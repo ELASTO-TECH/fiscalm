@@ -29,8 +29,6 @@ class ReportError(ValueError):
 
 # Currency words a report writes next to an amount or in its currency column, by ISO code.
 CURRENCY_WORDS = {"RON": "RON", "LEI": "RON", "EUR": "EUR", "€": "EUR", "USD": "USD"}  # never `$`: USD, CAD, AUD…
-_WORD = "|".join(re.escape(w) for w in CURRENCY_WORDS)
-_AMOUNT = re.compile(rf"(?i)(?:(?P<pre>{_WORD})\s*)?(?P<sign>[+-]?)\s*(?P<number>[\d.,' ]+?)\s*(?P<post>{_WORD})?")
 _NUMBER = re.compile(
     r"(?P<int>\d{1,12}|\d{1,3}(?P<sep>[., '])\d{3}(?:(?P=sep)\d{3}){0,3})(?:(?P<dec>[.,])(?P<cents>\d{1,2}))?"
 )
@@ -49,8 +47,17 @@ def amount(value: str) -> tuple[Decimal, str]:
     `1.234` or `1,234` (one group, no decimals) could be either reading, so it refuses; so do exponents and more than
     two decimals: no rounding, no guessing."""
     text = value.replace("\u00a0", " ").replace("\u202f", " ").strip() if isinstance(value, str) else ""
-    m = _AMOUNT.fullmatch(text)
-    n = _NUMBER.fullmatch(m["number"]) if m and not (m["pre"] and m["post"]) else None
+    # One step at a time, each a plain string test, so a long or odd cell refuses in linear time.
+    number, word = text if len(text) <= 40 else "", ""
+    for w in CURRENCY_WORDS:
+        if number.upper().startswith(w) and not number[len(w) : len(w) + 1].isalpha():
+            number, word = number[len(w) :].strip(), w
+            break
+        if number.upper().endswith(w) and not number[-len(w) - 1 : -len(w)].isalpha():
+            number, word = number[: -len(w)].strip(), w
+            break
+    sign = number[:1] if number[:1] in "+-" else ""
+    n = _NUMBER.fullmatch(number[len(sign) :].lstrip(" ")) if number else None
     if (
         not n
         or (n["dec"] and n["sep"] == n["dec"])
@@ -60,8 +67,7 @@ def amount(value: str) -> tuple[Decimal, str]:
     digits = re.sub(r"\D", "", n["int"]) + "." + (n["cents"] or "0")
     if len(digits.partition(".")[0]) > 12:  # the same bound as a stored amount (`money`)
         raise ReportError("Invalid amount")
-    word = m["pre"] or m["post"] or ""
-    return Decimal(m["sign"] + digits), currency_code(word) if word else ""
+    return Decimal(("-" if sign == "-" else "") + digits), currency_code(word) if word else ""
 
 
 def money(value: str) -> Decimal:
@@ -166,7 +172,7 @@ def _money_line(n: int, line: dict[str, str]) -> dict[str, str]:
         raise ReportError(f"Line {n}: refunds, disputes and adjustments require review")
     out = line | {"gross": f"{total:.2f}", "fee": f"{charge:.2f}"}
     if net is not None:
-        out["net"] = f"{net[0]:.2f}"
+        out["net"] = f"{total - charge:.2f}"  # equal to the mapped net, written as stored money
     if currencies:
         out["currency"] = currencies.pop()
     return out

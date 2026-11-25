@@ -126,6 +126,8 @@ def test_bad_delimiter_and_negative_string_index():
         ("100", "2", "-", None),  # a mapped net must say the amount
         ("$ 100", "0", "", None),  # USD, CAD or AUD
         ("1,000,000,000,000.00", "0", "", None),  # past the stored amount's 12 digits
+        ("1 " * 300 + "x", "0", "", None),  # a long odd cell refuses at once
+        ("100lei", "100,00", "-0,00", ("100.00", "100.00", "RON")),  # a net of -0 is stored as 0.00
         ("1.250", "0", "", None),  # one group, no decimals: 1250 or 1.25
         ("100,005", "0", "", None),
         ("1e3", "0", "", None),
