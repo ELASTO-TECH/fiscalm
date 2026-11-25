@@ -1231,7 +1231,9 @@ def build_parser() -> argparse.ArgumentParser:
         # integration is asked about what the rules left (ai_explain)
         firms = list(companies.all(L))
         out = {co: {"rules": len(links.apply_rules(L, co, api.state(L, co)["transactions"]["rows"]))} for co in firms}
-        for co in ai_explain.in_turn(L, firms):  # one request a run: a slow provider delays no rule and no firm's turn
+        for co in (
+            ai_explain.in_turn(L, firms) if ai_explain.enabled(L) else []
+        ):  # one request a run: a slow provider delays no rule and no firm's turn
             out[co] |= ai_explain.explain(L, co, api.state(L, co))
             if out[co]["sent"]:
                 break

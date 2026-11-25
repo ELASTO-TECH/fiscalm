@@ -62,7 +62,7 @@ def explain(L: Ledger, company: str, full: dict, ask: Callable | None = None) ->
     """Ask about up to BATCH lines (api.state's `full` for the company, read after apply_rules) not asked before,
     keep the checked proposals and apply the sure labels. No integration, or no usable answer, does nothing. `sent`:
     a request was made (one per run: in_turn)."""
-    if ask is None and not (integrations.default(L, "ai") is not None and ai.available(L)):
+    if ask is None and not enabled(L):
         return {"sent": 0, "asked": 0, "applied": 0}
     asked = L.ai_proposals(company)
     rows = full["transactions"]["rows"]
@@ -140,6 +140,11 @@ def _checked(full: dict, tx: dict, a: dict) -> dict:
     picks = transaction_choices.exactly(full, tx, a["invoices"])
     whole = picks and all(r["partner"] == a["partner"] for r in picks)
     return {"kind": "documents", "partner": a["partner"], "invoices": a["invoices"] if whole else [], "sure": False}
+
+
+def enabled(L: Ledger) -> bool:
+    """An administrator configured the AI integration and it is usable (never a fallback CLI)."""
+    return integrations.default(L, "ai") is not None and ai.available(L)
 
 
 def in_turn(L: Ledger, firms: list[str]) -> list[str]:

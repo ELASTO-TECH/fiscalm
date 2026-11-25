@@ -553,8 +553,8 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
 def apply_ai_label(L: Ledger, company: str, key: str, label: str, note: str) -> bool:
     """A Fără document label the AI integration is sure of (ai_explain), written as an explanation no person made
     (rule 'ai'): refused as a person's label would be, while anybody decided otherwise since (_untouched), and while
-    an open item is exactly the line's amount (fits_open_amount), a receipt its amount in either currency whatever its
-    sign, or a saved
+    an open item is exactly the line's amount (fits_open_amount), the line names one of the firm's accounts or has a
+    transfer's other end (other_end), a receipt its amount in either currency whatever its sign, or a saved
     rule now speaks for the line (proposals), all under the write lock."""
     labelled = _labelled(L, company, key, label, note)
 
@@ -563,8 +563,11 @@ def apply_ai_label(L: Ledger, company: str, key: str, label: str, note: str) -> 
         booked = replace(t, amount=abs(t.amount), orig_amount=None, orig_currency=None)
         sizes = [booked] + ([replace(t, amount=abs(t.amount), orig_amount=abs(t.orig_amount))] if t.orig_amount else [])
         receipts = recon._receipts(L, company) if t.direction == "debit" else []
+        own = companies.get(company, L=L).own_ibans
         if (
             fits_open_amount(L, company, t)
+            or companies.normalize_iban(t.counterparty_iban) in own  # money between the firm's accounts
+            or other_end(L, company, key, t)
             or any(recon.match_receipts([s], receipts) for s in sizes)
             or proposals(company, [t], L.memories(company), L)[0]
         ):
