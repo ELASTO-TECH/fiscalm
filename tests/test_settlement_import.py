@@ -457,7 +457,7 @@ def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, e
     assert (preview["guess"], preview["proposed"]) == ((header | expected, "ai") if expected else (header, ""))
     assert preview["currency"] == "EUR"
     assert len(asked) == 1 and "TEST-1" not in asked[0] and "xxxx-9" in asked[0]  # cells leave only as shapes
-    assert '"name": "Incasat"' in asked[0] and '"name": "xxx"' in asked[0]  # "Doc" is no settlement word
+    assert '"name": "incasat"' in asked[0] and '"name": "xxx"' in asked[0]  # "Doc" is no settlement word
     asked.clear()
     firsts = (
         b"TEST-1,100.00,2.00",
@@ -469,6 +469,31 @@ def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, e
         with pytest.raises(bank_upload.Refused):
             bank_upload.accept_report(ledger, "NORD", first + b"\nTEST-2,5.00,0\n", "text/csv", **UPLOAD)
     assert not any(w in p for p in asked for w in ("Mara", "Cluj", "INV-12", "TEST-1"))  # settlement words may go
+    asked.clear()
+    other = "Иван Петров,Cluj,Plata ramburs,Factura — Киев\nTEST-2,5.00,0,x\n".encode()  # another alphabet
+    with pytest.raises(bank_upload.Refused):
+        bank_upload.accept_report(ledger, "NORD", other, "text/csv", **UPLOAD)
+    assert asked and not any(w in p for p in asked for w in ("Иван", "Петров", "Киев"))
+
+
+def test_ai_never_sets_the_report_currency_and_failure_proposes_nothing(ledger, monkeypatch):
+    """A three-letter column the AI calls a currency (a county, a country) never becomes the report's currency, and
+    an AI failure leaves the header-name guess."""
+    monkeypatch.setattr(bank_upload.ai, "available", lambda L: True)
+    answer = {f: "" for f in bank_upload.FIELDS} | dict(reference="c1", gross="c2", fee="c3", currency="c4")
+    monkeypatch.setattr(bank_upload.ai, "ask_json", lambda L, s, p, schema: answer)
+    data = b"Doc,Incasat,Retinut,Judet\nTEST-1,100.00,2.00,CLJ\n"
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    assert (ask.value.extra["proposed"], ask.value.extra["currency"]) == ("ai", "")
+
+    def fails(*args):
+        raise bank_upload.ai.AIError("synthetic failure")
+
+    monkeypatch.setattr(bank_upload.ai, "ask_json", fails)
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    assert (ask.value.extra["proposed"], ask.value.extra["guess"]) == ("", {"gross": "Incasat"})
 
 
 @pytest.mark.parametrize("second,currency", [("ron", "RON"), ("eur", "")])

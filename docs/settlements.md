@@ -67,9 +67,11 @@ a date column that names one day on every line (`date`), and the saved payer who
 Built-in presets for FAN Courier, Sameday, Cargus, DPD, GLS, Netopia, PayU and eMAG (as `processor`) pre-fill the
 source and columns when a header has every column of exactly one preset (`proposed: "preset"`); their header names are
 invented samples until a live export is checked. For a header nothing reads whole, with an AI integration configured,
-the preview asks it for a mapping from the header and the first five rows (`proposed: "ai"`). The engine keeps the
-answer only if it names header columns, each once, with gross, fee and an identifier; the payer and the date are never
-taken from the file or the AI. A person still submits the form.
+the preview asks it for a mapping (`proposed: "ai"`), only when the first line reads as column names. Nothing of the
+file leaves as written but settlement words: columns go as ids, with their name only when every word is one (else its
+shape), and cells as shapes (digits 9, letters x). The answer may only fill fields the header names don't, one column
+per field, with gross, fee and an identifier, else it is dropped. The payer, the payout date and the report currency
+are never taken from the AI. A person still submits the form.
 Example: `{"reference":"Factura","gross":"Ramburs","fee":"Comision"}`.
 Optional mappings: `awb`, `order`, `net`, `currency`, `batch`, `date`, `category` (`charge`, anything else is an
 adjustment line).

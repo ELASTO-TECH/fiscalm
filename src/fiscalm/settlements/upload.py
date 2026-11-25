@@ -304,6 +304,14 @@ HEADER_WORDS = {w for names in (*GUESS.values(), DATE_COLUMNS) for n in names fo
 }
 
 
+def _settlement_words(cell: str) -> str:
+    """The cell as plain settlement words when it is nothing else ("Suma încasată" -> "suma incasata"); "" when any
+    letter of it is outside them or outside the Latin alphabet."""
+    latin = "".join(ch for ch in unicodedata.normalize("NFKD", cell) if not unicodedata.combining(ch))
+    words = _plain(cell).split()
+    return " ".join(words) if words and latin.isascii() and set(words) <= HEADER_WORDS else ""
+
+
 def _shape(cell: str) -> str:
     return re.sub(r"\d", "9", re.sub(r"[^\W\d_]", "x", _cut(cell)))
 
@@ -318,25 +326,21 @@ def _labels(header: list[str]) -> bool:
 def _ai_columns(L: Ledger, rows: list[list[str]], orders: bool, known: dict[str, str]) -> dict[str, str]:
     """The configured AI's column proposal for an unknown header, checked here: only header names, each once, and
     a complete mapping, else nothing. It only pre-fills the form; a person still submits it (and names the payer)."""
-    if not ai.available(L) or not _labels(rows[0]):  # a headerless file's first line is data: it stays here
-        return {}
-    fields = [f for f in FIELDS if f != "date"]  # a payout day changes matching: only a person maps it
+    if not ai.available(L) or not _labels(rows[0]) or len({_plain(c) for c in rows[0]}) != len(rows[0]):
+        return {}  # a headerless file's first line is data, and columns that read alike are a person's to tell apart
+    # A payout day changes matching: only a person maps it. AWB and order only where shop orders exist.
+    fields = [f for f in FIELDS if f != "date" and (orders or f not in ("awb", "order"))]
     schema = {"type": "object", "properties": {f: {"type": "string"} for f in fields}, "required": fields}
     # Nothing of the file leaves as written but settlement words: each column goes as an id, with its name only when
     # every word of it is one (else its shape), and the cells as shapes (digits 9, letters x).
-    columns = [
-        {"id": f"c{n}", "name": c if set(_plain(c).split()) <= HEADER_WORDS else _shape(c)}
-        for n, c in enumerate(rows[0], 1)
-    ]
+    columns = [{"id": f"c{n}", "name": _settlement_words(c) or _shape(c)} for n, c in enumerate(rows[0], 1)]
     sample = json.dumps({"columns": columns, "rows": [[_shape(c) for c in r] for r in rows[1 : 1 + PREVIEW_ROWS]]})
     try:
         answer = ai.ask_json(L, AI_COLUMNS, sample, ai.strict(schema))
     except (ai.AIError, ValueError):
         return {}
     ids = {col["id"]: c for col, c in zip(columns, rows[0], strict=True)}
-    mapping = {
-        f: ids.get(c, "\0") for f, c in answer.items() if f in fields and c and (orders or f not in ("awb", "order"))
-    }
+    mapping = {f: ids.get(c, "\0") for f, c in answer.items() if f in fields and c}
     # The AI only fills gaps: the header guesses stand, and an answer that contradicts one is dropped whole.
     if any(f in known and known[f] != c for f, c in mapping.items()):
         return {}
@@ -352,8 +356,11 @@ def _preview(L: Ledger, rows: list[list[str]], known: list[dict], context: tuple
     from Stripe's own, a built-in preset, header names, or, for a header none of them reads whole, the AI's proposal."""
     orders, payers, currencies = context
     guess, (source, preset) = _guess(rows[0], orders), _preset(rows[0])
+    header_currency = guess.get("currency")  # the report's currency comes from a column a header names, never the AI
     proposed = "preset" if preset else ""
-    if preset:  # the preset's columns, plus the header guesses that use none of them (a currency column)
+    if (
+        preset and guess != STRIPE
+    ):  # the preset's columns, plus the header guesses that use none of them (a currency column)
         preset = {f: c for f, c in preset.items() if orders or f not in ("awb", "order")}
         guess = {f: c for f, c in guess.items() if f not in preset and c not in preset.values()} | preset
     elif guess != STRIPE and not known and not _complete(guess) and (ai_guess := _ai_columns(L, rows, orders, guess)):
@@ -366,7 +373,7 @@ def _preview(L: Ledger, rows: list[list[str]], known: list[dict], context: tuple
         "sources": list(SOURCES),
         "guess": guess,
         "source": "stripe" if guess == STRIPE else source,
-        "currency": _guess_currency(rows, guess.get("currency")),
+        "currency": _guess_currency(rows, guess.get("currency") if proposed == "preset" else header_currency),
         "currencies": currencies,
         "payers": payers,
         "date": _guess_date(rows),
