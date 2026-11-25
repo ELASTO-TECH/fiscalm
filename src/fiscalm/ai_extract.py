@@ -198,7 +198,8 @@ def printed_id(token: str, text: str) -> bool:
         return False
     body = r"[ \t]*".join(map(re.escape, token))
     prefix = r"(?:RO[ \t]*)?" if token.isdigit() else ""
-    return re.search(rf"(?<![A-Z0-9]){prefix}{body}(?![A-Z0-9])", text.upper()) is not None
+    alone = r"(?<![A-Z0-9])(?<!\d[ \t])(?<!\d[ \t]{2})"  # no digit or letter runs into it, spaced or not
+    return re.search(rf"{alone}{prefix}{body}(?![A-Z0-9]|[ \t]+\d)", text.upper()) is not None
 
 
 def ro_seller(x: Extraction, firms: Collection[companies.Company]) -> bool:

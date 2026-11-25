@@ -82,8 +82,12 @@ def _with_ai(L: Ledger, raw: bytes, company: str, doc: reader.Doc, rules: dict) 
     same = {"number": lambda a, b: number_key(a) == number_key(b), "party_name": lambda a, b: True}  # a name's spelling
     agree = all(not rules[k] or not v or same.get(k, str.__eq__)(rules[k], v) for k, v in ai.items())
     # A number or a total the rules saw but couldn't pick (several, a separate series) stays the reviewer's choice.
-    number_open = rules["number"] or not (reader.numbers(doc.text) or re.search(r"\bseria\b", doc.text, re.I))
-    total_open = rules["total"] or not doc.totals or (ai["total"], ai["currency"]) in doc.totals
+    seen = reader.numbers(doc.text) or re.search(r"\bseria\b", doc.text, re.I) or ARCHIVE_HEADER.search(doc.text)
+    number_open = rules["number"] or not seen
+    if doc.totals:
+        total_open = rules["total"] or (ai["total"], ai["currency"]) in doc.totals
+    else:  # none the rules could read: printed positive with its currency, as for a mailed invoice
+        total_open = not doc.text.strip() or reader.printed_total(doc.text, ai["total"] or "0", ai["currency"])
     party = rules["party_tax_id"] or ai["party_tax_id"]  # a partner id printed whole, as an import requires
     certain = all((x.confident, not x.rejected, x.doc_type == "invoice", agree, number_open, total_open, party))
     return {k: rules[k] or v for k, v in ai.items()} | {"reason": "" if certain else "unsure"}
@@ -142,10 +146,13 @@ def _archive_total(text: str) -> tuple[str, str] | None:
     return f"{Decimal(value):.2f}", "RON" if currency.upper() == "LEI" else currency.upper()
 
 
+ARCHIVE_HEADER = re.compile(r"^\s*Furnizor\s{2,}Client\s*$", re.M)  # an FGO/SmartBill export's party columns
+
+
 def _archive_fields(text: str, co: companies.Company) -> dict:
     """Read the export's two explicit party columns, never a filename's claims."""
     lines = text.splitlines()
-    headers = [i for i, line in enumerate(lines) if re.fullmatch(r"\s*Furnizor\s{2,}Client\s*", line)]
+    headers = [i for i, line in enumerate(lines) if ARCHIVE_HEADER.fullmatch(line)]
     if len(headers) != 1:
         return {}
     i = headers[0]
