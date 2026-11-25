@@ -16,7 +16,7 @@ from firms import set_firms
 from imap_fake import Fake, mail, plain_connect
 from pdf_fake import text_pdf
 
-from fiscalm import ai, companies, history_pdf, integrations, recon
+from fiscalm import ai, ai_extract, companies, history_pdf, integrations, recon
 from fiscalm.api import browse, state as api
 from fiscalm.bank import statements
 from fiscalm.ledger import Ledger
@@ -70,6 +70,32 @@ def invoice(
             if x
         ]
     )
+
+
+def reading(*, fail=False, **fields):
+    """A fake AI provider answering one extraction (fiscalm.ai_extract.SCHEMA); `fail` raises instead."""
+    answer = {
+        "doc_type": "invoice",
+        "buyer_name": "Atelier Nord SRL",
+        "buyer_tax_id": "RO11111111",
+        "seller_name": "Example Cloud Inc",
+        "seller_tax_id": "",
+        "number": "INV-2026-0042",
+        "issue_date": "2026-10-28",
+        "total": "12.10",
+        "currency": "EUR",
+        "card_last4": "",
+        "confidence": "high",
+    } | fields
+
+    def ask(system, prompt, schema, image=None):
+        if fail:
+            raise RuntimeError("down")
+        ask.calls.append((prompt, image))
+        return answer
+
+    ask.calls = []
+    return ask
 
 
 def message(*atts, address="billing@cloud.example", mid="m1@cloud.example", name="Example Cloud"):
@@ -276,29 +302,97 @@ def test_several_totals_need_the_user_or_a_checked_ai_answer(ledger, home, live_
         mi.answer(ledger, q["sha"], "NORD")  # which total?
     mi.answer(ledger, q["sha"], "NORD", total=1)
     assert [(d["amount"], d["currency"]) for d in docs_of(ledger)] == [("12.10", "EUR")]
-    # The AI narrows to one of the totals found: filed. An amount the rules didn't find counts for nothing.
+    # A confident AI reading narrows to one of the totals found: filed. An amount the rules didn't find counts for nothing.
     three = invoice("Total paid 16.00 EUR", number="Invoice number: INV-2026-0050")
-    assert (
-        mi.handle(
-            ledger, message(("pdf", three), mid="a1"), ask=lambda s, p, schema: {"total": "16.00", "currency": "EUR"}
-        )
-        == "filed:1"
-    )
+    ask = reading(number="INV-2026-0050", total="16.00")
+    assert mi.handle(ledger, message(("pdf", three), mid="a1"), ask=ask) == "filed:1"
     four = invoice("Total paid 17.00 EUR", number="Invoice number: INV-2026-0051")
-    assert (
-        mi.handle(
-            ledger, message(("pdf", four), mid="a2"), ask=lambda s, p, schema: {"total": "999.00", "currency": "EUR"}
-        )
-        == "asked:1"
+    assert mi.handle(ledger, message(("pdf", four), mid="a2"), ask=reading(total="999.00")) == "asked:1"
+    down = invoice("Total paid 18.00 EUR", number="Invoice number: INV-9")
+    assert mi.handle(ledger, message(("pdf", down), mid="a3"), ask=reading(fail=True)) == "asked:1"
+
+
+SAAS = [
+    "Receipt",
+    "Example SaaS Inc        Atelier Nord SRL",
+    "Receipt number SAAS-7781",
+    "Paid on 2026-10-28",
+    "Charged $49.00 to Visa 4242",
+]
+
+
+@pytest.mark.parametrize("live_mode", [False, True])
+def test_a_confident_ai_reading_files_what_the_rules_could_not(ledger, home, live_mode):
+    if live_mode:
+        go_live(home)
+    ask = reading(seller_name="Example SaaS Inc", number="SAAS-7781", total="49.00", currency="USD")
+    assert mi.handle(ledger, message(("pdf", text_pdf(SAAS))), ask=ask) == "filed:1"
+    (doc,) = docs_of(ledger)
+    assert (doc["company"], doc["amount"], doc["currency"], doc["vendor"]) == (
+        "NORD",
+        "49.00",
+        "USD",
+        "Example SaaS Inc",
     )
-    assert (
-        mi.handle(
-            ledger,
-            message(("pdf", invoice("Total paid 18.00 EUR", number="Invoice number: INV-9")), mid="a3"),
-            ask=lambda s, p, schema: (_ for _ in ()).throw(RuntimeError("down")),
+    assert mi.questions(ledger) == [] and "Charged $49.00" in ask.calls[0][0]
+
+
+@pytest.mark.parametrize(
+    ("fields", "result"),
+    [
+        ({"confidence": "low"}, "asked:1"),  # low confidence: only the number and supplier fill the question
+        ({"total": "50.00"}, "asked:1"),  # an amount the document doesn't print
+        ({"currency": "EUR"}, "asked:1"),  # a currency the document doesn't show
+        ({"buyer_name": "Studio 9 SRL", "buyer_tax_id": "RO33333333"}, "asked:1"),  # a firm not on the document
+        ({"buyer_name": "Atelier Nord SRL", "buyer_tax_id": "RO33333333"}, "asked:1"),  # id and name disagree
+        ({"doc_type": "proforma"}, "proforma:1"),
+        ({"doc_type": "credit_note"}, "credit-note:1"),
+        ({"seller_tax_id": "RO44444444"}, "efactura:1"),  # a Romanian supplier: its invoice is in SPV
+        ({"seller_name": "Atelier Nord SRL", "buyer_name": "", "buyer_tax_id": ""}, "issued:1"),
+    ],
+)
+def test_an_ai_reading_never_overrules_the_document(ledger, fields, result):
+    base = {"seller_name": "Example SaaS Inc", "number": "SAAS-7781", "total": "49.00", "currency": "USD"}
+    assert mi.handle(ledger, message(("pdf", text_pdf(SAAS))), ask=reading(**base | fields)) == result
+    assert docs_of(ledger) == []
+    if fields == {"confidence": "low"}:
+        (q,) = mi.questions(ledger)
+        assert (q["data"]["number"], q["data"]["supplier"], q["data"]["totals"]) == (
+            "SAAS-7781",
+            "Example SaaS Inc",
+            [],
         )
-        == "asked:1"
-    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "kept"),
+    [
+        ("issue_date", "2026-02-30", ""),
+        ("issue_date", "28.10.2026", ""),
+        ("total", "12.345", ""),
+        ("total", "0.00", ""),
+        ("total", "49", "49.00"),
+        ("currency", "usd", "USD"),
+        ("currency", "XBT", ""),
+        ("number", "Data: 2026", ""),
+        ("card_last4", "42", ""),
+    ],
+)
+def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
+    got = ai_extract.check(reading(**{field: value})("", "", {}), companies.all(ledger))
+    assert getattr(got, field) == kept
+
+
+def test_a_scanned_invoice_is_read_from_its_picture(ledger):
+    scan = text_pdf([])  # a page without text, as a scanner makes
+    assert mi.handle(ledger, message(("pdf", scan)), ask=reading(fail=True)) == "unreadable:1"
+    ask = reading(seller_name="Beispiel GmbH", seller_tax_id="DE123456789", number="R-2026-17", total="80.00")
+    assert mi.handle(ledger, message(("pdf", scan)), ask=ask) == "filed:1"
+    assert ask.calls[0][1][0] == "image/png" and ask.calls[0][1][1].startswith(b"\x89PNG")
+    (doc,) = docs_of(ledger)
+    assert (doc["company"], doc["amount"], doc["currency"], doc["doc_date"]) == ("NORD", "80.00", "EUR", "2026-10-28")
+    low = text_pdf([" "])
+    assert mi.handle(ledger, message(("pdf", low), mid="m2"), ask=reading(confidence="low")) == "unreadable:1"
 
 
 def test_duplicates_are_filed_once(ledger):
@@ -567,8 +661,10 @@ def test_document_ai_respects_configuration_and_history_shadow_boundary(
         )
     calls = []
 
-    def ask(L, system, prompt, schema):
-        calls.append(json.loads(prompt))
+    def ask(L, system, prompt, schema, image=None):
+        calls.append(prompt)
+        if "doc_type" in schema["properties"]:
+            return reading(total="15.00")(system, prompt, schema)
         return {"total": "15.00", "currency": "EUR"}
 
     monkeypatch.setattr(ai, "ask_json", ask)
@@ -580,7 +676,7 @@ def test_document_ai_respects_configuration_and_history_shadow_boundary(
         assert history_pdf.fields(ledger, raw, "NORD")["total"] == ("15.00" if allowed else "")
     assert len(calls) == int(allowed)
     if calls:
-        assert "Total paid 15.00 EUR" in calls[0]["text"]
+        assert "Total paid 15.00 EUR" in calls[0]
 
 
 @pytest.mark.parametrize(

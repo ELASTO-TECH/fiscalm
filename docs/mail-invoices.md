@@ -61,9 +61,14 @@ that names another firm than its sender's is in doubt.
 
 **Fields.** UBL gives supplier, number, dates, total and currency directly. From a PDF: the total on a "total"
 line with its currency, the issue date on a dated line, the number after the document's title; the supplier is the
-sender's display name. When the administrator configures the AI integration, that consents to document text being sent to its provider
-in Sandbox and Live. It is asked only when the rules found several totals, and its answer is checked: its total must be one the document's text shows, its date a date on the
-document, and it never chooses the firm. Its answer alone files nothing.
+sender's display name. When the administrator configures the AI integration, that consents to document text (or, for a scanned PDF
+without text, a picture of its first page) being sent to its provider in Sandbox and Live. It is asked once per PDF
+the rules could not settle (no firm, an unclear buyer, two firms, no single total, no text) and proposes the fields
+(`fiscalm.ai_extract`). Fixed rules check each one: an ISO date, a positive two-decimal total printed in the text in
+a currency the document shows, a known currency, and buyer and seller matched to the firms by CUI or name and printed
+on the document. It never overrules the rules: a firm they found must include its buyer, a total they found must
+include its total. A confident reading may file the document or refuse it (proforma, credit note, the firm as seller,
+a Romanian seller); a low-confidence one only fills the question's number, date and supplier.
 
 **In doubt, one question (Sarcini).** No firm on the document, a firm without a clear buyer's role, two firms, a sender tied to another firm, or a total
 that isn't clear: the document waits in Sarcini as one question with the answers to pick (each firm, each total
