@@ -403,8 +403,11 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         # per statement line, never per key: two lines may share one (same day, amount and text, other payers)
         first = [pool.candidates(t, ()) for t in credits]
         claims = Counter(r["message_id"] for c in first for r, _ in c)
+        # sets are found against the opening balances and accounts, before any single collection changes them
+        plans = [(t, plan) for t, c in zip(credits, first, strict=True) if not c and (plan := pool.batch(t, ()))]
+        shown = _clients_by_account(credits, first, plans)
         done = _collect_singles(L, pool, st, credits, first, claims)
-        return batch_done + done + _collect_sets(L, pool, credits, first, claims, done)
+        return batch_done + done + _collect_sets(L, pool, plans, claims, done, shown)
 
 
 def _open_credits(L: Ledger, st: statements.Statement) -> list[statements.Tx]:
@@ -446,21 +449,35 @@ def _collect_singles(
     return done
 
 
-def _collect_sets(L: Ledger, pool: _Pool, credits: list, first: list, claims: Counter, done: list) -> list[str]:
+def _clients_by_account(credits: list, first: list, plans: list) -> dict[str, set[str]]:
+    """The clients each account shows on this statement, by single candidates or sets."""
+    shown: dict[str, set[str]] = {}
+    for t, c in zip(credits, first, strict=True):
+        for r, how in c:
+            if t.counterparty_iban and how in CLIENT_PROOF:
+                shown.setdefault(t.counterparty_iban, set()).add(_client_key(r))
+    for t, (_, _, key) in plans:
+        if t.counterparty_iban:
+            shown.setdefault(t.counterparty_iban, set()).add(key)
+    return shown
+
+
+def _collect_sets(
+    L: Ledger, pool: _Pool, plans: list, claims: Counter, done: list, shown: dict[str, set[str]]
+) -> list[str]:
     """A credit that fits no single invoice may pay several of its client's (maintainer decision, 2026-11-25):
-    the one exact set (_Pool.batch), when no other credit of the statement reaches any of its invoices."""
-    plans = [(t, plan) for t, c in zip(credits, first, strict=True) if not c and (plan := pool.batch(t, done))]
+    the one exact set (_Pool.batch), when no other credit of the statement reaches any of its invoices and its
+    account shows no other client on the statement."""
     # every set a credit could pay competes, even one it can't settle for being ambiguous
     taken = Counter(m for _, (sets, _, _) in plans for m in {r["message_id"] for rows in sets for r in rows})
-    clients: dict[str, set[str]] = {}  # one account naming two clients on this statement proves neither
-    for t, (_, _, key) in plans:
-        clients.setdefault(t.counterparty_iban, set()).add(key)
     out: list[str] = []
     for t, (sets, how, _) in plans:
-        if len(sets) != 1 or (t.counterparty_iban and len(clients[t.counterparty_iban]) > 1):
+        if len(sets) != 1 or len(shown.get(t.counterparty_iban, ())) > 1:
             continue
         rows = sets[0]
-        alone = all(taken[r["message_id"]] == 1 and not claims[r["message_id"]] for r in rows)
+        alone = all(
+            taken[r["message_id"]] == 1 and not claims[r["message_id"]] and r["message_id"] not in done for r in rows
+        )
         if alone and _collect(L, pool, t, rows, how, f"{how} {len(rows)} invoices REF {t.ref}"):
             out += [r["message_id"] for r in rows]
     return out
@@ -494,7 +511,7 @@ def _kept(was: str | None, how: str) -> bool:
     return was == how or (was in (*CLIENT_PROOF, "ref") and how in CLIENT_PROOF)
 
 
-_SERIES_REF = re.compile(r"(?<![A-Z0-9])([A-Z]+) ?0*(\d+)(?!\d)")
+_SERIES_NUMBER = re.compile(r"([A-Z][A-Z0-9 ]*?) ?0*(\d+)")  # 'B2B 0050' (normalized 'B2B-0050'): series, number
 BATCH_MAX = 5  # one transfer pays at most this many of a client's invoices, unless it pays all of them
 BATCH_SCAN = 20  # a client with more open invoices than this: only all of them, or the ones named, are tried
 
@@ -516,9 +533,11 @@ def _sets(mine: list, names: set[str], kind: str) -> list[tuple]:
 
 
 def _client_key(r) -> str:
-    """The client an invoice is for: its firm's tax id, or a private buyer's name."""
-    token = tax_token(r["client_cui"])
-    return f"cui:{token}" if firm_id(token) else "name:" + " ".join(efactura.firm_core(r["client_name"]))
+    """The client an invoice is for: its firm's full tax id (country prefix kept), or a private buyer's name."""
+    if not firm_id(tax_token(r["client_cui"])):
+        return "name:" + " ".join(efactura.firm_core(r["client_name"]))
+    full = r["client_tax_id"] if "client_tax_id" in r.keys() else ""  # noqa: SIM118 (sqlite3.Row)
+    return "tax:" + (re.sub(r"[\s.-]+", "", full or "").upper() or tax_token(r["client_cui"]))
 
 
 def _rank(cands: list) -> int:
@@ -558,7 +577,11 @@ class _Pool:
         named = [r for r in rows if r["doc_type"] == "invoice" and r["status"] != "duplicate"]
         self.known = [(r["message_id"], _ident_re(r["number"]), number_of(r["number"])) for r in named]
         self.numbers = {r["message_id"]: r["number"] or "" for r in named}
-        self.series_refs = {(m[1], int(m[2])) for n in self.numbers.values() if (m := _SERIES_REF.fullmatch(_norm(n)))}
+        self.series_refs = {
+            (m[1].replace(" ", ""), int(m[2]))
+            for n in self.numbers.values()
+            if (m := _SERIES_NUMBER.fullmatch(_norm(n)))
+        }
         self.series = {s for s, _ in self.series_refs}
 
     def owed(self, r) -> Decimal:
@@ -623,8 +646,12 @@ class _Pool:
 
     def unknown_ref(self, t: statements.Tx) -> bool:
         """The credit names an invoice of one of the firm's series ('NRD 0099') that the firm doesn't have (yet)."""
-        found = {(m[1], int(m[2])) for m in _SERIES_REF.finditer(_norm(t.description))}
-        return any(series in self.series and (series, n) not in self.series_refs for series, n in found)
+        desc = _norm(t.description)
+        for series in self.series:
+            written = r"(?<![A-Z0-9])" + " ?".join(map(re.escape, series)) + r" ?0*(\d+)(?!\d)"
+            if any((series, int(n)) not in self.series_refs for n in re.findall(written, desc)):
+                return True
+        return False
 
     def named(self, t: statements.Tx) -> tuple[set[str], str]:
         """Invoices the credit names, and how: "series" (a whole identifier, 'NRD 0042'), "digits" (3+ digits of one,

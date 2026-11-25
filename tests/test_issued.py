@@ -438,8 +438,20 @@ def _gamma(mid, number, total):
     return {mid: ubl(number=number, total=total, client="GAMMA LABS SRL", client_cui="RO77777777", issue="2026-10-11")}
 
 
-@pytest.mark.parametrize("case", ["two firms one name", "a cash mark", "an ambiguous rival", "one account two clients"])
-def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec, monkeypatch, case):
+@pytest.mark.parametrize(
+    "case,collected",
+    [
+        ("two firms one name", []),
+        ("two foreign firms one number", []),
+        ("a cash mark", []),
+        ("an ambiguous rival", []),
+        ("one account two clients", []),
+        ("an account taught by a single", ["7001"]),
+        ("a single shrinking two sets to one", ["7001"]),
+        ("an unknown reference with digits in its series", []),
+    ],
+)
+def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec, monkeypatch, case, collected):
     def c(amount, desc="x", **kw):
         return _credit(amount, date(2026, 10, 20), desc=desc, **kw)
 
@@ -457,14 +469,29 @@ def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec,
     elif case == "an ambiguous rival":  # 110 is 40+70 or 60+50: both reach the pair the 100 names
         _stored(ledger, monkeypatch, **_owed("40.00", "60.00", "50.00", "70.00"))
         credits = [c("100.00", "NRD 0050 NRD 0051"), c("110.00")]
-    else:
+    elif case == "one account two clients":
+        pairs = _gamma("7003", "NRD 0060", "300.00") | _gamma("7004", "NRD 0061", "700.00")
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00") | pairs)
+        credits = [c("1000.00", iban=OTHER_IBAN), c("1000.00", "y", counterparty="GAMMA LABS SRL", iban=OTHER_IBAN)]
+    elif case == "two foreign firms one number":
+        vat = {"7001": ("DE123456789", "400.00"), "7002": ("AT123456789", "600.00")}
         _stored(
             ledger,
             monkeypatch,
-            **_owed("400.00", "600.00") | _gamma("7003", "NRD 0060", "300.00") | _gamma("7004", "NRD 0061", "700.00"),
+            **{m: ubl(number=f"NRD 00{m[-2:]}", total=t, client_cui=v) for m, (v, t) in vat.items()},
         )
-        credits = [c("1000.00", iban=OTHER_IBAN), c("1000.00", "y", counterparty="GAMMA LABS SRL", iban=OTHER_IBAN)]
-    assert issued.match_statement(ledger, _st(*credits)) == []
+        credits = [c("1000.00")]
+    elif case == "an account taught by a single":  # the 200 teaches OTHER_IBAN for Beta; Gamma's 1000 is no Beta set
+        _stored(ledger, monkeypatch, **_owed("200.00", "400.00", "600.00") | _gamma("7004", "NRD 0061", "50.00"))
+        credits = [c("200.00", iban=OTHER_IBAN), c("1000.00", "y", counterparty="GAMMA LABS SRL", iban=OTHER_IBAN)]
+    elif case == "a single shrinking two sets to one":  # 100 is 40+60 or 30+70 before the 40 is collected
+        _stored(ledger, monkeypatch, **_owed("40.00", "60.00", "30.00", "70.00"))
+        credits = [c("40.00"), c("100.00", "y")]
+    else:
+        b2b = {"7001": "400.00", "7002": "600.00"}
+        _stored(ledger, monkeypatch, **{m: ubl(number=f"B2B-00{m[-2:]}", total=t) for m, t in b2b.items()})
+        credits = [c("1000.00", "Plata B2B-0099")]
+    assert issued.match_statement(ledger, _st(*credits)) == collected
 
 
 def test_a_set_is_collected_whole_or_not_at_all(ledger, home, sec, monkeypatch):
