@@ -39,7 +39,7 @@ from fiscalm.api.mcp import stdio
 from fiscalm.bank import connections as bank_connect, enablebanking as eb, feed as bank_feed, statements
 from fiscalm.bank.intake import recover
 from fiscalm.commerce.shopify import tick
-from fiscalm.company_config import CompanyError, bank, change, set_opened
+from fiscalm.company_config import CompanyError, bank, change, set_dates
 from fiscalm.config_errors import ConfigError
 from fiscalm.efactura import client as anaf, inbox as efactura
 from fiscalm.invoicing import issued
@@ -866,9 +866,9 @@ def cmd_company_bank(a, L: Ledger) -> int:
     return 0
 
 
-def cmd_company_opened(a, L: Ledger) -> int:
+def cmd_company_dates(a, L: Ledger) -> int:
     try:
-        _out(set_opened(L=L, key=a.company, iban=a.iban, month=a.month))
+        _out(set_dates(L=L, key=a.company, iban=a.iban, opened=a.opened, retired=a.retired, today=date.today()))
     except (CompanyError, ConfigError) as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2
@@ -983,11 +983,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--iban", required=True)
     s.add_argument("--replace", action="store_true")
     s.set_defaults(fn=cmd_company_bank)
-    s = c.add_parser("opened", help="the first month an account existed: its bank's earlier statements don't need it")
+    s = c.add_parser("dates", help="when an account was open: its bank's statements of other months don't need it")
     s.add_argument("--company", required=True)
     s.add_argument("--iban", required=True)
-    s.add_argument("--month", required=True, help="YYYY-MM, or the exact day YYYY-MM-DD; '' forgets it")
-    s.set_defaults(fn=cmd_company_opened)
+    s.add_argument("--opened", help="YYYY-MM, or the exact day YYYY-MM-DD; '' forgets it")
+    s.add_argument("--retired", help="the day it was closed, YYYY-MM-DD; '' forgets it")
+    s.set_defaults(fn=cmd_company_dates)
 
     b = sub.add_parser("bank", help="open banking: the install's Enable Banking application and its connections")
     b = b.add_subparsers(dest="bank_cmd", required=True)

@@ -164,6 +164,32 @@ def _statement_csv_format(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     return _res(True, "Coloanele au fost salvate.")
 
 
+def _account_dates(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    """Setări › Firme › Bănci și conturi, Date cont: when an account (current or closed) was open. Only the dates sent
+    change; one left out keeps what is recorded, so a form opened before another person's change never undoes it."""
+    given = set(args) - {"co"}
+    if not {"key", "account"} <= given <= {"key", "account", "opened", "retired"} or len(given) == 2:
+        return _res(False, BAD)
+    firm = companies.all(L).get(args["key"])
+    account = (
+        next((a for a in firm.accounts if cs.account_id(firm.key, a.iban) == args["account"]), None) if firm else None
+    )
+    if not account:
+        return _res(False, "Contul nu este al acestei firme.")
+    try:
+        done = cc.set_dates(
+            L=L,
+            key=firm.key,
+            iban=account.iban,
+            opened=args.get("opened"),
+            retired=args.get("retired"),
+            today=date.today(),
+        )
+    except cc.CompanyError as e:
+        return _res(False, str(e))
+    return _res(True, "Datele contului au fost salvate.", done=done)
+
+
 def _bank_setup(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     if set(args) - {"co"} != {"operation"} or ctx.get("operation") not in ("prepare", "check"):
         return _res(False, BAD)
@@ -1305,6 +1331,7 @@ ACTIONS = {
     'company-bank': Action(company_action, 'key iban', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "iban": "<RON IBAN>" } (both required)'),
     'company-account': Action(company_action, 'key iban currency', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "iban": "<IBAN>", "currency": "EUR" } (all required)'),
     'company-statement-password': Action(company_action, 'key bank password', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "bank": "bt", "password": "<parola>" } (all required; bank: a catalogue bank with password-protected PDF statements). Write-only: never returned or logged.'),
+    'company-account-dates': Action(_account_dates, 'key account opened retired', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "account": "<account id>", "opened": "2024-03" or "2024-03-14" or "", "retired": "2026-10-31" or "" } (key, account and at least one date; "" forgets a date, one left out is kept; a closing day after today is refused). The account payment files debit is never closed here.'),
     'company-alias-add': Action(company_action, 'key alias', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "alias": "Exemplu Grup" } (both required)'),
     'company-alias-remove': Action(company_action, 'key alias', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "alias": "Exemplu Grup" } (both required)'),
     'statement-csv-format': Action(_statement_csv_format, 'account date_format decimal date amount debit credit description counterparty counterparty_iban reference', public=False, strings=True, description='account, co; column names from fiscalm.bank.csv.FIELDS plus date_format and decimal, all strings. App admin configuration.'),

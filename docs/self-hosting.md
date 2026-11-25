@@ -599,7 +599,7 @@ password is read for it). `fiscalm ingest` refuses a CSV on its own: it is uploa
 (after a parser fix) is its own document: `duplicate`, its lines recorded and matched again, nothing new stored. A BT account's
 month may start after the 1st, as older statements print it, only when no day with movements is left out: the days
 before are no banking day (weekends and Romanian legal holidays, Orthodox Easter included, `bank.banking_days`), or
-the account opened on that day (`fiscalm company opened --month YYYY-MM-DD`; a month alone is not enough) at a zero
+the account opened on that day (set in Setări › Firme › Bănci și conturi, Date cont, or `fiscalm company dates --opened YYYY-MM-DD`; a month alone is not enough) at a zero
 balance. The month's accounts are those held from its 1st. A BT statement of several months (quarterly) is split by
 its pages into one statement per month, each stored and checked as that month's, with the accounts owed that month; a
 file whose pages can't be split that way, or whose parts don't read back to exactly its sections, is refused (and the

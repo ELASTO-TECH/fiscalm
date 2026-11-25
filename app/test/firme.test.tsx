@@ -258,12 +258,13 @@ describe("Firme", () => {
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], has_ron_account: true, iban_last4: "0001", banks: [
       { bank: "bt", name: "Banca Transilvania", connect: "ready", connection: null }], accounts: [
-      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: [], last_statement: null },
-      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, statement_senders: [], last_statement: null }] };
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null },
+      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, opened: null, statement_senders: [], last_statement: null }] };
     const { p } = await page({ companies: () => json(cfg) });
     await userEvent.click(p.getByRole("button", { name: "Modifică NORD" }));
     const list = within(p.getByRole("list", { name: "Conturi" }));
-    expect(list.getAllByRole("listitem").map((li) => li.textContent)).toEqual(["RON ••••0001Plățile pleacă de aici", "EUR ••••0002"]);
+    const rows = list.getAllByRole("listitem").map((li) => li.textContent?.split("Date cont")[0]); // each with its Date cont
+    expect(rows).toEqual(["RON ••••0001Plățile pleacă de aici", "EUR ••••0002"]);
     expect(p.queryByRole("form", { name: "Contul în lei pentru NORD" })).toBeNull();
   });
 
@@ -298,7 +299,7 @@ describe("Firme", () => {
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], has_ron_account: true, iban_last4: "0001", banks: [
       { bank: "bt", name: "Banca Transilvania", connect: "ready", connection: null }], accounts: [
-      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-10" }] };
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-10" }] };
     const { api, p } = await page({ companies: () => json(cfg), onPost: (c: Call) => (c.url.endsWith("company-account")
       ? answer({ key: "NORD", currency: "USD", bank: "bt", iban_last4: "0007" }, "Contul a fost adăugat.") : json({ ok: true, message: "", state: null, done: { offers: [] } })) });
     await userEvent.click(p.getByRole("button", { name: "Modifică NORD" }));
@@ -319,15 +320,79 @@ describe("Firme", () => {
     await waitFor(() => expect(form.getByLabelText("IBAN-ul contului nou")).toHaveValue(""));
   });
 
+  it("sets when an account opened and closed, sending only what changed; a closed account keeps its own list", async () => {
+    at("?co=NORD&tab=setari&sec=firme");
+    const cfg = config();
+    cfg.companies[0] = { ...cfg.companies[0], has_ron_account: true, iban_last4: "0001", banks: [
+      { bank: "bt", name: "Banca Transilvania", connect: "ready", connection: null }], accounts: [
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null },
+      // at a bank outside the catalogue: no bank card lists it once closed
+      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "", bank_name: "", pays: false, retired: "2026-10-31", opened: "2024-03", statement_senders: [], last_statement: null }] };
+    const pending = deferred<Response>();
+    const { api, p } = await page({ companies: () => json(cfg), onPost: (c: Call) => (c.url.endsWith("company-account-dates")
+      ? pending.promise : json({ ok: true, message: "", state: null, done: { offers: [] } })) });
+    await userEvent.click(p.getByRole("button", { name: "Modifică NORD" }));
+    const closed = within(p.getByRole("list", { name: "Conturi închise" }));
+    expect(closed.getByText("Altă bancă, deschis din 03.2024, închis pe 31.10.2026")).toBeInTheDocument();
+    await userEvent.click(closed.getByText("Date cont"));
+    const form = within(p.getByRole("form", { name: "Datele contului EUR ••••0002" }));
+    expect(form.getByRole("button", { name: "Salvează datele" })).toBeDisabled(); // nothing changed yet
+    await userEvent.clear(form.getByLabelText(/Deschis din/));
+    await userEvent.type(form.getByLabelText(/Deschis din/), "2024-03-14");
+    await userEvent.click(form.getByRole("button", { name: "Salvează datele" }));
+    const saved = () => api.posts().filter((c) => c.url.endsWith("company-account-dates"));
+    // the closing day it didn't touch stays out: another person's change to it is never undone
+    await waitFor(() => expect(saved()).toEqual([{ url: "/web/api/company-account-dates", method: "POST",
+      body: { key: "NORD", account: "acc2", opened: "2024-03-14" } }]));
+    // a day typed while the answer is on its way is kept; the field saved shows the engine's date again (here the
+    // list read again still says 03.2024, as another person may have set it meanwhile) and stays editable
+    await userEvent.clear(form.getByLabelText("Închis pe"));
+    await userEvent.type(form.getByLabelText("Închis pe"), "2026-10-30");
+    await act(async () => pending.resolve(await answer({ key: "NORD", iban_last4: "0002", opened: "2024-03-14", retired: "2026-10-31" }, "Datele contului au fost salvate.")));
+    await waitFor(() => expect(form.getByLabelText(/Deschis din/)).toHaveValue("2024-03"));
+    expect(form.getByLabelText(/Deschis din/)).not.toHaveAttribute("readonly");
+    expect(form.getByLabelText("Închis pe")).toHaveValue("2026-10-30");
+    expect(form.getByRole("button", { name: "Salvează datele" })).toBeEnabled();
+  });
+
+  it("an account closed by its save moves to Conturi închise with what was typed meanwhile, its editor still open", async () => {
+    at("?co=NORD&tab=setari&sec=firme");
+    const eur = { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null as string | null, opened: null, statement_senders: [], last_statement: null };
+    const firm = (account: typeof eur) => {
+      const cfg = config();
+      cfg.companies[0] = { ...cfg.companies[0], has_ron_account: true, iban_last4: "0001", banks: [
+        { bank: "bt", name: "Banca Transilvania", connect: "ready", connection: null }], accounts: [
+        { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null }, account] };
+      return cfg;
+    };
+    let current = firm(eur);
+    const pending = deferred<Response>();
+    const { p } = await page({ companies: () => json(current), onPost: (c: Call) => (c.url.endsWith("company-account-dates")
+      ? pending.promise : json({ ok: true, message: "", state: null, done: { offers: [] } })) });
+    await userEvent.click(p.getByRole("button", { name: "Modifică NORD" }));
+    await userEvent.click(within(p.getByRole("list", { name: "Conturi" })).getAllByText("Date cont")[1]);
+    const before = within(p.getByRole("form", { name: "Datele contului EUR ••••0002" }));
+    await userEvent.type(before.getByLabelText("Închis pe"), "2026-10-31");
+    await userEvent.click(before.getByRole("button", { name: "Salvează datele" }));
+    await userEvent.type(before.getByLabelText(/Deschis din/), "2024-03"); // while the answer is on its way
+    current = firm({ ...eur, retired: "2026-10-31" });
+    await act(async () => pending.resolve(await answer({ key: "NORD", iban_last4: "0002", opened: null, retired: "2026-10-31" }, "Datele contului au fost salvate.")));
+    const closed = await p.findByRole("list", { name: "Conturi închise" });
+    const after = within(within(closed).getByRole("form", { name: "Datele contului EUR ••••0002" }));
+    expect(after.getByLabelText(/Deschis din/)).toHaveValue("2024-03");
+    expect(after.getByLabelText("Închis pe")).toHaveValue("2026-10-31");
+    expect(after.getByLabelText(/Deschis din/)).toBeVisible(); // the editor is still open
+  });
+
   it("lists a firm in one row with one button, and sets a bank's statement password write-only in its Bănci", async () => {
     at("?co=NORD&tab=setari&sec=firme");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], banks: [
       { bank: "bt", name: "Banca Transilvania", connect: "ready", connection: null, statement_password: false },
       { bank: "ing", name: "ING Bank", connect: "ready", connection: null }], accounts: [
-      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: [], last_statement: null },
-      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, statement_senders: [], last_statement: null },
-      { id: "acc3", iban_last4: "0007", currency: "EUR", bank: "ing", bank_name: "ING Bank", pays: false, retired: null, statement_senders: [], last_statement: null }] };
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null },
+      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, opened: null, statement_senders: [], last_statement: null },
+      { id: "acc3", iban_last4: "0007", currency: "EUR", bank: "ing", bank_name: "ING Bank", pays: false, retired: null, opened: null, statement_senders: [], last_statement: null }] };
     const { api, p } = await page({ companies: () => json(cfg), onPost: () => answer({}, "Parola extraselor a fost salvată.") });
     expect(p.getByText("2 bănci, 3 conturi")).toBeInTheDocument();
     expect(p.queryByRole("link", { name: /Bănci și conturi/ })).toBeNull();
@@ -352,7 +417,7 @@ describe("Firme", () => {
     let saved = false;
     let release!: (r: Response) => void;
     const cfg = () => { const c = config(); c.companies[0] = { ...c.companies[0], banks: [{ bank: "bt", name: "Banca Transilvania", connect: "ready", connection: null, statement_password: saved }],
-      accounts: [{ id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: [], last_statement: null }] }; return c; };
+      accounts: [{ id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null }] }; return c; };
     const { p } = await page({ companies: () => json(cfg()), onPost: (c) => c.url.endsWith("company-statement-password")
       ? new Promise<Response>((done) => { release = (r) => { saved = true; done(r); }; }) : answer({}) });
     await userEvent.click(p.getByRole("button", { name: "Modifică NORD" }));
@@ -371,7 +436,7 @@ describe("Firme", () => {
     at("?co=NORD&tab=setari&sec=firme");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], banks: [{ bank: "bt", name: "Banca Transilvania", connect: "ready", connection: null, statement_password: true }], accounts: [
-      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: [], last_statement: null }] };
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null }] };
     const { api, p } = await page({ companies: () => json(cfg) });
     await userEvent.click(p.getByRole("button", { name: "Modifică NORD" }));
     expect(p.getByText("Parola e salvată.")).toBeInTheDocument();

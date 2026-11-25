@@ -81,6 +81,7 @@
   "company-bank": "manage_firms",
   "company-account": "manage_firms",
   "company-statement-password": "manage_firms",
+  "company-account-dates": "manage_firms",
   "company-alias-add": "manage_firms",
   "company-alias-remove": "manage_firms",
   "statement-csv-format": "member",

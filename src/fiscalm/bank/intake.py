@@ -319,7 +319,7 @@ def opening(a: statements.Account) -> Decimal:
 def _late_start(start: date, a: statements.Account, co) -> bool:
     """An account's month may start after the 1st only when the days before could hold no movement, and its opening
     balance is proven: no banking day before `start` (weekends, legal holidays), or the account opened on that exact
-    day (set by a person, `company opened` YYYY-MM-DD; only non-banking days between) and opened at zero."""
+    day (set by a person, Setări › Bănci și conturi, or `fiscalm company dates --opened YYYY-MM-DD`; only non-banking days between) and opened at zero."""
     month = start.replace(day=1)
     if not a.trustworthy:
         return False
