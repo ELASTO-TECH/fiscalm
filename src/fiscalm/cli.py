@@ -27,7 +27,6 @@ from fiscalm import (
     integrations as ig,
     links,
     pack,
-    receipt_items,
     recon,
     scheduler,
     setup,
@@ -101,7 +100,6 @@ def cmd_sync(a, L: Ledger) -> int:
                     f"PACK: {co} {mo} ready for the accountant (fiscalm pack build --company {co} --month {mo})"
                 )
     upload_assignment.process_pending(L)
-    receipt_items.extract_pending(L)
     _out(
         {
             "mode": "live" if is_live() else "shadow",

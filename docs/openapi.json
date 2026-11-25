@@ -10092,8 +10092,6 @@
     "user-reset": "local",
     "session-close": "local",
     "history-review": "local",
-    "receipt-lines-save": "local",
-    "receipt-invoice-confirm": "local",
     "setup-card-dismiss": "local",
     "setup-card-show": "local",
     "telemetry-settings": "local",
@@ -10182,8 +10180,6 @@
     "user-reset": "manage_users",
     "session-close": "manage_users",
     "history-review": "manage_firms",
-    "receipt-lines-save": "member",
-    "receipt-invoice-confirm": "member",
     "setup-card-dismiss": "manage_firms",
     "setup-card-show": "manage_firms",
     "telemetry-settings": "manage_firms",
@@ -10295,8 +10291,6 @@
     "user-reset": "Account administration; fresh administrator session required. id.",
     "session-close": "Account administration; fresh administrator session required. id.",
     "history-review": "Review one pending history PDF by digest, correcting invoice fields or excluding it. Local only; never confirms payment.",
-    "receipt-lines-save": "id: receipt SHA; revision: displayed version; payload: JSON string with lines (name, unit, quantity, net after discounts excluding VAT, vat percentage), total, currency, payment (cash/card/empty). Empty lines skip. 4 KB.",
-    "receipt-invoice-confirm": "id: receipt SHA; revision; invoice: displayed unique proposal ID. Rechecks under lock, never confirms payment. Local operation.",
     "setup-card-dismiss": "Close the selected firm's Configurează card on Acasă; the items it listed stay in Setări, and `setup-card-show` reopens it. Administrator only; repeating it changes nothing.",
     "setup-card-show": "Show the selected firm's closed Configurează card on Acasă again, while something is left to set up. Administrator only; repeating it changes nothing.",
     "telemetry-settings": "on (\"1\" or \"0\"). Administrator only. Daily anonymous Live install statistics, enabled by default; FISCALM_TELEMETRY=0 overrides this local preference.",
@@ -11186,90 +11180,6 @@
               }
             ]
           },
-          "items": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "lines": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": {
-                        "name": {
-                          "type": "string"
-                        },
-                        "unit": {
-                          "type": "string"
-                        },
-                        "quantity": {
-                          "type": "string"
-                        },
-                        "net": {
-                          "type": "string"
-                        },
-                        "vat": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "name",
-                        "unit",
-                        "quantity",
-                        "net",
-                        "vat"
-                      ]
-                    }
-                  },
-                  "total": {
-                    "type": "string"
-                  },
-                  "currency": {
-                    "type": "string"
-                  },
-                  "payment": {
-                    "type": "string"
-                  },
-                  "provenance": {
-                    "type": "string"
-                  },
-                  "state": {
-                    "type": "string"
-                  },
-                  "revision": {
-                    "type": "integer"
-                  },
-                  "verified": {
-                    "type": "boolean"
-                  },
-                  "proposal": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "payment_mismatch": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "lines",
-                  "total",
-                  "currency",
-                  "payment",
-                  "provenance",
-                  "state",
-                  "revision",
-                  "verified",
-                  "proposal",
-                  "payment_mismatch"
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "links": {
             "type": "object",
             "additionalProperties": {
@@ -11309,7 +11219,6 @@
           "held",
           "files",
           "mail",
-          "items",
           "links"
         ]
       },
@@ -13379,90 +13288,6 @@
                       "type": "null"
                     }
                   ]
-                },
-                "items": {
-                  "anyOf": [
-                    {
-                      "type": "object",
-                      "properties": {
-                        "lines": {
-                          "type": "array",
-                          "items": {
-                            "type": "object",
-                            "properties": {
-                              "name": {
-                                "type": "string"
-                              },
-                              "unit": {
-                                "type": "string"
-                              },
-                              "quantity": {
-                                "type": "string"
-                              },
-                              "net": {
-                                "type": "string"
-                              },
-                              "vat": {
-                                "type": "string"
-                              }
-                            },
-                            "required": [
-                              "name",
-                              "unit",
-                              "quantity",
-                              "net",
-                              "vat"
-                            ]
-                          }
-                        },
-                        "total": {
-                          "type": "string"
-                        },
-                        "currency": {
-                          "type": "string"
-                        },
-                        "payment": {
-                          "type": "string"
-                        },
-                        "provenance": {
-                          "type": "string"
-                        },
-                        "state": {
-                          "type": "string"
-                        },
-                        "revision": {
-                          "type": "integer"
-                        },
-                        "verified": {
-                          "type": "boolean"
-                        },
-                        "proposal": {
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "payment_mismatch": {
-                          "type": "boolean"
-                        }
-                      },
-                      "required": [
-                        "lines",
-                        "total",
-                        "currency",
-                        "payment",
-                        "provenance",
-                        "state",
-                        "revision",
-                        "verified",
-                        "proposal",
-                        "payment_mismatch"
-                      ]
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
                 }
               },
               "required": [
@@ -13483,8 +13308,7 @@
                 "sent",
                 "held",
                 "files",
-                "mail",
-                "items"
+                "mail"
               ]
             }
           },
@@ -17359,90 +17183,6 @@
                                   "type": "null"
                                 }
                               ]
-                            },
-                            "items": {
-                              "anyOf": [
-                                {
-                                  "type": "object",
-                                  "properties": {
-                                    "lines": {
-                                      "type": "array",
-                                      "items": {
-                                        "type": "object",
-                                        "properties": {
-                                          "name": {
-                                            "type": "string"
-                                          },
-                                          "unit": {
-                                            "type": "string"
-                                          },
-                                          "quantity": {
-                                            "type": "string"
-                                          },
-                                          "net": {
-                                            "type": "string"
-                                          },
-                                          "vat": {
-                                            "type": "string"
-                                          }
-                                        },
-                                        "required": [
-                                          "name",
-                                          "unit",
-                                          "quantity",
-                                          "net",
-                                          "vat"
-                                        ]
-                                      }
-                                    },
-                                    "total": {
-                                      "type": "string"
-                                    },
-                                    "currency": {
-                                      "type": "string"
-                                    },
-                                    "payment": {
-                                      "type": "string"
-                                    },
-                                    "provenance": {
-                                      "type": "string"
-                                    },
-                                    "state": {
-                                      "type": "string"
-                                    },
-                                    "revision": {
-                                      "type": "integer"
-                                    },
-                                    "verified": {
-                                      "type": "boolean"
-                                    },
-                                    "proposal": {
-                                      "type": [
-                                        "string",
-                                        "null"
-                                      ]
-                                    },
-                                    "payment_mismatch": {
-                                      "type": "boolean"
-                                    }
-                                  },
-                                  "required": [
-                                    "lines",
-                                    "total",
-                                    "currency",
-                                    "payment",
-                                    "provenance",
-                                    "state",
-                                    "revision",
-                                    "verified",
-                                    "proposal",
-                                    "payment_mismatch"
-                                  ]
-                                },
-                                {
-                                  "type": "null"
-                                }
-                              ]
                             }
                           },
                           "required": [
@@ -17463,8 +17203,7 @@
                             "sent",
                             "held",
                             "files",
-                            "mail",
-                            "items"
+                            "mail"
                           ]
                         },
                         {
@@ -17874,90 +17613,6 @@
                                           "type": "null"
                                         }
                                       ]
-                                    },
-                                    "items": {
-                                      "anyOf": [
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "lines": {
-                                              "type": "array",
-                                              "items": {
-                                                "type": "object",
-                                                "properties": {
-                                                  "name": {
-                                                    "type": "string"
-                                                  },
-                                                  "unit": {
-                                                    "type": "string"
-                                                  },
-                                                  "quantity": {
-                                                    "type": "string"
-                                                  },
-                                                  "net": {
-                                                    "type": "string"
-                                                  },
-                                                  "vat": {
-                                                    "type": "string"
-                                                  }
-                                                },
-                                                "required": [
-                                                  "name",
-                                                  "unit",
-                                                  "quantity",
-                                                  "net",
-                                                  "vat"
-                                                ]
-                                              }
-                                            },
-                                            "total": {
-                                              "type": "string"
-                                            },
-                                            "currency": {
-                                              "type": "string"
-                                            },
-                                            "payment": {
-                                              "type": "string"
-                                            },
-                                            "provenance": {
-                                              "type": "string"
-                                            },
-                                            "state": {
-                                              "type": "string"
-                                            },
-                                            "revision": {
-                                              "type": "integer"
-                                            },
-                                            "verified": {
-                                              "type": "boolean"
-                                            },
-                                            "proposal": {
-                                              "type": [
-                                                "string",
-                                                "null"
-                                              ]
-                                            },
-                                            "payment_mismatch": {
-                                              "type": "boolean"
-                                            }
-                                          },
-                                          "required": [
-                                            "lines",
-                                            "total",
-                                            "currency",
-                                            "payment",
-                                            "provenance",
-                                            "state",
-                                            "revision",
-                                            "verified",
-                                            "proposal",
-                                            "payment_mismatch"
-                                          ]
-                                        },
-                                        {
-                                          "type": "null"
-                                        }
-                                      ]
                                     }
                                   },
                                   "required": [
@@ -17978,8 +17633,7 @@
                                     "sent",
                                     "held",
                                     "files",
-                                    "mail",
-                                    "items"
+                                    "mail"
                                   ]
                                 },
                                 {

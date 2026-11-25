@@ -166,7 +166,6 @@ DOCUMENT = {
     "document_type",
     "can_correct",
     "number",
-    "items",
     "id",
     "company",
     "vendor",

@@ -29,7 +29,6 @@ from fiscalm import (
     ledger,
     links,
     pack,
-    receipt_items,
     rules,
     secrets,
     telemetry,
@@ -123,30 +122,6 @@ def _linked(L: Ledger, done: dict) -> str:
         return msg
     owed = "de încasat" if L.issued(rest[0][1]["id"]) else "de plătit"
     return msg + f" Restul facturii {rest[0][0]} rămâne {owed}."
-
-
-def _receipt_items(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
-    try:
-        revision = int(args.get("revision", ""))
-        with L.tx():
-            ctx.authorize()
-            if ctx.action == "receipt-lines-save":
-                payload = json.loads(args.get("payload", ""))
-                ok = L.save_receipt_items(co, args.get("id", ""), payload, revision)
-            else:
-                ok = receipt_items.confirm(L, co, args.get("id", ""), args.get("invoice", ""), revision)
-        return _res(
-            ok,
-            (
-                "Articolele au fost salvate."
-                if ctx.action == "receipt-lines-save"
-                else "Asocierea a fost confirmată. Plata se verifică separat."
-            )
-            if ok
-            else "Documentul s-a schimbat între timp.",
-        )
-    except (ValueError, TypeError, RecursionError):
-        return _res(False, BAD)
 
 
 def _order_discard(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
@@ -1206,8 +1181,6 @@ ACTIONS = {
     'user-reset': Action(_account_action, 'id', role='manage_users', firm=False, public=False, strings=True, actor=True, errors=(ValueError,), message='Autentificarea a fost resetată.', description='Account administration; fresh administrator session required. id.'),
     'session-close': Action(_account_action, 'id', role='manage_users', firm=False, public=False, strings=True, actor=True, errors=(ValueError,), message='Sesiunea a fost închisă.', description='Account administration; fresh administrator session required. id.'),
     'history-review': Action(history_review, 'sha target direction number issue_date total currency party_name party_tax_id', role='manage_firms', public=False, strings=True, errors=(history_pdf.ReviewError,), description='Review one pending history PDF by digest, correcting invoice fields or excluding it. Local only; never confirms payment.'),
-    'receipt-lines-save': Action(_receipt_items, 'id revision payload', public=False, description='id: receipt SHA; revision: displayed version; payload: JSON string with lines (name, unit, quantity, net after discounts excluding VAT, vat percentage), total, currency, payment (cash/card/empty). Empty lines skip. 4 KB.'),
-    'receipt-invoice-confirm': Action(_receipt_items, 'id revision invoice', public=False, description='id: receipt SHA; revision; invoice: displayed unique proposal ID. Rechecks under lock, never confirms payment. Local operation.'),
     'setup-card-dismiss': Action(_setup_card_dismiss, '', role='manage_firms', public=False, strings=True, description='Close the selected firm\'s Configurează card on Acasă; the items it listed stay in Setări, and `setup-card-show` reopens it. Administrator only; repeating it changes nothing.'),
     'setup-card-show': Action(_setup_card_show, '', role='manage_firms', public=False, strings=True, description='Show the selected firm\'s closed Configurează card on Acasă again, while something is left to set up. Administrator only; repeating it changes nothing.'),
     'telemetry-settings': Action(_telemetry_settings, 'on', effect='local', role='manage_firms', firm=False, public=False, strings=True, description='on ("1" or "0"). Administrator only. Daily anonymous Live install statistics, enabled by default; FISCALM_TELEMETRY=0 overrides this local preference.'),

@@ -105,17 +105,12 @@ export type Invoice = {
 /** A receipt's file, served by the engine's docfile: an uploaded photo or PDF, or a mailed PDF. */
 export type DocFile = { id: string; type: "image" | "pdf" };
 
-export type ReceiptLine = { name: string; unit: string; quantity: string; net: string; vat: string };
-export type ReceiptItems = { lines: ReceiptLine[]; total: string; currency: string; payment: string; provenance: string;
-  revision: number; verified: boolean; proposal: string | null; state: string; payment_mismatch: boolean };
-
 /** A receipt: an invoice from mail, or an uploaded photo or file. */
 export type CardInvoice = {
   document_type: "invoice" | "receipt";
   can_correct?: boolean;
   number?: string | null;
   partner?: string | null;
-  items?: ReceiptItems | null;
   id: string;
   company: Co;
   vendor: string;

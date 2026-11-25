@@ -38,7 +38,7 @@ def test_fresh_schema_matches_dev_before_migrations(ledger):
         map(
             list,
             ledger.db.execute(
-                "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name NOT IN ('passkeys','bank_account_offers','auth_failure_window','auth_limits','setup_links','recovery_codes','auth_events','bank_auth_owners','sessions','auth_tickets','history_documents','receipt_items','receipt_invoice_links','archive','partner_settlement_formats','firms','firm_accounts','firm_cards','card_owners','firm_aliases','receipt_uploads') ORDER BY type,name"
+                "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name NOT IN ('passkeys','bank_account_offers','auth_failure_window','auth_limits','setup_links','recovery_codes','auth_events','bank_auth_owners','sessions','auth_tickets','history_documents','archive','partner_settlement_formats','firms','firm_accounts','firm_cards','card_owners','firm_aliases','receipt_uploads') ORDER BY type,name"
             ),
         )
     )
@@ -739,6 +739,27 @@ def test_app_statements_join_packs_on_upgrade_but_never_after_a_sent_pack(tmp_pa
             "oct": "statement-import",
             "bon": "upload:phone",
         }
+
+
+def test_dropping_receipt_lines_keeps_a_confirmed_receipt_invoice_association(tmp_path, monkeypatch):
+    path = tmp_path / "previous.db"
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.drop_receipt_items))
+        Ledger(path).close()
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "INSERT INTO documents(sha,company,month,kind,path,source,created_at,efactura_id) "
+            "VALUES('bon','EXAMPLE','2026-10','receipt','/synthetic.jpg','upload:phone','2026-10-01','8001')"
+        )
+        db.execute(
+            "INSERT INTO efactura(message_id,company,raw_path,status,created_at) "
+            "VALUES('8001','EXAMPLE','/synthetic.zip','open','2026-10-01')"
+        )
+        db.execute("INSERT INTO receipt_items VALUES('bon','EXAMPLE','{}','{}','user',1,1,'2026-10-02')")
+        db.execute("INSERT INTO receipt_invoice_links VALUES('bon','8001','EXAMPLE','2026-10-02')")
+    with closing(Ledger(path)) as ledger:
+        assert ledger.document("bon")["efactura_id"] == "8001"
+        assert not ledger.db.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'receipt_i%'").fetchone()
 
 
 @pytest.mark.parametrize(

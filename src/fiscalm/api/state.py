@@ -30,7 +30,6 @@ from fiscalm import (
     home_charts,
     integrations,
     pack,
-    receipt_items,
     recon,
     rules,
     secrets as secret_store,
@@ -604,7 +603,6 @@ def _document_metadata(L: Ledger, co: str) -> dict[str, dict]:
 def _documents(L: Ledger, co: str) -> list[dict]:
     """The firm's receipts in the accountant's pack (invoices from mail, uploaded photos and files), one row per file."""
     roots, originals = receipt_roots(L, co)
-    structured = {r[0] for r in L.db.execute("SELECT sha FROM receipt_items WHERE company=?", (co,))}
     metadata = _document_metadata(L, co)
     if hasattr(L, "_expense_intake"):
         for sha, fields in metadata.items():
@@ -634,7 +632,6 @@ def _documents(L: Ledger, co: str) -> list[dict]:
                 "card": d["card_last4"] or None,
                 "partner": pack.partner_of(co, d),
                 "files": [{"id": d["sha"], "type": "pdf" if f.suffix.lower() == ".pdf" else "image"}] if f else [],
-                "items": receipt_items.details(L, co, d["sha"]) if d["sha"] in structured else None,
             }
         )
     return sorted(out, key=lambda x: (x["date"] or x["month"], x["vendor"]), reverse=True)

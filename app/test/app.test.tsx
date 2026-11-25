@@ -820,7 +820,6 @@ describe("Custom financial controls follow the session", () => {
     Object.assign(issued, { can_upload: true, can_storno: true, can_resolve: true });
     const tx = s.transactions.rows.find(r => r.counterparty === "POPESCU ANA")!; tx.can_link = true;
     const doc = s.documents.find(r => !r.invoice && !r.mail)!;
-    doc.items = { lines: [{ name: "Cablu de test", unit: "H87", quantity: "1", net: "10.00", vat: "21" }], total: "12.10", currency: "RON", payment: "cash", revision: 1, provenance: "user", verified: false, state: "to_check", proposal: null, payment_mismatch: false };
     const partner = s.partners.find(r => r.roles.includes("client"))!; partner.client_id = "c1";
     const route = { home: "", issued: `&tab=vanzari&iss=${issued.id}`, transaction: `&tab=tranzactii&tx=${tx.id}`,
       receipt: `&tab=cheltuieli&doc=${doc.id}`, partner: `&tab=parteneri&p=${partner.id}`, accountant: "&tab=setari&sec=contabil", accounts: "&tab=tranzactii" }[area];
@@ -830,7 +829,6 @@ describe("Custom financial controls follow the session", () => {
       ? await screen.findByRole("dialog", { busy: false }) : await screen.findByRole("main"));
     await waitFor(() => expect(document.querySelector(".loading")).toBeNull());
     expect(content.queryByRole("button", { name: /Stornează|Trimite.*SPV|Salvează indexul|Modifică$|Asociază tranzacția|Adaugă articol|Salvează$|Confirmă contul|Retrage confirmarea|Încarcă extras|Adaugă contul/ })).toBeNull();
-    if (area === "receipt") expect(content.getByRole("textbox", { name: "Denumire" })).toBeDisabled();
     if (area === "transaction") expect(content.queryByRole("combobox", { name: "Plătitor" })).toBeNull();
     if (area === "accountant") expect(await content.findByRole("textbox", { name: "E-mailuri de la contabil" })).toBeDisabled();
     if (area === "home") expect(content.queryByRole("button", { name: "Încarcă bon sau factură" })).toBeNull();
