@@ -140,7 +140,8 @@ class StatementView:
 
     def credits(self, since: date, today: date) -> list[statements.Tx]:
         """Every representation, from `since` to `today`, of a credit on record that may still be this firm's client
-        paying: statements, CSVs and the bank feed alike, since copies of one payment may name its payer differently.
+        paying: statements, CSVs and the bank feed alike, each line in every reading kept of it, since copies of one
+        payment may name its payer differently.
         A payment is left out only when proved to be something else (`_explained`). A credit on record without its
         details refuses: it could be the client's."""
         self.load(since)
@@ -151,7 +152,8 @@ class StatementView:
                 continue
             if not r["tx"]:
                 raise Refused(STATEMENTS)
-            out.append(statements.Tx.from_dict(json.loads(r["tx"])))
+            readings = [r["tx"], *json.loads(r["readings"] or "[]")]  # every reading may name the payer
+            out += [statements.Tx.from_dict(json.loads(x)) for x in readings]
         return out
 
     def load(self, since: date) -> None:

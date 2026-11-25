@@ -44,7 +44,7 @@ def test_fresh_schema_matches_dev_before_migrations(ledger):
     )
     # Core product schema, including removal of legacy mappings and per-firm account permissions; upgrades are checked separately.
     assert hashlib.sha256(json.dumps(rows).encode()).hexdigest() == (
-        "0efc028f84339423e71d4f25e4a334187577c90d5b9d6a8c75e1f36a9702fe73"
+        "11e6e7dadca65b35d07ce55eb24d930a0c3b295254b679a3a55812e07588bcc1"
     )
     assert not ledger.db.execute("SELECT 1 FROM sqlite_master WHERE name='user_firms'").fetchone()
     assert m.read_version(ledger.path) == m.SCHEMA_VERSION
@@ -846,3 +846,15 @@ def test_stored_statements_keep_covering_their_month_on_upgrade(tmp_path, monkey
         "csv": None,
         "old": None,
     }
+
+
+def test_statement_line_readings_start_empty_on_upgrade(tmp_path, monkeypatch):
+    path = tmp_path / "previous.db"
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.statement_tx_readings))
+        Ledger(path).close()
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO statement_txs(tx_key,company,direction,tx) VALUES('k','EXAMPLE','credit','{}')")
+    with closing(Ledger(path)) as ledger:
+        assert [tuple(r) for r in ledger.db.execute("SELECT tx FROM statement_txs")] == [("{}",)]
+        assert ledger.db.execute("SELECT * FROM statement_tx_readings").fetchall() == []

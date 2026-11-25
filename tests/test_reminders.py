@@ -131,15 +131,17 @@ def _reserve(L, tx, what):
         ("conflict", False),
         ("named_on_a_later_read", False),  # first recorded without its payer, then read again naming the client
         ("named_after_its_account", False),  # first recorded with the payer's account only
+        ("named_in_full_later", False),  # first with a truncated name, then the client's full name
         ("no_details", False),
     ],
 )
 def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, case, reminded):
     L, iid = reminder
     credit = _client_credit(L, iid)
-    if case in ("named_on_a_later_read", "named_after_its_account"):
+    if case in ("named_on_a_later_read", "named_after_its_account", "named_in_full_later"):
         iban = credit.counterparty_iban if case == "named_after_its_account" else ""
-        blank = _client_credit(L, iid, counterparty="", iban=iban, desc=credit.description)
+        name = credit.counterparty[:6] if case == "named_in_full_later" else ""
+        blank = _client_credit(L, iid, counterparty=name, iban=iban, desc=credit.description)
         assert statements.tx_key(blank) == statements.tx_key(credit)
         L.record_statement(_st(blank))
     L.record_statement(_st(credit))
@@ -206,22 +208,20 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
     assert bool(r.tasks(L, "NORD", TODAY, rows)) is reminded
 
 
-def test_a_payer_learned_on_a_later_read_keeps_the_first_remittance(reminder):
-    # The feed keys a line by the bank's reference: a later read may name the payer and drop the remittance text.
+@pytest.mark.parametrize("later", ["payer", "cui"])
+def test_a_later_reading_of_a_feed_line_is_kept_beside_the_first(reminder, later):
+    # The feed keys a line by the bank's reference: a later read may name the payer, or carry the client's CUI in
+    # new text. The stored line stays as first read; the reminder checks every reading.
     L, iid = reminder
     first = _client_credit(L, iid, counterparty="", iban="", desc="Plata FACT TEST-42")
-    first.ref = "eb:ref-1"
-    later = _client_credit(L, iid, desc="")
-    later.ref = "eb:ref-1"
+    cui = i.invoice(L, iid, company="NORD")["data"]["client"]["cui"]
+    kw = {} if later == "payer" else dict(counterparty="", iban="")
+    second = _client_credit(L, iid, desc="" if later == "payer" else f"Plata CUI {cui}", **kw)
+    first.ref = second.ref = "eb:ref-1"
     L.record_statement(_st(first))
-    L.record_statement(_st(later))
+    L.record_statement(_st(second))
     (tx,) = L.db.execute("SELECT tx FROM statement_txs").fetchone()
-    stored = statements.Tx.from_dict(json.loads(tx))
-    assert (stored.description, stored.counterparty, stored.counterparty_iban) == (
-        "Plata FACT TEST-42",
-        later.counterparty,
-        later.counterparty_iban,
-    )
+    assert statements.Tx.from_dict(json.loads(tx)) == first
     assert r.tasks(L, "NORD", TODAY, api._issued(L, "NORD", TODAY, True)) == []
 
 
