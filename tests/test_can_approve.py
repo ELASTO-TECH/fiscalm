@@ -247,3 +247,7 @@ def test_the_picker_never_offers_an_own_account_and_tells_alike_endings_apart(le
     accounts = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]["accounts"]
     assert [(a["index"], a["ending"]) for a in accounts] == [(1, SUPPLIER_IBAN[-5:]), (2, twin[-5:])]
     assert SUPPLIER_IBAN[-4:] == twin[-4:] and SUPPLIER_IBAN[-5:] != twin[-5:]
+    far = synthetic_iban("RO00INGB1000999900001111")  # differs from SUPPLIER_IBAN only past 6 characters from the end
+    _set(ledger, "ibans=?,supplier_iban=?", json.dumps([SUPPLIER_IBAN, far]), SUPPLIER_IBAN)
+    invoice = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]
+    assert invoice["accounts"] == [] and not invoice["can_approve"]  # never more of the IBAN: paid by hand

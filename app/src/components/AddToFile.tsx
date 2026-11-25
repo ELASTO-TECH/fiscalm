@@ -74,7 +74,7 @@ export function AddToFile({ s, invoices, left = [], onDone }: { s: State; invoic
       data-autofocus={files.length ? undefined : true} />
   </>;
   return createPortal(
-    <Sheet onClose={close} label={title} cls="ask" busy={sending}>
+    <Sheet onClose={close} label={title} cls={asked.length ? "ask tall" : "ask"} busy={sending}>
       <CloseX onClose={close} />
       <SheetHead title={title} sub={sum} />
       <fieldset className="m-0 border-0 p-0" disabled={sending}>
