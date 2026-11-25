@@ -295,7 +295,12 @@ def disputed(text: str, firms: list[str]) -> list[str]:
     word, whatever the layout."""
     lines = text.splitlines()
 
-    windows = [" ".join(lines[i : i + ABOVE + 1]) for i, line in enumerate(lines) if DELIVERY.search(line)]
+    windows = [
+        " ".join(" ".join(part).split())  # the block from the label's line down, whole lines and from its column
+        for i, line in enumerate(lines)
+        for m in DELIVERY.finditer(line)
+        for part in (lines[i : i + ABOVE + 1], [x[m.start() :] for x in lines[i : i + ABOVE + 1]])
+    ]
 
     def delivered(co: companies.Company) -> bool:  # on the label's line or below it, a name wrapped over lines too
         return any(co.named_in(w) or co.tax_id_match(w) for w in windows)
@@ -912,11 +917,11 @@ def ai_reading(L: Ledger, doc: Doc, data: bytes, *, ask: Callable | None = None)
     out.refused = ""  # read now: a scan without text waits as a question, never as a silent refusal
     totals = _agreed_totals(doc, x)
     own = any(_issued_by(L, co, x.number) for co in {*doc.firms, x.buyer} - {""})
-    if not x.confident or x.rejected or own or _ai_would_refuse(L, x) or totals is None:
+    other_buyer = bool(x.buyer_name or x.buyer_tax_id) and not x.buyer  # the AI read a buyer that is none of the firms
+    doubt = not x.confident or x.rejected or own or other_buyer or _ai_would_refuse(L, x) or totals is None
+    if doubt or x.buyer in disputed(doc.text, doc.firms):  # disputed: under a delivery label, or conflicting ones
         return out  # in doubt: the question stays, with the fields read
     out.date, out.totals, out.card_last4 = doc.date or x.issue_date, totals, doc.card_last4 or x.card_last4
-    if x.buyer in disputed(doc.text, doc.firms):
-        return out  # the rules saw its name under a delivery label, or under conflicting ones
     if x.buyer and (not doc.firms or x.buyer in doc.firms):
         out.firms = doc.firms or [x.buyer]
         out.roles = doc.roles | {x.buyer: "buyer"}

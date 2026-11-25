@@ -26,11 +26,12 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from fiscalm import ai, companies, docs, integrations
+from fiscalm.identity import tax_token
 from fiscalm.ledger import Ledger
 
 TEXT_LIMIT = 12000  # characters of a document sent: the header and totals are on its first pages
 DOC_TYPES = ("invoice", "receipt", "proforma", "credit_note", "other")
-AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[ .,'\u00a0]\d{3})+|\d+)([.,]\d{2})(?![\d])")
+AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[ .,'\u00a0]\d{3})+|\d+)([.,]\d{2})(?![\d%]|[.,]\d)")  # not a date or rate
 _TEXT = {"type": "string"}
 SCHEMA = {
     "type": "object",
@@ -140,8 +141,8 @@ def _firm(name: str, tax_id: str, firms: dict[str, companies.Company], text: str
     co = firms[key]
     if by_id and name.strip() and key not in by_name:
         return None  # its id with another name: the AI mixed two parties
-    # The evidence that chose it stands on the page: its id, or its name when the AI read the name too.
-    printed = (by_id and co.tax_id_match(text)) or (key in by_name and co.named_in(text))
+    # Every piece of evidence that chose it stands on the page: its id, and its name when the AI read the name too.
+    printed = (not by_id or co.tax_id_match(text)) and (key not in by_name or co.named_in(text))
     return key if not text or printed else None
 
 
@@ -174,21 +175,38 @@ def check(raw: dict, firms: dict[str, companies.Company], text: str = "") -> Ext
         "card_last4": card if re.fullmatch(r"\d{4}", card) and (not text or _card_printed(card, text)) else "",
     }
     words = _words(text)
-    names = {k: s[k].strip()[:200] for k in ("buyer_name", "seller_name")}
+    names = {k: " ".join(s[k].split())[:200] for k in ("buyer_name", "seller_name")}
     names = {k: v if not text or f" {_words(v)} " in f" {words} " else "" for k, v in names.items()}
     checked |= names  # a name the document doesn't print is never kept, nor matched to a bank line
+    ids = {k: re.sub(r"\s+", "", s[k]).upper()[:20] for k in ("buyer_tax_id", "seller_tax_id")}
+    checked |= {k: v if not text or printed_id(tax_token(v), text) else "" for k, v in ids.items()}
     rejected = [k for k, v in checked.items() if s[k].strip() and not v]
     rejected += [k for k, v in (("buyer", buyer), ("seller", seller)) if v is None]
     return Extraction(
         doc_type=s["doc_type"] if s["doc_type"] in DOC_TYPES else "other",
         buyer=buyer or "",
         seller=seller or "",
-        buyer_tax_id=re.sub(r"\s+", "", s["buyer_tax_id"]).upper()[:20],
-        seller_tax_id=re.sub(r"\s+", "", s["seller_tax_id"]).upper()[:20],
         **checked,
         confident=s["confidence"] == "high",
         rejected=tuple(rejected),
     )
+
+
+def printed_id(token: str, text: str) -> bool:
+    """A whole tax id (identity.tax_token form) stands in the text, spaces allowed between its characters; a Romanian
+    one with or without its RO prefix. A fragment of a longer id never counts."""
+    if not token:
+        return False
+    body = r"[ \t]*".join(map(re.escape, token))
+    prefix = r"(?:RO[ \t]*)?" if token.isdigit() else ""
+    text = text.upper()
+    for m in re.finditer(rf"(?<![A-Z0-9]){prefix}{body}(?![A-Z0-9]|[ \t]*\d|[.,/-]\d)", text):
+        tail = text[: m.start()].rstrip(" \t-")[-4:]  # what stands before it, however far the spacing
+        foreign = re.search(r"(?<![A-Z])([A-Z]{2}|CHE)$", tail)  # DE 77777777 is DE77777777, never 77777777
+        runs_into = re.search(r"\d[.,/]?$", tail) or (foreign and foreign[1] != "RO")
+        if not (m.group(0)[0].isdigit() and runs_into):
+            return True  # no digit or foreign prefix runs into it, spaced or not
+    return False
 
 
 def ro_seller(x: Extraction, firms: Collection[companies.Company]) -> bool:

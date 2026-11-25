@@ -325,7 +325,14 @@ SAAS = [
 def test_a_confident_ai_reading_files_what_the_rules_could_not(ledger, home, live_mode):
     if live_mode:
         go_live(home)
-    ask = reading(seller_name="Example SaaS Inc", number="SAAS-7781", total="49.00", currency="USD", card_last4="4242")
+    ask = reading(
+        seller_name="Example SaaS Inc",
+        buyer_tax_id="",
+        number="SAAS-7781",
+        total="49.00",
+        currency="USD",
+        card_last4="4242",
+    )
     assert mi.handle(ledger, message(("pdf", text_pdf(SAAS))), ask=ask) == "filed:1"
     (doc,) = docs_of(ledger)
     got = (doc["company"], doc["amount"], doc["currency"], doc["vendor"], doc["card_last4"])
@@ -351,7 +358,13 @@ def test_a_confident_ai_reading_files_what_the_rules_could_not(ledger, home, liv
     ],
 )
 def test_an_ai_reading_never_overrules_the_document(ledger, fields, result):
-    base = {"seller_name": "Example SaaS Inc", "number": "SAAS-7781", "total": "49.00", "currency": "USD"}
+    base = {
+        "seller_name": "Example SaaS Inc",
+        "buyer_tax_id": "",
+        "number": "SAAS-7781",
+        "total": "49.00",
+        "currency": "USD",
+    }
     assert mi.handle(ledger, message(("pdf", text_pdf(SAAS))), ask=reading(**base | fields)) == result
     assert docs_of(ledger) == []
     if fields == {"confidence": "low"}:
@@ -396,6 +409,12 @@ def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
         (invoice("Order ABC-1984", buyer="Atelier Nord SRL", number=""), {"number": "ABC-1984"}),  # our own number
         (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {}),  # a currency the document never shows
         (invoice("Ship to: Atelier", "Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),  # a wrapped name
+        (invoice("    Ship to: Atelier", "    Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),  # indented
+        (invoice(buyer="Atelier Nord SRL", total="Charged 12.10 EUR"), {"buyer_tax_id": "RO11111111"}),  # unprinted id
+        (
+            invoice(buyer="Bill to: Other Client SA", total="Charged 12.10 EUR"),
+            {"buyer_name": "Other Client SA", "buyer_tax_id": ""},
+        ),
         (invoice("Ship to: Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),  # only its delivery address
         (invoice("Ship to:  Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),
         (invoice(buyer="Atelier Nord SRL", total="Total 12.10 EUR MegaCloud"), {"seller_name": "Cloud"}),
@@ -418,6 +437,26 @@ def test_a_contradicted_or_unsure_ai_reading_keeps_the_question(ledger, doc, fie
     )
     ledger.db.commit()
     assert mi.handle(ledger, message(("pdf", doc)), ask=reading(**fields)) == "asked:1"
+
+
+@pytest.mark.parametrize(
+    ("token", "text", "printed"),
+    [
+        ("77777777", "CUI: RO 7777 7777", True),
+        ("11111111", "RO77777777      RO11111111", True),
+        ("7777", "CUI RO7777 7777", False),
+        ("7777", "RO5555   7777", False),
+        ("7777", "RO77777777", False),
+        ("77777777", "VAT: DE 77777777", False),
+        ("77777777", "VAT: DE                 77777777", False),
+        ("77777777", "VAT: DE-77777777", False),
+        ("77777777", "VAT: CHE 77777777", False),
+        ("2026", "03.11.2026", False),
+        ("119", "119,00 lei", False),
+    ],
+)
+def test_a_tax_id_counts_only_printed_whole(token, text, printed):
+    assert ai_extract.printed_id(token, text) is printed
 
 
 def test_a_number_the_ai_read_never_matches_another_document(ledger):
@@ -454,6 +493,8 @@ def test_a_scanned_invoice_is_read_from_its_picture(ledger):
         ("Charged 12.10", "12.10", "EUR", False),  # no currency anywhere: the AI's alone counts for nothing
         ("Subtotal 10.00 EUR\nCharged EUR 12.10", "10.00", "EUR", False),
         ("VAT 2.10 EUR\nCharged 12.10 EUR", "2.10", "EUR", False),
+        ("Date: 28.10.2026\nCharged 49.00 EUR", "28.10", "EUR", False),  # a date
+        ("Standard rate 19.00%\nCharged 49.00 EUR", "19.00", "EUR", False),  # a rate
         ("VAT 2.10 EUR\nTotal incl. VAT 12.10 EUR", "12.10", "EUR", True),
     ],
 )
