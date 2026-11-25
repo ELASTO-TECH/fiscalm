@@ -461,6 +461,7 @@ def test_a_contradicted_or_unsure_ai_reading_keeps_the_question(ledger, doc, fie
         ("77777777", "VAT: DE-77777777", False),
         ("77777777", "VAT: CHE 77777777", False),
         ("77777777", "Tax ID 77777777", True),
+        ("77777777", "VAT: ID-77777777", False),
         ("2026", "03.11.2026", False),
         ("119", "119,00 lei", False),
     ],
@@ -506,6 +507,7 @@ def test_a_scanned_invoice_is_read_from_its_picture(ledger):
         ("Date: 28.10.2026\nCharged 49.00 EUR", "28.10", "EUR", False),  # a date
         ("Standard rate 19.00%\nCharged 49.00 EUR", "19.00", "EUR", False),  # a rate
         ("Standard rate 19.00 %\nCharged 49.00 EUR", "19.00", "EUR", False),
+        ("Standard rate 19.00\u00a0%\nCharged 49.00 EUR", "19.00", "EUR", False),
         ("VAT 2.10 EUR\nTotal incl. VAT 12.10 EUR", "12.10", "EUR", True),
     ],
 )
