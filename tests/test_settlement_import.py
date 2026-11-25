@@ -474,6 +474,7 @@ def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, e
     with pytest.raises(bank_upload.Refused):
         bank_upload.accept_report(ledger, "NORD", other, "text/csv", **UPLOAD)
     assert asked and not any(w in p for p in asked for w in ("Иван", "Петров", "Киев"))
+    assert bank_upload._shape("12.50 € 📦 Doc🔒") == "99.99 ? ? xxx?"  # only the form leaves
 
 
 def test_ai_never_sets_the_report_currency_and_failure_proposes_nothing(ledger, monkeypatch):

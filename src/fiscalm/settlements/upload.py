@@ -313,7 +313,9 @@ def _settlement_words(cell: str) -> str:
 
 
 def _shape(cell: str) -> str:
-    return re.sub(r"\d", "9", re.sub(r"[^\W\d_]", "x", _cut(cell)))
+    """A cell's form and nothing else: digits 9, letters x, the separators that write amounts and ids kept, any other
+    character a ?."""
+    return "".join("9" if c.isdigit() else "x" if c.isalpha() else c if c in " .,;:/-'" else "?" for c in _cut(cell))
 
 
 def _labels(header: list[str]) -> bool:
@@ -329,7 +331,8 @@ def _ai_columns(L: Ledger, rows: list[list[str]], orders: bool, known: dict[str,
     if not ai.available(L) or not _labels(rows[0]) or len({_plain(c) for c in rows[0]}) != len(rows[0]):
         return {}  # a headerless file's first line is data, and columns that read alike are a person's to tell apart
     # A payout day changes matching: only a person maps it. AWB and order only where shop orders exist.
-    fields = [f for f in FIELDS if f != "date" and (orders or f not in ("awb", "order"))]
+    # The currency column too: a code-like column (a county, a status) mapped as currency would refuse the import.
+    fields = [f for f in FIELDS if f not in ("date", "currency") and (orders or f not in ("awb", "order"))]
     schema = {"type": "object", "properties": {f: {"type": "string"} for f in fields}, "required": fields}
     # Nothing of the file leaves as written but settlement words: each column goes as an id, with its name only when
     # every word of it is one (else its shape), and the cells as shapes (digits 9, letters x).
