@@ -44,7 +44,7 @@ def test_fresh_schema_matches_dev_before_migrations(ledger):
     )
     # Core product schema, including removal of legacy mappings and per-firm account permissions; upgrades are checked separately.
     assert hashlib.sha256(json.dumps(rows).encode()).hexdigest() == (
-        "941a72a650954624d4265213a2a46074a476eb24cb14633153c65493396f9177"
+        "bb15c5174ccfd3d421582cb6e2c0f577a12b62a912bd1f209dcde6beefc4bb46"
     )
     assert not ledger.db.execute("SELECT 1 FROM sqlite_master WHERE name='user_firms'").fetchone()
     assert m.read_version(ledger.path) == m.SCHEMA_VERSION
@@ -817,3 +817,31 @@ def test_credit_notes_stored_without_a_reference_are_read_again_on_upgrade(tmp_p
     with closing(Ledger(path)) as ledger:
         refs = dict(ledger.db.execute("SELECT message_id, billing_ref FROM efactura"))
         assert refs == {"none": None, "named": "SUP 1", "invoice": ""}
+
+
+def test_stored_statements_keep_covering_their_month_on_upgrade(tmp_path, monkeypatch):
+    path = tmp_path / "previous.db"
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.bank_coverage))
+        Ledger(path).close()
+    a, b = "RO00XXXX0000000000000001", "RO00XXXX0000000000000002"
+    with sqlite3.connect(path) as db:
+        for sha, file, accounts in (
+            ("camt", "/s.xml", [a, b]),  # its import refused lines that don't give the balances
+            ("pdf", "/s.pdf", [a]),  # nothing proves its lines were matched: it counts once imported again
+            ("csv", "/s.csv", [a]),  # a CSV proves only its own days: they are not on record
+            ("old", "/s.xml", None),  # names no account: covers none
+        ):
+            db.execute(
+                "INSERT INTO documents(sha,company,month,kind,path,accounts,created_at) "
+                "VALUES(?,'EXAMPLE','2026-02','statement',?,?,'2026-03-01')",
+                (sha, file, accounts and json.dumps(accounts)),
+            )
+    with closing(Ledger(path)) as ledger:
+        got = {r[0]: r[1] and json.loads(r[1]) for r in ledger.db.execute("SELECT sha, coverage FROM documents")}
+    assert got == {
+        "camt": {a: ["2026-02-01", "2026-02-28", True], b: ["2026-02-01", "2026-02-28", True]},
+        "pdf": None,
+        "csv": None,
+        "old": None,
+    }

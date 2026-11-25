@@ -12,7 +12,7 @@ from firms import set_firm
 from payment_cases import D0, _op, download_batch
 
 from fiscalm import companies, recon
-from fiscalm.bank import intake as statement_intake, statements
+from fiscalm.bank import coverage, statements
 from fiscalm.ledger import Ledger
 from fiscalm.payments import btgo, engine as pay
 from fiscalm.payments.orders import PaymentFileError
@@ -89,20 +89,15 @@ def test_the_payment_file_waits_for_the_paying_accounts_statement(ledger, home, 
     item = _op(ledger, 1)
     ident = ledger.create_payment_file("NORD", "Statement hold")
     assert ledger.attach_payment_file(ident, "NORD", item)
+    september = ["2026-09-01", "2026-09-30", True]
     ledger.add_document("ing", "NORD", "2026-09", "statement", "/x/ing.xml", accounts=[ING])
+    coverage.record(ledger, "ing", {ING: september})
     with pytest.raises(PaymentFileError):
         pay.download_file(ledger, ident, "NORD", D0, lambda: None)
     assert not pay.named_path(ledger.payment_file(ident)).exists()
     ledger.add_document("bt", "NORD", "2026-09", "statement", "/x/bt.xml", accounts=[two_ron.ron_iban])
+    coverage.record(ledger, "bt", {two_ron.ron_iban: september})
     assert pay.download_file(ledger, ident, "NORD", D0, lambda: None)["download_id"]
-
-
-def test_a_statement_stored_before_accounts_were_recorded_covers_every_account(ledger, home):
-    ledger.add_document("old", "NORD", "2026-09", "statement", "/x/old.pdf")
-    assert statement_intake.covers(ledger, "NORD", "2026-09", nord().ron_iban)
-    assert statement_intake.covers(ledger, "NORD", "2026-09", " " + nord().ron_iban.lower())
-    assert not statement_intake.covers(ledger, "NORD", "2026-08", nord().ron_iban)
-    assert not statement_intake.covers(ledger, "STUDIO9", "2026-09", nord().ron_iban)
 
 
 def test_the_settling_transaction_rechecks_the_account(ledger, home, two_ron):

@@ -260,7 +260,10 @@ class Client:
             data = self._call(
                 "GET", f"/accounts/{urllib.parse.quote(uid, safe='')}/transactions?" + urllib.parse.urlencode(q)
             )
-            out += data.get("transactions") or []
+            page = data.get("transactions")
+            if not isinstance(page, list):  # an answer without its list proves nothing was booked: never read as none
+                raise BankError("Banca a trimis un răspuns fără tranzacții. Încearcă din nou.", "malformed")
+            out += page
             key = data.get("continuation_key")
             if not key:
                 return out

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from fiscalm import companies
 from fiscalm.api.receipts import directory
-from fiscalm.bank import banking_days, statements
+from fiscalm.bank import banking_days, coverage, statements
 from fiscalm.bank.camt import MAX_XML, parse_camt
 from fiscalm.ledger import Ledger, finance_home
 from fiscalm.pdftext import pdf_text
@@ -176,16 +176,6 @@ def hold_csv_days(L: Ledger, st: statements.Statement) -> None:
                     "INSERT OR IGNORE INTO settled_tx VALUES(?,?,?)",
                     (statements.tx_key(t), "twin csv", __import__("fiscalm.ledger", fromlist=["now"]).now()),
                 )
-
-
-def covers(L: Ledger, company: str, month: str, iban: str) -> bool:
-    """A statement of `month` is on record for the company's account `iban`. One stored before accounts were recorded
-    covers every account (they were the company's only bank's); one that names its accounts must name this one."""
-    iban = companies.normalize_iban(iban)
-    return any(
-        (not d["accounts"] or iban in json.loads(d["accounts"])) and not str(d["path"]).endswith(".csv")
-        for d in L.documents(company=company, month=month, kind="statement")
-    )  # a CSV is partial: never
 
 
 def _read_stored(doc, company: str) -> statements.Statement:
@@ -567,6 +557,7 @@ def _ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: t
 
     paid = recon.auto_mark_paid(L, st)
     ef_paid = efactura.match_statement(L, st)
+    coverage.record(L, digest, coverage.recorded(st))  # last: its days count only once its lines are matched
     L.set_meta(job, "")
     return {
         "file": str(path),

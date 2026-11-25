@@ -14320,7 +14320,7 @@
                 "type": "null"
               }
             ],
-            "description": "Automatic payments held until last month's (month, YYYY-MM) statement of the paying account is in: one task with the count; uploading the statement releases them. Null when none wait."
+            "description": "Automatic payments held until the bank's record of the paying account covers every day of last month (month, YYYY-MM): a statement, CSV exports or the open banking feed. One task with the count; uploading the statement releases them. Null when none wait."
           },
           "files": {
             "type": "array",

@@ -13,8 +13,9 @@ from firms import set_firm
 from payment_cases import _op, download_batch
 
 from fiscalm import companies, recon
-from fiscalm.bank import enablebanking as eb, feed as bank_feed, statements
+from fiscalm.bank import coverage, enablebanking as eb, feed as bank_feed, statements
 from fiscalm.ledger import Ledger, now
+from fiscalm.payments import engine as pay
 
 RON = "RO24BTRLRONCRT0000000001"
 
@@ -110,7 +111,7 @@ def test_an_account_retired_since_it_was_connected_is_not_read(ledger, monkeypat
         ),
     )
     api = Api()
-    st = bank_feed.read(ledger, connection(ledger), date(2026, 11, 3), api)
+    st, _ = bank_feed.read(ledger, connection(ledger), date(2026, 11, 3), api)
     assert api.calls == [] and st.accounts == []
 
 
@@ -124,6 +125,162 @@ def test_a_read_matches_a_payment_and_is_done_once_a_day(ledger, home, live):
     assert ledger.payments(company="NORD")[0]["status"] == "paid"
     assert bank_feed.run_all(ledger, date(2026, 11, 3), api) == []  # read today already
     assert len(api.calls) == 1
+
+
+def test_the_feed_covers_what_it_read_and_releases_payments_once_past_the_month(ledger):
+    """Each account from the first day read of it to a few days before the last read (late bookings); an account
+    added on reconnecting from its own first read."""
+    connection(ledger)
+    bank_feed.run_all(ledger, date(2026, 11, 3), Api())  # read 6 August to 3 November: October may still change
+    assert coverage.gaps(ledger, "NORD", RON, date(2026, 8, 1), date(2026, 10, 31)) == [
+        (date(2026, 8, 1), date(2026, 8, 5)),
+        (date(2026, 10, 30), date(2026, 10, 31)),
+    ]
+    assert pay.missing_statement(ledger, "NORD", date(2026, 11, 3)) == "2026-10"
+    bank_feed.run_all(ledger, date(2026, 11, 5), Api(error=eb.BankError("x", "ASPSP_RATE_LIMIT_EXCEEDED")))
+    assert pay.missing_statement(ledger, "NORD", date(2026, 11, 5)) == "2026-10"  # a refused read covers nothing
+    eur = companies.get("NORD").ibans["EUR"]
+    with ledger.tx() as db:  # reconnected with the EUR account too
+        db.execute(
+            "UPDATE bank_connections SET accounts=?",
+            (json.dumps([{"iban": RON, "uid": "u1"}, {"iban": eur, "uid": "u2"}]),),
+        )
+    bank_feed.run_all(ledger, date(2026, 11, 6), Api())
+    assert pay.missing_statement(ledger, "NORD", date(2026, 11, 6)) == ""
+    assert coverage.gaps(ledger, "NORD", eur, date(2026, 10, 1), date(2026, 11, 1)) == [
+        (date(2026, 10, 1), date(2026, 10, 28))  # read from 29 October (the last read's 3rd, less 5 days)
+    ]
+    # a booked line fiscalm can't read (no bank reference): the feed proves nothing up to its day
+    # (nor one with an empty status: only a status the bank gives for unbooked lines is left out)
+    unread = [raw(ref="", day="2026-10-20"), raw(status="", day="2026-10-25"), raw(status="PDNG", day="2026-10-28")]
+    bank_feed.run_all(ledger, date(2026, 11, 7), Api(unread))
+    assert coverage.gaps(ledger, "NORD", RON, date(2026, 10, 1), date(2026, 10, 31)) == [
+        (date(2026, 10, 1), date(2026, 10, 25))
+    ]
+
+
+@pytest.mark.parametrize("read_since", ["2026-08-06", None])
+def test_a_month_the_feed_read_from_its_first_day_is_its_own_whatever_day_its_first_line_comes(
+    ledger, home, live, read_since
+):
+    """Quiet until the 20th: that read starts on the 14th, yet the feed has read October from the 1st, so its debit
+    settles the payment. A feed that can't show it read the 1st leaves the month to a statement, and doesn't cover it."""
+    download_batch(ledger, [_op(ledger, 1)])
+    (p,) = ledger.payments(company="NORD")
+    connection(ledger, last_read="2026-10-19")
+    with ledger.tx() as db:
+        db.execute("UPDATE bank_connections SET covered=?", (json.dumps({RON: read_since} if read_since else {}),))
+    paid = Api([raw(amount=p["amount"], iban=p["payee_iban"], name=p["payee_name"], day="2026-10-20")])
+    bank_feed.run_all(ledger, date(2026, 10, 20), paid)
+    assert (ledger.payments(company="NORD")[0]["status"] == "paid") == bool(read_since)
+    bank_feed.run_all(ledger, date(2026, 11, 6), Api())
+    assert pay.missing_statement(ledger, "NORD", date(2026, 11, 6)) == ("" if read_since else "2026-10")
+
+
+@pytest.mark.parametrize("feed_first", [True, False])
+def test_a_statement_covers_only_months_the_feed_does_not_settle(ledger, feed_first):
+    """In the feed's month a CSV's lines are kept from the matchers, so its days can't show a payment already made."""
+    if feed_first:
+        record(ledger, [line("2026-10-02", ref="eb:1")], "ob")  # the feed took October first
+    ledger.add_document("c" * 64, "NORD", "2026-10", "statement", "/x/october.csv", accounts=[RON])
+    coverage.record(ledger, "c" * 64, {RON: ["2026-10-01", "2026-10-31", False]})
+    october = coverage.gaps(ledger, "NORD", RON, date(2026, 10, 1), date(2026, 10, 31))
+    assert october == ([(date(2026, 10, 1), date(2026, 10, 31))] if feed_first else [])
+
+
+@pytest.mark.parametrize(
+    "why, kept_from, twin_from, twin_day",
+    [
+        ("twin csv", "file", "file", "2026-10-10"),  # a full statement's line on a CSV day: the CSV's, that day
+        ("twin ob", "ob", "file", "2026-10-13"),  # the feed's line in a statement's month: the statement's
+    ],
+)
+def test_a_line_kept_from_the_matchers_as_a_twin_with_no_twin_on_record_leaves_its_day_uncovered(
+    ledger, why, kept_from, twin_from, twin_day
+):
+    """It may be a payment nothing matched: its day waits until its twin, from the other source, is on record; a line
+    of its own source a day later is another payment, not its twin."""
+    record(ledger, [line("2026-10-02", ref="a")], "file")
+    kept = line("2026-10-10", "70.00", "kept")
+    record(ledger, [kept], kept_from)
+    with ledger.tx() as db:
+        db.execute("INSERT OR REPLACE INTO settled_tx VALUES(?,?,?)", (statements.tx_key(kept), why, now()))
+    ledger.add_document("s" * 64, "NORD", "2026-10", "statement", "/x/october.xml", accounts=[RON])
+    coverage.record(ledger, "s" * 64, {RON: ["2026-10-01", "2026-10-31", True]})
+    october = date(2026, 10, 1), date(2026, 10, 31)
+    other = line("2026-10-11", "70.00", "another payment")
+    record(ledger, [other], kept_from)
+    with ledger.tx() as db:  # matched as its own payment: free, yet of the same source, so no twin of the kept line
+        db.execute("DELETE FROM settled_tx WHERE tx_key=?", (statements.tx_key(other),))
+    assert coverage.gaps(ledger, "NORD", RON, *october) == [(date(2026, 10, 10), date(2026, 10, 10))]
+    record(ledger, [line(twin_day, "70.00", "its twin")], twin_from)
+    assert coverage.gaps(ledger, "NORD", RON, *october) == []
+
+
+def test_twins_pair_so_that_no_pairing_choice_leaves_one_out():
+    """A reserved line that took a twin another one needs moves to its other twin; thousands of identical lines
+    pair without running out of stack."""
+    assert coverage._unpaired([["a", "b"], ["a"]]) == []  # the first takes "a", then gives it up for "b"
+    assert coverage._unpaired([["a"], ["a"]]) == [1]
+    many = [[f"free{j}" for j in range(1500)] for _ in range(1500)]
+    assert coverage._unpaired(many) == []
+
+
+def test_twins_pair_on_the_ledger(ledger):
+    """Feed lines on the 2nd and 6th, the statement's on the 5th and 8th: 5-2 and 8-6 pair both (5-6 would leave 8)."""
+    record(ledger, [line(d, "70.00", "eb:" + d) for d in ("2026-10-02", "2026-10-06")], "ob")
+    kept = [line(d, "70.00", "st:" + d) for d in ("2026-10-05", "2026-10-08")]
+    record(ledger, kept, "file")
+    with ledger.tx() as db:
+        for t in kept:
+            db.execute("INSERT OR REPLACE INTO settled_tx VALUES(?,?,?)", (statements.tx_key(t), "twin file", now()))
+    assert unproven(ledger, date(2026, 10, 1), date(2026, 10, 31)) == []
+
+
+def unproven(ledger, first, last):
+    return coverage._unproven(coverage._Record.read(ledger, "NORD", RON), first, last)
+
+
+def kept(ledger, t, why):
+    with ledger.tx() as db:
+        db.execute("INSERT OR REPLACE INTO settled_tx VALUES(?,?,?)", (statements.tx_key(t), why, now()))
+
+
+def test_a_chain_of_lines_competing_for_twins_is_seen_whole(ledger):
+    """The statement's Oct 31, Nov 3 and Nov 9 and the feed's Nov 3 and 6: November's two take both twins, so
+    October's last day waits, however far the chain runs past the month."""
+    feed = [line(d, "70.00", "eb:" + d) for d in ("2026-11-03", "2026-11-06")]
+    record(ledger, feed, "ob")
+    statement = [line(d, "70.00", "st:" + d) for d in ("2026-10-31", "2026-11-03", "2026-11-09")]
+    record(ledger, statement, "file")
+    for t in statement:
+        kept(ledger, t, "twin file")
+    assert unproven(ledger, date(2026, 10, 1), date(2026, 10, 31)) == [date(2026, 10, 31)]
+
+
+@pytest.mark.parametrize("case", ["copy", "conflict", "just after"])
+def test_a_line_no_twin_stands_for_leaves_its_day_uncovered(ledger, case):
+    """The feed's line that a copy of the same bank reference already stands for is no twin of another; a line whose
+    reference carries conflicting money waits for a person; a line just past the month keeps its own twin."""
+    october = date(2026, 10, 1), date(2026, 10, 31)
+    feed = line("2026-10-10", "70.00", "eb:1")
+    record(ledger, [feed], "ob")
+    if case == "copy":
+        copy, missed = line("2026-11-08", "70.00", "st:1"), line("2026-10-11", "70.00", "st:2")  # copy weeks later
+        record(ledger, [copy, missed], "file")
+        kept(ledger, copy, "duplicate:" + statements.tx_key(feed))
+        kept(ledger, missed, "twin file")
+        assert unproven(ledger, *october) == [date(2026, 10, 11)]
+    elif case == "conflict":
+        kept(ledger, feed, "bank reference conflict")
+        assert unproven(ledger, *october) == [date(2026, 10, 10)]
+    else:
+        orphan, after = (line(d, "70.00", "eb:" + d) for d in ("2026-10-31", "2026-11-02"))
+        record(ledger, [orphan, after], "ob")
+        record(ledger, [line("2026-11-02", "70.00", "st:nov")], "file")
+        kept(ledger, orphan, "twin ob")
+        kept(ledger, after, "twin ob")
+        assert unproven(ledger, *october) == [date(2026, 10, 31)]
 
 
 def line(day, amount="50.00", ref="R", words="x", flow="debit"):
