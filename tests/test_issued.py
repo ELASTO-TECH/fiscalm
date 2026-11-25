@@ -447,7 +447,7 @@ def _gamma(mid, number, total):
         ("an ambiguous rival", []),
         ("one account two clients", []),
         ("an account taught by a single", ["7001"]),
-        ("a single shrinking two sets to one", ["7001"]),
+        ("a single shrinking two sets to one", []),  # the 40 is also in a set the 100 could pay: neither settles
         ("an unknown reference with digits in its series", []),
         ("an account showing another client at any amount", []),
         ("a foreign vat id of another firm", []),
@@ -457,6 +457,8 @@ def _gamma(mid, number, total):
         ("a foreign vat id written with a space", []),
         ("one reference read as two invoices", []),
         ("one private buyer's invoices without an id", []),
+        ("an anonymous single inside a named set", []),
+        ("a named invoice next to an unknown one", []),
     ],
 )
 def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec, monkeypatch, case, collected):
@@ -534,12 +536,40 @@ def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec,
         }
         _stored(ledger, monkeypatch, **people)
         credits = [c("1000.00", counterparty="ION POPESCU")]
+    elif case == "an anonymous single inside a named set":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+        credits = [c("400.00", "plata", counterparty="UNKNOWN", iban=OTHER_IBAN), c("1000.00", "NRD 0050 NRD 0051")]
+    elif case == "a named invoice next to an unknown one":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00"))
+        credits = [c("900.00", "Plata NRD 0050 si NRD 0099"), c("1000.00", "plata")]
     else:
         b2b = {"7001": "400.00", "7002": "600.00"}
         _stored(ledger, monkeypatch, **{m: ubl(number=f"B2B-00{m[-2:]}", total=t) for m, t in b2b.items()})
         credits = [c("1000.00", "Plata B2B-0099")]
     assert issued.match_statement(ledger, _st(*credits)) == collected
     assert issued.match_statement(ledger, _st(*credits)) == []  # the same statement again decides the same
+
+
+@pytest.mark.parametrize(
+    "client,numbers,desc",
+    [
+        ("BETA SOFTWARE SRL|RO66666666", ("NRD 0050", "NRD 0051"), "DE-66666666"),
+        ("BETA SOFTWARE SRL|RO66666666", ("NRD 0050", "NRD 0051"), "US 66666666"),
+        ("GERMAN FIRMA GMBH|DE123456789", ("NRD 0050", "NRD 0051"), "ORDER CODE 123456789"),
+        ("BETA SOFTWARE SRL|RO66666666", ("NRD 50", "NRD 50-2026"), "Plata factura NRD 50/2026"),
+    ],
+)
+def test_a_lookalike_id_or_reference_shows_no_client_and_names_no_set(
+    ledger, home, sec, monkeypatch, client, numbers, desc
+):
+    name, cui = client.split("|")
+    pair = {"7001": (numbers[0], "400.00"), "7002": (numbers[1], "600.00")}
+    _stored(
+        ledger, monkeypatch, **{m: ubl(number=n, total=t, client=name, client_cui=cui) for m, (n, t) in pair.items()}
+    )
+    payer = "UNRELATED PAYER" if "Plata" not in desc else name
+    t = _credit("1000.00", date(2026, 10, 20), counterparty=payer, iban=OTHER_IBAN, desc=desc)
+    assert issued.match_statement(ledger, _st(t)) == []
 
 
 def test_a_set_is_collected_whole_or_not_at_all(ledger, home, sec, monkeypatch):

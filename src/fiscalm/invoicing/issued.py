@@ -405,9 +405,14 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         claims = Counter(r["message_id"] for c in first for r, _ in c)
         # sets are found against the opening balances and accounts, before any single collection changes them
         plans = [(t, plan) for t, c in zip(credits, first, strict=True) if not c and (plan := pool.batch(t, ()))]
+        # what each line reaches beyond single candidates: a set it could pay, an invoice it names (even settling
+        # nothing itself); a line's own reach is subtracted where it is judged
+        mentions = [pool.mentioned(t) for t in credits]
+        reach = Counter(m for _, (sets, _, _) in plans for m in {r["message_id"] for rows in sets for r in rows})
+        reach.update(m for named in mentions for m in named)
+        done = _collect_singles(L, pool, st, credits, first, claims, reach, mentions)
         shown = _clients_by_account(pool, st)
-        done = _collect_singles(L, pool, st, credits, first, claims)
-        return batch_done + done + _collect_sets(L, pool, plans, claims, done, shown)
+        return batch_done + done + _collect_sets(L, pool, plans, claims, done, shown, reach)
 
 
 def _open_credits(L: Ledger, st: statements.Statement) -> list[statements.Tx]:
@@ -428,8 +433,15 @@ def _open_credits(L: Ledger, st: statements.Statement) -> list[statements.Tx]:
     ]
 
 
-def _collect_singles(
-    L: Ledger, pool: _Pool, st: statements.Statement, credits: list, first: list, claims: Counter
+def _collect_singles(  # noqa: PLR0913 (one statement's competing evidence, read once)
+    L: Ledger,
+    pool: _Pool,
+    st: statements.Statement,
+    credits: list,
+    first: list,
+    claims: Counter,
+    reach: Counter,
+    mentions: list,
 ) -> list[str]:
     # accounts that show a client on a line of this statement are nobody's anonymous payment
     shown = {t.counterparty_iban for t in st.settlement_txs if t.counterparty_iban and pool.from_client(t)}
@@ -444,6 +456,8 @@ def _collect_singles(
         (r, how) = cands[0]
         if how == "amount" and (len(was) > 1 or claims[r["message_id"]] > 1 or t.counterparty_iban in shown):
             continue  # it fit others at first, another credit fits it too, or its account showed a client
+        if reach[r["message_id"]] - (r["message_id"] in mentions[i]):
+            continue  # another line names it or could pay it within a set
         if _collect(L, pool, t, (r,), how, f"{how} REF {t.ref}"):
             done.append(r["message_id"])
     return done
@@ -458,22 +472,21 @@ def _clients_by_account(pool: _Pool, st: statements.Statement) -> dict[str, set[
     return shown
 
 
-def _collect_sets(
-    L: Ledger, pool: _Pool, plans: list, claims: Counter, done: list, shown: dict[str, set[str]]
+def _collect_sets(  # noqa: PLR0913 (one statement's competing evidence, read once)
+    L: Ledger, pool: _Pool, plans: list, claims: Counter, done: list, shown: dict[str, set[str]], reach: Counter
 ) -> list[str]:
     """A credit that fits no single invoice may pay several of its client's (maintainer decision, 2026-11-25):
     the one exact set (_Pool.batch), when no other credit of the statement reaches any of its invoices and its
     account shows no other client on the statement."""
-    # every set a credit could pay competes, even one it can't settle for being ambiguous
-    taken = Counter(m for _, (sets, _, _) in plans for m in {r["message_id"] for rows in sets for r in rows})
     out: list[str] = []
     for t, (sets, how, key) in plans:
         # the line shows this one client only, and so does its account on every line of the statement
         if len(sets) != 1 or pool.who(t) != {key} or len(shown.get(t.counterparty_iban, ())) > 1:
             continue
-        rows = sets[0]
+        rows, own = sets[0], pool.mentioned(t)
+        # every set a credit could pay competes, even one it can't settle for being ambiguous, and every name
         alone = all(
-            taken[r["message_id"]] == 1 and not claims[r["message_id"]] and r["message_id"] not in done for r in rows
+            reach[m] - 1 - (m in own) == 0 and not claims[m] and m not in done for m in (r["message_id"] for r in rows)
         )
         if alone and _collect(L, pool, t, rows, how, f"{how} {len(rows)} invoices REF {t.ref}"):
             out += [r["message_id"] for r in rows]
@@ -536,16 +549,20 @@ def _full_tax_id(r) -> str:
     return (full[2:] if re.fullmatch(r"RO\d+", full) else full) or tax_token(r["client_cui"]) or ""
 
 
-_COUNTRIES = frozenset(
-    {"AT", "BE", "BG", "CH", "CY", "CZ", "DE", "DK", "EE", "EL", "ES", "FI", "FR", "GB", "HR"}
-    | {"HU", "IE", "IT", "LT", "LU", "LV", "MT", "NL", "NO", "PL", "PT", "SE", "SI", "SK", "XI"}
-)  # VAT prefixes that make the digits after them another country's id, never a Romanian CUI
+_SEP = r"[\s./:-]*"
 
 
 def _bare_cui_on(cui: str, text: str) -> bool:
-    """A Romanian CUI written alone or as RO<cui>, never another country's VAT id ('DE<cui>', 'DE <cui>')."""
-    found = re.finditer(rf"(?<![A-Z0-9])(?:([A-Z]{{2}}) ?)?{cui}(?!\d)", text.upper()) if len(cui) >= 6 else ()
-    return any(m[1] not in _COUNTRIES for m in found)
+    """A Romanian CUI as a whole word, alone or after RO or CF, never after any other two letters ('DE-<cui>')."""
+    found = (
+        re.finditer(rf"(?<![A-Z0-9])(?:([A-Z]{{2}}){_SEP})?{cui}(?![A-Z0-9])", text.upper()) if len(cui) >= 6 else ()
+    )
+    return any(m[1] in (None, "RO", "CF") for m in found)
+
+
+def _vat_on(full: str, text: str) -> bool:
+    """A foreign VAT id ('DE123456789') as a whole word, its country and number apart or together."""
+    return re.search(rf"(?<![A-Z0-9]){full[:2]}{_SEP}{full[2:]}(?![A-Z0-9])", text.upper()) is not None
 
 
 def _series_number(number: str | None) -> tuple | str:
@@ -636,7 +653,6 @@ class _Pool:
         """Every client of the firm (any invoice, any status, history too) the credit shows: by the account an
         earlier collection came from, the CUI on it (a foreign firm's whole VAT id, country included), or the name."""
         if id(t) not in self._who:
-            text = re.sub(r"[^A-Z0-9]", "", f"{t.counterparty} {t.description}".upper())
             said = f"{t.counterparty} {t.description}"
             self._who[id(t)] = {
                 key
@@ -644,7 +660,7 @@ class _Pool:
                 # the account, and also the words: a known account never hides another client named on the line
                 if credit_from_client(self.L, self.company, name, cui, t, accounts=self.accounts) == "iban"
                 or same_firm(name, t.counterparty)
-                or (bool(full) and (full in text if not full.isdigit() else _bare_cui_on(full, said)))
+                or (bool(full) and (_bare_cui_on(full, said) if full.isdigit() else _vat_on(full, said)))
             }
         return self._who[id(t)]
 
@@ -660,6 +676,8 @@ class _Pool:
         if _not_a_payment(t) or self.unknown_ref(t) or not (mine := self.of_client(t, done)):
             return None
         names, kind = self.named(t)
+        if names and not self.apart(t, names):
+            return None  # its names still compete (mentioned)
         if not names and len(mine) > BATCH_SCAN:  # not searched: it competes for every invoice, never settles
             return [tuple(r for r, _ in mine)] * 2, mine[0][1], _client_key(mine[0][0])
         exact = [c for c in _sets(mine, names, kind) if len(c) > 1 and sum(self.owed(r) for r, _ in c) == t.amount]
@@ -689,6 +707,17 @@ class _Pool:
             if any((series, int(n)) not in self.series_refs for n in re.findall(written, desc)):
                 return True
         return False
+
+    def mentioned(self, t: statements.Tx) -> set[str]:
+        """The invoices a line names for sure (whole identifiers, or digits of one), whatever it can settle."""
+        names, kind = self.named(t)
+        return names - {"__ambiguous__"} if kind != "bare" else set()
+
+    def apart(self, t: statements.Tx, names: set[str]) -> bool:
+        """Each named invoice is written in its own place: one reference never names two ('NRD 50/2026')."""
+        desc, rx = _norm(t.description), {mid: r for mid, r, _ in self.known}
+        spans = [(mid, m.span()) for mid in names if rx.get(mid) for m in rx[mid].finditer(desc)]
+        return not any(a != b and s[0] < e[1] and e[0] < s[1] for a, s in spans for b, e in spans)
 
     def named(self, t: statements.Tx) -> tuple[set[str], str]:
         """Invoices the credit names, and how: "series" (a whole identifier, 'NRD 0042'), "digits" (3+ digits of one,
