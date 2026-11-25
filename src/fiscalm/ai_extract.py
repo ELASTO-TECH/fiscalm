@@ -198,8 +198,11 @@ def printed_id(token: str, text: str) -> bool:
         return False
     body = r"[ \t]*".join(map(re.escape, token))
     prefix = r"(?:RO[ \t]*)?" if token.isdigit() else ""
-    alone = r"(?<![A-Z0-9])(?<!\d[ \t])(?<!\d[ \t]{2})"  # no digit or letter runs into it, spaced or not
-    return re.search(rf"{alone}{prefix}{body}(?![A-Z0-9]|[ \t]+\d)", text.upper()) is not None
+    text = text.upper()
+    for m in re.finditer(rf"(?<![A-Z0-9]){prefix}{body}(?![A-Z0-9]|[ \t]*\d)", text):
+        if not (m.group(0)[0].isdigit() and re.search(r"\d[ \t]*$", text[: m.start()])):
+            return True  # no digit runs into it, spaced or not
+    return False
 
 
 def ro_seller(x: Extraction, firms: Collection[companies.Company]) -> bool:

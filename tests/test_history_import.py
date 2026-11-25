@@ -709,6 +709,11 @@ def test_history_pdf_ai_reading_in_doubt_waits_in_review(ledger, monkeypatch, li
     assert (q["reason"], q["direction"], q["party_name"]) == ("unsure", "received", "Firma Exemplu SRL")
 
 
+def test_a_proforma_is_never_filed_by_an_ai_reading(ledger, monkeypatch):
+    history_ai(ledger, monkeypatch, {})
+    assert run(ledger, zipped(("p.pdf", text_pdf(["Proforma SB-0099", *HISTORY_TEXT])))).review == 1
+
+
 @pytest.mark.parametrize("lines", [FACTURA, []])  # a text PDF, and a scan read from its first page's picture
 def test_history_pdf_read_by_ai_in_sandbox(ledger, monkeypatch, lines):
     history_ai(ledger, monkeypatch, {})
@@ -721,7 +726,13 @@ def test_history_pdf_read_by_ai_in_sandbox(ledger, monkeypatch, lines):
 
 @pytest.mark.parametrize(
     ("token", "text", "printed"),
-    [("77777777", "CUI: RO 7777 7777", True), ("7777", "CUI RO7777 7777", False), ("7777", "RO77777777", False)],
+    [
+        ("77777777", "CUI: RO 7777 7777", True),
+        ("11111111", "RO77777777      RO11111111", True),
+        ("7777", "CUI RO7777 7777", False),
+        ("7777", "RO5555   7777", False),
+        ("7777", "RO77777777", False),
+    ],
 )
 def test_a_partner_id_counts_only_printed_whole(token, text, printed):
     assert ai_extract.printed_id(token, text) is printed
