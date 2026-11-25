@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from fiscalm import bnr, integrations
 from fiscalm.api.responses import Error, fail, page
+from fiscalm.identity import firm_name
 from fiscalm.invoicing import engine as inv
 from fiscalm.ledger import Ledger, is_live
 
@@ -90,6 +91,18 @@ def validate(body: object) -> dict:
         if inv.decimal(line["vat_rate"]) not in (0, 11, 21):
             fail(400, "invalid_order", "Use VAT rates 0, 11 or 21.")
     return row
+
+
+LEGAL_FORMS = frozenset(
+    {"sc", "srl", "srld", "sa", "pfa", "ii", "if", "snc", "scs", "gmbh", "ag", "ug", "kg", "ltd", "llc", "inc"}
+    | {"sas", "sarl", "bv", "nv", "spa", "sl"}
+)
+
+
+def same_firm(saved: str, typed: str) -> bool:
+    """One firm under the same tax id: case, accents, punctuation and the legal form don't count, the words do."""
+    words = [[w for w in firm_name(n).split("-") if w not in LEGAL_FORMS] for n in (saved, typed)]
+    return bool(words[0]) and words[0] == words[1]
 
 
 def channel(L: Ledger, co: str, iid: str) -> integrations.Instance:
@@ -201,12 +214,13 @@ def _intake(
         if matches:
             if len(matches) != 1:
                 fail(409, "client_conflict", "Resolve duplicate saved client identities first.")
-            saved = json.loads(matches[0]["data"])
-            if any(
-                saved.get(k, "") != normalized.get(k, "")
-                for k in ("name", "street", "city", "county", "country", "postal_code", "email")
-            ):
-                fail(409, "client_conflict", "Shop buyer differs from the saved client. Review the client first.")
+            if not same_firm(json.loads(matches[0]["data"])["name"], normalized["name"]):
+                fail(
+                    409,
+                    "client_conflict",
+                    "Shop buyer names another firm than the saved client. Review the client first.",
+                )
+            # Address and email drift is accepted: the invoice carries the saved client, the order keeps what was typed.
             cid = matches[0]["id"]
         else:
             # Private clients belong to this order only; never edit another draft's client.
