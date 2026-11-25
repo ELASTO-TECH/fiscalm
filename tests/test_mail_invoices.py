@@ -785,9 +785,7 @@ def test_document_ai_runs_in_sandbox_and_live_only_when_configured(
 
     def ask(L, system, prompt, schema, image=None):
         calls.append(prompt)
-        if "doc_type" in schema["properties"]:
-            return reading(total="15.00")(system, prompt, schema)
-        return {"total": "15.00", "currency": "EUR"}
+        return reading(total="15.00")(system, prompt, schema)
 
     monkeypatch.setattr(ai, "ask_json", ask)
     raw = invoice("Total paid 15.00 EUR")

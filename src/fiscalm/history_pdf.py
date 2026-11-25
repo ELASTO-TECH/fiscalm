@@ -10,7 +10,7 @@ import stat
 from datetime import date, datetime
 from decimal import Decimal
 
-from fiscalm import ai_extract, companies
+from fiscalm import ai_extract, companies, identity
 from fiscalm.efactura.inbox import Invoice, tax_token
 from fiscalm.ledger import Ledger, finance_home, now
 from fiscalm.mail import invoices as reader
@@ -49,16 +49,20 @@ def fields(L: Ledger, raw: bytes, company: str) -> dict:
     return _with_ai(L, raw, company, doc, rules)
 
 
-def _ai_fields(x: ai_extract.Extraction, company: str, text: str) -> dict:
-    """The history fields an AI reading gives, the firm's role decided by the engine's match of its CUI or name."""
+TAX_SHAPE = re.compile(r"[1-9]\d{1,9}|[A-Z]{2}(?=[A-Z0-9]*\d)[A-Z0-9]{2,13}")  # a CUI, or a country-prefixed VAT id
+
+
+def _ai_fields(x: ai_extract.Extraction, company: str, text: str) -> tuple[dict, bool]:
+    """The history fields an AI reading gives, the firm's role decided by the engine's match of its CUI or name, and
+    whether a value it gave was dropped here (a contradiction, not a gap: the reading is then never certain)."""
     way = "received" if x.buyer == company else "issued" if x.seller == company else ""
-    name, tax = {"received": (x.seller_name, x.seller_tax_id), "issued": (x.buyer_name, x.buyer_tax_id)}.get(
+    name, raw_tax = {"received": (x.seller_name, x.seller_tax_id), "issued": (x.buyer_name, x.buyer_tax_id)}.get(
         way, ("", "")
     )
-    tax = tax_token(tax)
-    if text and not ai_extract.printed_id(tax, text):
-        tax = ""  # a partner id the document doesn't print whole
-    return {
+    tax = tax_token(raw_tax)
+    if not (TAX_SHAPE.fullmatch(tax) and identity.firm_id(tax)) or (text and not ai_extract.printed_id(tax, text)):
+        tax = ""  # not a firm's id, or one the document doesn't print whole
+    out = {
         "direction": way,
         "number": x.number if plausible_number(x.number) else "",
         "issue_date": x.issue_date,
@@ -67,12 +71,41 @@ def _ai_fields(x: ai_extract.Extraction, company: str, text: str) -> dict:
         "party_name": name if way else "",
         "party_tax_id": tax,
     }
+    given = {"number": x.number, "total": x.total, "currency": x.currency, "party_tax_id": raw_tax}
+    return out, any(v and not out[k] for k, v in given.items())
+
+
+def _certain(x: ai_extract.Extraction, company: str, doc: reader.Doc, rules: dict, ai: dict) -> bool:
+    """Files without review only a confident invoice reading that contradicts nothing the rules found or doubted."""
+    same = {"number": lambda a, b: number_key(a) == number_key(b), "party_name": lambda a, b: True}  # a name's spelling
+    agree = all(not rules[k] or not v or same.get(k, str.__eq__)(rules[k], v) for k, v in ai.items())
+    # A number the rules saw but couldn't pick (several, a separate series, an FGO export) stays the reviewer's choice.
+    seen = reader.numbers(doc.text) or re.search(r"\bseria\b", doc.text, re.I) or ARCHIVE_HEADER.search(doc.text)
+    total = (rules["total"] or ai["total"], rules["currency"] or ai["currency"])
+    if doc.totals:  # one of the rules' totals, in the currency they read
+        money = total in doc.totals
+    else:  # none the rules could read: printed positive with its currency, as for a mailed invoice
+        money = not doc.text.strip() or reader.printed_total(doc.text, total[0] or "0", total[1])
+    return all(
+        (
+            x.confident,
+            not x.rejected,
+            x.doc_type == "invoice",
+            doc.refused in ("", "unreadable"),  # a text without an invoice title stays a person's call
+            set(doc.firms) <= {company},  # another firm named on it: never decided by the AI
+            agree,
+            rules["number"] or not seen,
+            money,
+            rules["party_tax_id"] or ai["party_tax_id"],  # a partner id printed whole, as an import requires
+            company not in reader.disputed(doc.text, [company]),  # never its delivery address
+        )
+    )
 
 
 def _with_ai(L: Ledger, raw: bytes, company: str, doc: reader.Doc, rules: dict) -> dict:
     """The rules' fields completed by one checked AI reading (fiscalm.ai_extract), in Sandbox and Live: reading a
-    local document has no outward effect. A confident reading of an invoice that agrees with every field the rules
-    found files without review; anything else waits in review with the AI's fields filled in."""
+    local document has no outward effect. A certain reading files without review; anything else waits in review with
+    the AI's fields filled in."""
     image = None
     if not doc.text.strip():
         png = first_page_png(raw) if raw.startswith(b"%PDF-") and ai_extract.ready(L) else None
@@ -80,19 +113,8 @@ def _with_ai(L: Ledger, raw: bytes, company: str, doc: reader.Doc, rules: dict) 
     x = ai_extract.extract(L, [company], text=doc.text, image=image) if doc.text.strip() or image else None
     if x is None:
         return rules
-    ai = _ai_fields(x, company, doc.text)
-    same = {"number": lambda a, b: number_key(a) == number_key(b), "party_name": lambda a, b: True}  # a name's spelling
-    agree = all(not rules[k] or not v or same.get(k, str.__eq__)(rules[k], v) for k, v in ai.items())
-    # A number or a total the rules saw but couldn't pick (several, a separate series) stays the reviewer's choice.
-    seen = reader.numbers(doc.text) or re.search(r"\bseria\b", doc.text, re.I) or ARCHIVE_HEADER.search(doc.text)
-    number_open = rules["number"] or not seen
-    if doc.totals:
-        total_open = rules["total"] or (ai["total"], ai["currency"]) in doc.totals
-    else:  # none the rules could read: printed positive with its currency, as for a mailed invoice
-        total_open = not doc.text.strip() or reader.printed_total(doc.text, ai["total"] or "0", ai["currency"])
-    party = rules["party_tax_id"] or ai["party_tax_id"]  # a partner id printed whole, as an import requires
-    party = party and company not in reader.disputed(doc.text, [company])  # never its delivery address
-    certain = all((x.confident, not x.rejected, x.doc_type == "invoice", agree, number_open, total_open, party))
+    ai, dropped = _ai_fields(x, company, doc.text)
+    certain = not dropped and _certain(x, company, doc, rules, ai)
     return {k: rules[k] or v for k, v in ai.items()} | {"reason": "" if certain else "unsure"}
 
 

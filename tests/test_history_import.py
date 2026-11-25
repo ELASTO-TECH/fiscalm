@@ -695,6 +695,16 @@ FACTURA = ["Factura SB-0099", *HISTORY_TEXT]
         (FACTURA, {"seller_tax_id": "RO88888888"}),  # a partner id it doesn't print
         (FACTURA, {"seller_tax_id": "7777"}),  # a fragment of the printed one
         (FACTURA, {"currency": "EUR"}),  # the document prints lei
+        ([*FACTURA[:4], "Curs BNR 1 EUR = 4,97 RON", "Total 119,00"], {"currency": "EUR"}),  # a total without currency
+        ([*FACTURA, "Proiect pentru Studio 9 SRL"], {}),  # another of the firms on it
+        (FACTURA, {"seller_tax_id": "SRL"}),  # not a firm's id
+        (  # the rules read the partner; the AI's other, unprinted id contradicts it
+            ["FACTURA", "SB-0099", "Furnizor: Firma Exemplu SRL CUI: RO77777777", "Client: Atelier Nord SRL"]
+            + ["Data: 03.11.2026", "Total 119,00 lei"],
+            {"seller_tax_id": "RO88888888"},
+        ),
+        (FACTURA, {"currency": ""}),  # a total it gave without its currency
+        (["Aviz de insotire SB-0099", *HISTORY_TEXT], {}),  # no invoice title
         (
             [
                 "Factura SB-0099",
@@ -743,6 +753,10 @@ def test_history_pdf_read_by_ai_in_sandbox(ledger, monkeypatch, lines):
         ("7777", "RO5555   7777", False),
         ("7777", "RO77777777", False),
         ("77777777", "VAT: DE 77777777", False),
+        ("77777777", "VAT: DE-77777777", False),
+        ("77777777", "VAT: CHE 77777777", False),
+        ("2026", "03.11.2026", False),
+        ("119", "119,00 lei", False),
     ],
 )
 def test_a_partner_id_counts_only_printed_whole(token, text, printed):
