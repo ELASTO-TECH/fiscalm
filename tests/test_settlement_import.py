@@ -170,6 +170,11 @@ def test_xlsx_sheets_with_one_header_read_as_one_table():
         },
         {"xl/workbook.xml": both_book.replace(b' r:id="rId2"', b"")},  # a sheet without its id
         {"_rels/.rels": rels.format("").encode()},  # a package naming no workbook
+        {  # Refunds outside xl/worksheets/, named only by the content types
+            "xl/refunds.xml": refunds,
+            "[Content_Types].xml": b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            b'<Override PartName="/xl/refunds.xml" ContentType="application/x.worksheet+xml"/></Types>',
+        },
     ):
         with pytest.raises(ReportError):
             table(variant(**parts), "xlsx")
