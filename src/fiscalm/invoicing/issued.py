@@ -559,18 +559,22 @@ class _Pool:
         """(invoice, how) the credit may collect: those it names, else all it fits; the ones that show the
         client win over those that fit by amount alone."""
         cands = [(r, how) for r in self.rows if r["message_id"] not in done and (how := self.fits(r, t))]
-        names, kind = self.named(t)
-        if names:
-            fit = [c for c in cands if c[1] in CLIENT_PROOF]
-            cands = [(r, how) for r, how in cands if r["message_id"] in names]
-            if kind == "series" and len(names) == 1:  # one whole invoice identifier: the credit says which it pays
-                cands = [(r, "ref" if how in ("amount", "other") else how) for r, how in cands]
-            else:  # digits, or several invoices named: without its client the credit proves none of them
-                kept = [(r, how) for r, how in cands if how in CLIENT_PROOF]
-                # a number without a series ('10' in a date) may refuse, never choose among the client's invoices
-                cands = kept if kind != "bare" or len(kept) == len(fit) or len(kept) <= 1 and len(fit) <= 1 else []
-        cands = [c for c in cands if c[1] != "other"]
+        cands = [c for c in _narrow(cands, *self.named(t)) if c[1] != "other"]
         return [c for c in cands if c[1] in CLIENT_PROOF] or cands
+
+
+def _narrow(cands: list, names: set[str], kind: str) -> list:
+    """Keep the candidates the credit names. One whole identifier says which it pays, even without its client
+    ("ref"); digits or several names prove nothing without the client; a number without a series ('10' in a date)
+    may refuse, never choose among the client's invoices."""
+    if not names:
+        return cands
+    fit = [c for c in cands if c[1] in CLIENT_PROOF]
+    cands = [(r, how) for r, how in cands if r["message_id"] in names]
+    if kind == "series" and len(names) == 1:
+        return [(r, "ref" if how in ("amount", "other") else how) for r, how in cands]
+    kept = [(r, how) for r, how in cands if how in CLIENT_PROOF]
+    return kept if kind != "bare" or len(kept) == len(fit) or len(kept) <= 1 and len(fit) <= 1 else []
 
 
 def match_recent_statements(L: Ledger, months: int = 13, today: date | None = None) -> list[str]:
