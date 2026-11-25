@@ -600,8 +600,9 @@ export type TxLink = {
   /** What the parts and the difference are counted in: the documents' currency (for a card, maybe its original one). */
   currency: string;
   note: string;
-  /** Made by no person: a saved rule, or the bank's own fee or interest line. Undoing it leaves the line to people. */
-  rule: "saved" | "bank" | null;
+  /** Made by no person: a saved rule, the bank's own fee or interest line, or both ends of a transfer between the
+   * firm's accounts. Undoing it leaves the line to people. */
+  rule: "saved" | "bank" | "transfer" | null;
   by: string;
   at: string;
 };

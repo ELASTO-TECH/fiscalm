@@ -132,7 +132,7 @@ function Linked({ t, link, onChange }: { t: Transaction; link: TxLink; onChange:
 }
 
 /** Who made an explanation no person made (links.apply_rules). */
-const BY_RULE = { saved: "după regula salvată", bank: "după extrasul băncii" };
+const BY_RULE = { saved: "după regula salvată", bank: "după extrasul băncii", transfer: "după ambele capete ale transferului" };
 
 /** What a label, an advance, a transfer or a bon says; a transfer's other end and a bon open their own sheets. */
 function Marked({ t }: { t: Transaction }) {
@@ -439,15 +439,15 @@ function keyFor(t: Transaction, kind: LinkKind, label: TransactionLabel | ""): M
 }
 
 /** Ține minte: the next transactions of this account, card or merchant get the same explanation on their own
- * (`auto`: Fără document, Avans) or as a proposal (an invoice: picking it stays a person's). */
+ * (`auto`: Fără document, Avans; also the ones still to explain) or as a proposal (an invoice: picking it stays a person's). */
 function Keep({ t, by, on, onChange, auto = false }: { t: Transaction; by: MemoryKey; on: boolean; onChange: (on: boolean) => void; auto?: boolean }) {
   return (
     <div className="my-5 border-0 border-t border-solid border-line pt-4">
       <Label className={transactionChoiceStyle} htmlFor="tx-keep">
         <Input id="tx-keep" type="checkbox" checked={on} onChange={(e) => onChange(e.target.checked)} aria-describedby="tx-keep-about" />
-        Salvează regula pentru tranzacțiile viitoare
+        Salvează regula
       </Label>
-      <p className={noteLeftStyle} id="tx-keep-about">{`${by === "name" && t.card && t.direction === "debit" ? "Comerciantul" : KEPT_BY[by]} ${t.remember[by]}: regula ${auto ? "se aplică automat tranzacțiilor" : "se propune la tranzacțiile"} următoare.`}</p>
+      <p className={noteLeftStyle} id="tx-keep-about">{`${by === "name" && t.card && t.direction === "debit" ? "Comerciantul" : KEPT_BY[by]} ${t.remember[by]}: regula ${auto ? "explică automat tranzacțiile următoare și pe cele încă neexplicate" : "se propune la tranzacțiile următoare"}.`}</p>
     </div>
   );
 }

@@ -286,8 +286,9 @@ def schemas() -> dict:
             "reason": {"enum": [None, *REASONS, *LABELS]},
             "difference": MONEY,
             "rule": {
-                "enum": [None, "saved", "bank"],
-                "description": "Made by no person: a saved rule (saved) or the bank's own fee or interest line (bank). "
+                "enum": [None, "saved", "bank", "transfer"],
+                "description": "Made by no person: a saved rule (saved), the bank's own fee or interest line (bank), or "
+                "both ends of a transfer between the firm's accounts, one naming the other's account (transfer). "
                 "Undoing or changing it leaves the transaction to people.",
             },
         }

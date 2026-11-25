@@ -466,7 +466,7 @@ describe("a transaction's sheet", () => {
     renderApp({ state: () => json(s0) });
     const s = await sheet();
     if (direction === "debit" && card) await userEvent.click(s.getByRole("radio", { name: "Factură" }));
-    expect(s.getByRole("checkbox", { name: "Salvează regula pentru tranzacțiile viitoare" })).toHaveAccessibleDescription(
+    expect(s.getByRole("checkbox", { name: "Salvează regula" })).toHaveAccessibleDescription(
       `${noun}: regula se propune la tranzacțiile următoare.`); // an invoice stays a person's pick
   });
 
@@ -481,9 +481,9 @@ describe("a transaction's sheet", () => {
     const s = await sheet();
     await userEvent.click(s.getByRole("radio", { name: "Fără document" }));
     await userEvent.click(s.getByRole("radio", { name: "Cheltuială personală" }));
-    expect(s.getByRole("checkbox", { name: "Salvează regula pentru tranzacțiile viitoare" })).toHaveAccessibleDescription(
-      "Cardul ••••0001: regula se aplică automat tranzacțiilor următoare.");
-    expect(s.getByRole("checkbox", { name: "Salvează regula pentru tranzacțiile viitoare" })).toBeChecked();
+    expect(s.getByRole("checkbox", { name: "Salvează regula" })).toHaveAccessibleDescription(
+      "Cardul ••••0001: regula explică automat tranzacțiile următoare și pe cele încă neexplicate.");
+    expect(s.getByRole("checkbox", { name: "Salvează regula" })).toBeChecked();
     await userEvent.click(s.getByRole("button", { name: "Marchează fără document" }));
     expect(fake.posts()[0].body).toMatchObject({ kind: "label", reason: "personal", remember: "card" });
     at("?co=NORD&tab=automatizari");

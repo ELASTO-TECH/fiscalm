@@ -308,11 +308,12 @@ def _advance(L: Ledger, company: str, key: str, who: str) -> Callable[[], dict]:
     return build
 
 
-def other_end(L: Ledger, company: str, key: str, t: statements.Tx) -> str | None:
+def other_end(L: Ledger, company: str, key: str, t: statements.Tx, *, but: str = "") -> str | None:
     """The other end of a transfer between the firm's accounts, when exactly one is on record and free: the opposite
     direction, the same amount and currency, on another of its accounts (the one the transfer names, when it names one
     of the firm's), naming this account or none, not a credit a Decontare waits on, at most BOUNDARY_DAYS apart. A
-    transfer to an account that isn't the firm's has none. Read under the write lock (Ledger.link_tx runs the build)."""
+    transfer to an account that isn't the firm's has none. `but`: a transaction whose reservation doesn't count (the
+    one being explained, asking from the other end). Read under the write lock (Ledger.link_tx runs the build)."""
     own = companies.get(company, L=L).own_ibans
     to = companies.normalize_iban(t.counterparty_iban)
     if to and to not in own:
@@ -320,7 +321,8 @@ def other_end(L: Ledger, company: str, key: str, t: statements.Tx) -> str | None
     lo, hi = (t.date - timedelta(days=BOUNDARY_DAYS)).isoformat(), (t.date + timedelta(days=BOUNDARY_DAYS)).isoformat()
     rows = L.db.execute(
         "SELECT tx_key, tx FROM statement_txs WHERE company=? AND direction=? AND amount=? AND tx_key!=? AND day BETWEEN ? "
-        "AND ? AND iban IS NOT NULL AND iban!=? AND (?='' OR iban=?) AND tx_key NOT IN (SELECT tx_key FROM settled_tx)",
+        "AND ? AND iban IS NOT NULL AND iban!=? AND (?='' OR iban=?) "
+        "AND tx_key NOT IN (SELECT tx_key FROM settled_tx WHERE tx_key!=?)",
         (
             company,
             "credit" if t.direction == "debit" else "debit",
@@ -331,9 +333,12 @@ def other_end(L: Ledger, company: str, key: str, t: statements.Tx) -> str | None
             companies.normalize_iban(t.iban),
             to or "",
             to or "",
+            but,
         ),
     ).fetchall()
     mine = companies.normalize_iban(t.iban)
+    if any(not r["tx"] for r in rows):  # a line fiscalm can't read may be the other end: none is sure
+        return None
 
     def fits(r) -> bool:  # the same currency; a counterparty it names is this account; no Decontare waits on it
         other = json.loads(r["tx"])
@@ -481,12 +486,12 @@ def remembered(kept: list) -> list[dict]:
     ]
 
 
-def proposals(company: str, txs: list[statements.Tx], kept: list) -> list[dict | None]:
+def proposals(company: str, txs: list[statements.Tx], kept: list, L: Ledger | None = None) -> list[dict | None]:
     """What the user asked to remember for each transaction's card, account or merchant (that order), as a proposal:
     {kind: remembered, memory, as: {kind, partner, reason, note}}. One of the AUTOMATIC kinds is applied on its own
     (apply_rules); the rest the user confirms on the sheet."""
     by_key = {(m["key_kind"], m["key"]): m for m in kept}
-    own, out = companies.get(company).own_ibans, []
+    own, out = companies.get(company, L=L).own_ibans, []
     for t in txs:
         keys = efactura.line_keys(t, own)
         m = next((by_key[(k, keys[k])] for k in ("card", "iban", "name") if (k, keys.get(k)) in by_key), None)
@@ -500,19 +505,21 @@ def proposals(company: str, txs: list[statements.Tx], kept: list) -> list[dict |
 
 def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
     """Explain on their own, after the matchers ran, the Tranzacții rows (transactions.view) left De explicat with
-    nothing else proposed for them: by a saved Fără document or Avans rule, on a line dated from the day it was saved
-    ("tranzacțiile viitoare"); else a line the bank's own codes or words call its fee or interest, as Fără document.
-    A row with any other proposal (an exact or named receipt, a settlement, invoices it fits) or waiting for its
-    invoice is left to people. Written by Ledger.link_tx under the write lock, which checks again what a person may
-    have decided since the rows were read (_untouched). Returns the keys explained."""
-    saved = {m["id"]: m["at"][:10] for m in L.memories(company)}
+    nothing else proposed for them: by a saved Fără document or Avans rule, on any line of its card, account or
+    merchant still to explain, older ones too; else a line the bank's own codes or words call its fee or interest, as
+    Fără document; else a debit whose other end on another of the firm's accounts is free too (_own_transfer), as a
+    Transfer între conturi with both ends. A row with any other proposal (an exact or named receipt, a settlement,
+    invoices it fits) or waiting for its invoice is left to people. Written by Ledger.link_tx under the write lock,
+    which checks again what a person may have decided since the rows were read and leaves a line naming an open
+    invoice to a person (_untouched). Returns the keys explained."""
+    free = {r["id"] for r in rows if not (r["explanation"] or r["proposal"] or r["awaiting"]) and r["can_link"]}
     done = []
     for r in rows:
         if r["explanation"] or not r["can_link"] or r["awaiting"]:
             continue
         kept = r["proposal"]["as"] if r["proposal"] and r["proposal"]["kind"] == "remembered" else None
         memory = r["proposal"]["memory"] if kept else None
-        if kept and kept["kind"] in AUTOMATIC and r["date"] >= saved.get(memory, "9999"):
+        if kept and kept["kind"] in AUTOMATIC:
             words, rule = kept["note"] or "", "saved"
             if kept["kind"] == "label":
                 build = _labelled(L, company, r["id"], kept["reason"] or "", words)
@@ -520,6 +527,8 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
                 build = _advance(L, company, r["id"], words)
         elif not r["proposal"] and r["bank_says"]:
             memory, rule, build = None, "bank", _labelled(L, company, r["id"], r["bank_says"], "")
+        elif not r["proposal"] and r["direction"] == "debit" and _free_other_end(L, company, r["id"], free):
+            memory, rule, build = None, "transfer", _own_transfer(L, company, r["id"], free)
         else:
             continue
         try:
@@ -532,25 +541,121 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
     return done
 
 
-def _untouched(L: Ledger, company: str, key: str, memory: str | None, build: Callable[[], dict]) -> Callable[[], dict]:
-    """A rule's explanation, under the write lock, only while nobody decided otherwise since the rows were read: the
-    line not taken back from an explanation, not waiting for its invoice, not a debit to choose for, not a card debit
-    a receipt could explain (recon.match_receipts, by amount or by name), not a credit a pending settlement report
-    claims, and the saved rule still the same one (a replaced rule has a new id)."""
-
-    def build_once() -> dict:
+def _free_other_end(L: Ledger, company: str, key: str, free: set[str]) -> str | None:
+    """The other end (other_end) of debit `key` when a rule may explain both as a Transfer între conturi: each is the
+    other's only candidate, it is one of the rows left free, nobody decided otherwise for it since (_decided), both
+    are on the firm's own accounts, neither is the bank's own fee or interest or has a saved rule now (proposals), the
+    credit is no pending report's (settlements.claimed_credit), neither names an open invoice (names_open_invoice),
+    and one of the two names the other's account. Two lines that only share an amount and a few days, naming no
+    account, may be a payment and an unrelated collection: left to people. A line refused as a person's would be has
+    none."""
+    try:
         t, _ = _transaction(L, company, key)
-        decided = L.db.execute(
+        other = other_end(L, company, key, t)
+        if other not in free or _decided(L, other):
+            return None
+        o, _ = _transaction(L, company, other)
+        if names_open_invoice(L, company, o):
+            return None
+    except LinkRefused:
+        return None
+    if t.card_last4 or o.card_last4:  # a card pays a merchant; it never moves money between the firm's accounts
+        return None
+    bank = {statements.BANK_FEE, statements.INTEREST} & {t.category, o.category}
+    named = companies.normalize_iban(t.counterparty_iban) or companies.normalize_iban(o.counterparty_iban)
+    own = companies.get(company, L=L).own_ibans
+    if bank or not named or not {companies.normalize_iban(t.iban), companies.normalize_iban(o.iban)} <= own:
+        return None
+    if settlements.claimed_credit(L, company, o) or any(proposals(company, [t, o], L.memories(company), L)):
+        return None  # a pending report's credit, or a rule saved since the rows were read, is not a transfer's
+    return other if other_end(L, company, other, o, but=key) == key else None
+
+
+def _own_transfer(L: Ledger, company: str, key: str, free: set[str]) -> Callable[[], dict]:
+    """A Transfer între conturi no person made, both ends together, read again under the write lock."""
+
+    def build() -> dict:
+        t, _ = _transaction(L, company, key)
+        other = _free_other_end(L, company, key, free)
+        if not other:
+            raise LinkRefused("changed")
+        return {"kind": "transfer", "difference": Decimal(0), "items": [("tx " + other, t.amount)]}
+
+    return build
+
+
+def plain(text: str) -> str:
+    """Letters and digits only, lower case, without diacritics: how bank text and invoice numbers are compared."""
+    return " ".join(re.findall(r"[0-9a-z]+", companies.fold(text).lower()))
+
+
+def names_number(text: str, number: str) -> bool:
+    """`text` (plain, padded with spaces) names invoice `number`: three characters or more with a digit, whole, as
+    written or without its spaces."""
+    p = plain(number)
+    return len(p) >= 3 and any(c.isdigit() for c in p) and (f" {p} " in text or f" {p.replace(' ', '')} " in text)
+
+
+def names_open_invoice(L: Ledger, company: str, t: statements.Tx) -> bool:
+    """The line's bank details name one of the firm's invoices it may still pay (a debit) or collect (a credit), at any
+    amount, by any reading a matcher or the sheet uses (names_number; the full identifier with or without its zeros,
+    issued._ident_re; its digits, as the collections matcher reads them): what it covers is a person's to say, never a
+    rule's. Read under the write lock."""
+    words = t.description or t.title or ""
+    text, norm = f" {plain(words)} ", efactura._norm(words)
+
+    def names(number: str) -> bool:
+        # the firm's own numbers as the collections matcher reads them; a supplier's is outside data: one too short
+        # names dates, one too long is not a number
+        sure = t.direction == "credit" or (
+            3 <= len(number) <= 40 and (re.search(r"[A-Za-z]", number) or efactura.number_of(number))
+        )
+        ident, digits = (issued._ident_re(number) if sure else None), efactura.number_of(number)
+        return (
+            names_number(text, number)
+            or bool(ident and ident.search(norm))
+            or bool(digits and re.search(rf"(?<!\d){digits}(?!\d)", words))
+        )
+
+    sql = (
+        "SELECT number FROM issued WHERE company=? AND status IN ('open','marked')"
+        if t.direction == "credit"
+        else "SELECT number FROM efactura WHERE company=? "
+        "AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)"
+    )
+    return any(names(r["number"] or "") for r in L.db.execute(sql, (company,)))
+
+
+def _decided(L: Ledger, key: str) -> bool:
+    """A person decided for the line: took it back from an explanation, waits for its invoice, or must choose for it."""
+    return bool(
+        L.db.execute(
             "SELECT 1 FROM tx_rules_off WHERE tx_key=?1 UNION ALL SELECT 1 FROM tx_awaiting WHERE tx_key=?1 "
             "UNION ALL SELECT 1 FROM ambiguous_tx WHERE tx_key=?1",
             (key,),
         ).fetchone()
-        gone = (
-            memory
-            and not L.db.execute("SELECT 1 FROM tx_memory WHERE id=? AND company=?", (memory, company)).fetchone()
-        )
+    )
+
+
+def _untouched(L: Ledger, company: str, key: str, memory: str | None, build: Callable[[], dict]) -> Callable[[], dict]:
+    """A rule's explanation, under the write lock, only while nobody decided otherwise since the rows were read: the
+    line not decided by a person (_decided), not a card debit a receipt could explain (recon.match_receipts, by
+    amount or by name), not a line naming an open invoice (names_open_invoice), not a credit a pending settlement
+    report claims, and the saved rule still the one that wins
+    for the line (proposals: a replaced rule has a new id, a card's rule comes before an account's or a merchant's)."""
+
+    def build_once() -> dict:
+        t, _ = _transaction(L, company, key)
+        now = proposals(company, [t], L.memories(company), L)[0] if memory else None
+        gone = memory and (now or {}).get("memory") != memory
         receipt = t.direction == "debit" and t.card_last4 and recon.match_receipts([t], recon._receipts(L, company))
-        if decided or gone or receipt or (t.direction == "credit" and settlements.claimed_credit(L, company, t)):
+        if (
+            _decided(L, key)
+            or names_open_invoice(L, company, t)
+            or gone
+            or receipt
+            or (t.direction == "credit" and settlements.claimed_credit(L, company, t))
+        ):
             raise LinkRefused("changed")
         return build()
 
