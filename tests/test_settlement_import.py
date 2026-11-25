@@ -419,6 +419,9 @@ def test_preview_recognizes_a_preset_header(ledger):
     assert (ask.value.extra["proposed"], ask.value.extra["source"]) == ("", "")
 
 
+COLUMN_IDS = {"Doc": "c1", "Incasat": "c2", "Retinut": "c3", "Moneda": "c4"}
+
+
 @pytest.mark.parametrize(
     "answer,expected",
     [
@@ -441,7 +444,11 @@ def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, e
     monkeypatch.setattr(
         bank_upload.ai,
         "ask_json",
-        lambda L, s, p, schema: asked.append(p) or {f: "" for f in bank_upload.FIELDS} | answer,
+        # The fake answers with column ids, as the prompt asks, for the header names a case gives.
+        lambda L, s, p, schema: (
+            asked.append(p)
+            or {f: "" for f in bank_upload.FIELDS} | {f: COLUMN_IDS.get(c, c) for f, c in answer.items()}
+        ),
     )
     data = b"Doc,Incasat,Retinut,Moneda\nTEST-1,100.00,2.00,EUR\n"
     with pytest.raises(bank_upload.Refused) as ask:
@@ -450,11 +457,18 @@ def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, e
     assert (preview["guess"], preview["proposed"]) == ((header | expected, "ai") if expected else (header, ""))
     assert preview["currency"] == "EUR"
     assert len(asked) == 1 and "TEST-1" not in asked[0] and "xxxx-9" in asked[0]  # cells leave only as shapes
+    assert '"name": "Incasat"' in asked[0] and '"name": "xxx"' in asked[0]  # "Doc" is no settlement word
     asked.clear()
-    for first in (b"TEST-1,100.00,2.00", b"INV-12,EUR 42.50,EUR 1.25", b"Mara Exemplu,Cluj,Achitat"):  # data lines
+    firsts = (
+        b"TEST-1,100.00,2.00",
+        b"INV-12,EUR 42.50,EUR 1.25",
+        b"Mara Exemplu,Cluj,Achitat",
+        b"Mara,Cluj,Plata ramburs",
+    )
+    for first in firsts:  # a first line of data: nothing of it leaves as written
         with pytest.raises(bank_upload.Refused):
             bank_upload.accept_report(ledger, "NORD", first + b"\nTEST-2,5.00,0\n", "text/csv", **UPLOAD)
-    assert asked == []
+    assert not any(w in p for p in asked for w in ("Mara", "Cluj", "INV-12", "TEST-1"))  # settlement words may go
 
 
 @pytest.mark.parametrize("second,currency", [("ron", "RON"), ("eur", "")])
