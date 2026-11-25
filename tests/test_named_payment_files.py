@@ -290,18 +290,26 @@ def test_a_file_downloaded_twice_stays_editable_and_imports_its_latest_download(
     assert Path(ledger.payment_file(ident)["path"]).read_bytes() == again["data"]
 
 
-def test_a_download_recorded_before_51_that_reused_its_row_stays_the_latest(ledger, world):
-    """Before #51 a download of the same bytes refreshed its first row's time: A (lower id, newer time) is latest."""
+@pytest.mark.parametrize("tie", [False, True])
+def test_a_download_recorded_before_51_that_reused_its_row_is_imported_only_as_the_bytes_on_disk(ledger, world, tie):
+    """Before #51 a download of the same bytes refreshed its first row's time: A, B, A left A (lower id) latest, or, in
+    one second, tied with B. Only the bytes on disk (A) are ever imported; a tie waits for a new download."""
     ident = pay.add_invoices(ledger, "NORD", ["101"], name="Legacy", approve_invoice=efactura.approve)
     a = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0)
     b = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0 + timedelta(days=1))
-    ledger.db.execute("UPDATE payment_downloads SET created_at='2099-01-01T10:00:00' WHERE id=?", (a["download_id"],))
+    again = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0)  # A on disk
+    when = ledger.db.execute("SELECT created_at FROM payment_downloads WHERE id=?", (b["download_id"],)).fetchone()[0]
+    ledger.db.execute("DELETE FROM payment_downloads WHERE id=?", (again["download_id"],))
+    ledger.db.execute(
+        "UPDATE payment_downloads SET created_at=? WHERE id=?", (when if tie else "2099-01-01", a["download_id"])
+    )
     ledger.db.commit()
-    assert state.payment_file_detail(ledger, ident)["downloads"][0]["id"] == a["download_id"]
     with pytest.raises(PaymentFileError):
         pay.import_file(ledger, ident, "NORD", b["download_id"], D0)
+    if tie:
+        a = pay.download_file(ledger, ident, "NORD", D0, lambda: None, value_date=D0)
     assert pay.import_file(ledger, ident, "NORD", a["download_id"], D0)
-    assert Path(ledger.payment_file(ident)["path"]).read_bytes() == a["data"]
+    assert Path(ledger.payment_file(ident)["path"]).read_bytes() == again["data"]
 
 
 def test_all_skipped_is_never_confirmed_and_can_be_emptied(ledger, live):

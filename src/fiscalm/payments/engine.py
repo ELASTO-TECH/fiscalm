@@ -217,7 +217,9 @@ def file_rows(ledger: Ledger, file_id: int) -> list:
 def file_downloads(ledger: Ledger, file_id: int) -> list[dict]:
     return [
         dict(r) | {"items": json.loads(r["items"])}
-        for r in ledger.db.execute("SELECT * FROM payment_downloads WHERE file_id=? ORDER BY created_at DESC,id DESC", (file_id,))
+        for r in ledger.db.execute(
+            "SELECT * FROM payment_downloads WHERE file_id=? ORDER BY created_at DESC,id DESC", (file_id,)
+        )
     ]
 
 
@@ -468,6 +470,10 @@ def import_file(ledger: Ledger, file_id: int, company: str, download_id: int, to
                     "Versiunea nu mai este actuală. Verifică în bancă ce plăți ai importat înainte să continui."
                 )
             source = named_path(file)
+            # The file on disk is what the bank got last: a row that is not those bytes (two downloads recorded in one
+            # second before #51 can order wrong) is never imported; a new download settles it.
+            if source.exists() and hashlib.sha256(source.read_bytes()).hexdigest() != pick["version"]:
+                raise FileRefusal("Descarcă fișierul din nou înainte să-l imporți.")
             dest = finance_home() / company / "plati" / f"payment-file-{file_id}{named_path(file).suffix}"
             job = {
                 "src": str(source),
