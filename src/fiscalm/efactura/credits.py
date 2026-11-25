@@ -15,6 +15,16 @@ def credit_number(value: str) -> str:
     return "|".join((p.lstrip("0") or "0") if p.isdigit() else p for p in re.findall(r"[A-Z]+|[0-9]+", value))
 
 
+# Issues parse_ubl notes that never decide who is paid or how much: a due date it could not read, or an extra account
+# string that is not an IBAN (the invoice's valid IBANs are still checked on their own). Anything else blocks.
+INFORMATIONAL_ISSUES = ("bad due date ", "payee account ")
+
+
+def blocking_issues(row) -> list[str]:
+    """The stored invoice's issues that block paying it or linking a credit note to it."""
+    return [i for i in json.loads(row["issues"] or "[]") if not i.startswith(INFORMATIONAL_ISSUES)]
+
+
 def credit_links(L: Ledger, company: str) -> dict[str, list[dict]]:
     """Unique original in this firm, same supplier and currency; overcredits refuse the whole group."""
     stored = L.efactura_rows(company=company)
@@ -44,7 +54,7 @@ def credit_links(L: Ledger, company: str) -> dict[str, list[dict]]:
             and r["currency"] == credit["currency"]
             and r["issue_date"] <= credit["issue_date"]
             and (not credit["billing_date"] or r["issue_date"] == credit["billing_date"])
-            and not json.loads(r["issues"] or "[]")
+            and not blocking_issues(r)  # the same rule as paying it: an original payable in full is also credited
             and credit_number(r["number"]) == credit_number(reference)
         ]
         if len(matches) == 1:

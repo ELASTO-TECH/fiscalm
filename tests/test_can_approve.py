@@ -201,3 +201,10 @@ def test_only_blocking_invoice_issues_refuse_payment(ledger, home, monkeypatch, 
     _set(ledger, "issues=?", json.dumps([issue]))
     refusal = efactura.payment_refusal(ledger, ledger.efactura("3001"))
     assert (refusal.code if refusal else None) == ("invoice_issues" if blocks else None)
+
+
+def test_a_credit_note_still_refuses_an_original_whose_due_date_is_unreadable(ledger, home, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(due="2026-13-01")})
+    _credited(ledger, monkeypatch)
+    assert json.loads(ledger.efactura("3001")["issues"])
+    assert efactura.payment_refusal(ledger, ledger.efactura("3001")).code == "credited"

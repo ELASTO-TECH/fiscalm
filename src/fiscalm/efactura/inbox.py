@@ -34,7 +34,7 @@ from xml.etree import ElementTree as ET
 from fiscalm import ai, audit, companies, history_invoices, integrations
 from fiscalm.bank import catalogue as banks, statements
 from fiscalm.efactura import client as anaf, partners as partner_anaf
-from fiscalm.efactura.credits import credited, net_invoices
+from fiscalm.efactura.credits import blocking_issues, credited, net_invoices
 from fiscalm.identity import partner_id, tax_token
 from fiscalm.ledger import BON_PAID, USER_MARKED, Ledger, covered, finance_home, now, unlinked, user_note
 from fiscalm.mail import imap as imapread
@@ -1364,18 +1364,13 @@ def check_payment(
             f"supplier inactive at ANAF; checked_at={status['checked_at']}",
             checked_at=status["checked_at"],
         )
-    blocking = [i for i in json.loads(r["issues"] or "[]") if not i.startswith(INFORMATIONAL_ISSUES)]
+    blocking = blocking_issues(r)
     if blocking:
         raise ApproveError("invoice_issues", "invoice has issues: " + "; ".join(blocking))
     if account is None and r["status"] == "linked":
         queued = L.payment(r["item_id"])
         account = queued["payee_iban"] if queued else None
     return payee_iban(r, facts, account)
-
-
-# Issues parse_ubl notes that never decide who is paid or how much: a due date it could not read, or an extra account
-# string that is not an IBAN (the invoice's valid IBANs are still checked on their own). Anything else blocks.
-INFORMATIONAL_ISSUES = ("bad due date ", "payee account ")
 
 
 def payee_iban(r, facts: PaymentFacts, account: str | None = None) -> str:
