@@ -59,7 +59,7 @@ def test_a_sure_label_is_applied_only_where_no_open_document_fits_and_the_rest_w
         _tx(3, "debit", "31.00", description="BOLT"),
         _tx(4, "credit", "1500.00", description="Plata F-001 si F-002"),
         _tx(5, "credit", "900.00", description="Plata F-001"),
-        _tx(6, "debit", "44.00"),
+        _tx(6, "credit", "44.00"),
     )
     _bill(ledger, "77", "250.00")
     _sale(ledger, "101", "1000.00")
@@ -73,7 +73,7 @@ def test_a_sure_label_is_applied_only_where_no_open_document_fits_and_the_rest_w
             _answer(unsure, "label", label="personal", sure=False),
             _answer(payer, "documents", partner=client, invoices=["101", "102"]),
             _answer(short, "documents", partner=client, invoices=["101", "102"]),
-            _answer(bogus, "documents", partner="p-unknown", invoices=["101"]),
+            _answer(bogus, "documents", partner=_partner(ledger, "efactura 77")),  # a supplier never pays the firm
             _answer("not-a-line", "label", label="bank_fee"),
         ],
     )
@@ -117,7 +117,7 @@ def test_a_rule_still_explains_a_line_the_ai_only_proposed_for(ledger, live):
 def test_a_sure_label_waits_when_an_amount_fits_by_the_write_or_answers_disagree(ledger, live):
     """An invoice or a rule recorded while the provider answers, a card's signed original amount fitting an open invoice
     or a receipt, or two answers for one line: nothing applied. A note never keeps an account in full."""
-    late, abroad, twice, bon, ruled = _record(
+    late, abroad, twice, bon, ruled, booked = _record(
         ledger,
         "NORD",
         _tx(9, "debit", "44.00"),
@@ -125,10 +125,14 @@ def test_a_sure_label_waits_when_an_amount_fits_by_the_write_or_answers_disagree
         _tx(11, "debit", "61.00"),
         _tx(12, "debit", "59.64", orig_amount=Decimal("-12.00"), orig_currency="EUR", card_last4="0005"),
         _tx(13, "debit", "27.00", counterparty="ABONAMENT EXEMPLU"),
+        _tx(15, "debit", "33.00", orig_amount=Decimal("-7.00"), orig_currency="EUR", card_last4="0005"),
     )
     assert ledger.assign_card("NORD", abroad, "NORD")
     _bill(ledger, "89", "10.00", currency="EUR")
     day = (TODAY - timedelta(days=3)).isoformat()
+    ledger.add_document(
+        "c" * 64, "NORD", day[:7], "receipt", "bon2.jpg", vendor="ALT", doc_date=day, amount="33.00", currency="RON"
+    )
     ledger.add_document(
         "b" * 64, "NORD", day[:7], "receipt", "bon.jpg", vendor="ALT NUME", doc_date=day, amount="12.00", currency="EUR"
     )
@@ -148,9 +152,10 @@ def test_a_sure_label_waits_when_an_amount_fits_by_the_write_or_answers_disagree
             _answer(twice, "label", label="personal"),
             _answer(bon, "label", label="personal"),
             _answer(ruled, "label", label="personal"),
+            _answer(booked, "label", label="personal"),
         ]
 
-    assert _run(ledger, answers)[0] == {"sent": 1, "asked": 5, "applied": 0}
+    assert _run(ledger, answers)[0] == {"sent": 1, "asked": 6, "applied": 0}
     kept = ledger.ai_proposals("NORD")
     assert kept[late]["note"] == "Plata catre ••••0000"
     assert kept[twice]["kind"] == "none" and ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 0

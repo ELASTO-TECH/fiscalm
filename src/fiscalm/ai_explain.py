@@ -134,7 +134,8 @@ def _checked(full: dict, tx: dict, a: dict) -> dict:
         return {"kind": "label", "reason": a["label"], "note": note or None, "sure": a["sure"]} if ok else none
     if a["kind"] == "advance":
         return {"kind": "advance", "note": note, "sure": False} if 0 < len(note) <= links.WHO_MAX else none
-    if a["kind"] != "documents" or a["partner"] not in {p["id"] for p in full["partners"]}:
+    payers = {p["id"] for p in transaction_choices.records(full, tx, "partners", "")}  # as the form offers them
+    if a["kind"] != "documents" or a["partner"] not in payers:
         return none
     picks = transaction_choices.exactly(full, tx, a["invoices"])
     whole = picks and all(r["partner"] == a["partner"] for r in picks)

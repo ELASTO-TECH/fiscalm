@@ -553,16 +553,19 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
 def apply_ai_label(L: Ledger, company: str, key: str, label: str, note: str) -> bool:
     """A Fără document label the AI integration is sure of (ai_explain), written as an explanation no person made
     (rule 'ai'): refused as a person's label would be, while anybody decided otherwise since (_untouched), and while
-    an open item is exactly the line's amount (fits_open_amount), a receipt its amount whatever its sign, or a saved
+    an open item is exactly the line's amount (fits_open_amount), a receipt its amount in either currency whatever its
+    sign, or a saved
     rule now speaks for the line (proposals), all under the write lock."""
     labelled = _labelled(L, company, key, label, note)
 
     def unfit() -> dict:
         t = _transaction(L, company, key)[0]
-        size = replace(t, amount=abs(t.amount), orig_amount=None if t.orig_amount is None else abs(t.orig_amount))
+        booked = replace(t, amount=abs(t.amount), orig_amount=None, orig_currency=None)
+        sizes = [booked] + ([replace(t, amount=abs(t.amount), orig_amount=abs(t.orig_amount))] if t.orig_amount else [])
+        receipts = recon._receipts(L, company) if t.direction == "debit" else []
         if (
             fits_open_amount(L, company, t)
-            or (t.direction == "debit" and recon.match_receipts([size], recon._receipts(L, company)))
+            or any(recon.match_receipts([s], receipts) for s in sizes)
             or proposals(company, [t], L.memories(company), L)[0]
         ):
             raise LinkRefused("changed")
