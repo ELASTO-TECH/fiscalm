@@ -420,7 +420,7 @@ def parse_text(text: str, company: str) -> Statement:
     lines = text.splitlines()
     for i, ln in enumerate(lines):
         s = ln.strip()
-        header = _section_header(ln)
+        header = None if in_table else _section_header(ln)
         if carried and (header or _opens_account(ln)):
             carried = False  # another statement or account: the closing rows that follow are not this account's
         if not in_table and header:
@@ -518,10 +518,10 @@ def _closing_row(line: str) -> re.Match[str] | None:
 
 def _carried_balance(acct: Account, row: re.Match[str], opening: dict, final: dict) -> None:
     """A closing row read after a page break. Totals the bank printed already are never replaced: two that disagree
-    leave the account unproven."""
+    leave the account unproven for good (its final balance is marked unknown, and nothing later sets it)."""
     if row.group("title").strip() == "RULAJ TOTAL CONT" and acct.total_debit is not None:
         if (acct.total_debit, acct.total_credit) != (parse_amount(row.group("a1")), parse_amount(row.group("a2"))):
-            acct.total_debit = acct.total_credit = None
+            final[id(acct)] = None
         return
     _pdf_balance(acct, row, row.group("title").strip(), opening, final)
 
@@ -572,7 +572,7 @@ def _pdf_balance(
 ) -> None:
     if title.startswith("SOLD ANTERIOR") and acct.txs == [] and id(acct) not in opening:
         opening[id(acct)] = parse_amount(row.group("a1"))
-    if title.startswith("SOLD FINAL CONT"):
+    if title.startswith("SOLD FINAL CONT") and final.get(id(acct), 0) is not None:  # None: contradicted totals
         final[id(acct)] = parse_amount(row.group("a1"))
     if title.startswith("RULAJ TOTAL CONT") and row.group("a2"):
         acct.total_debit = parse_amount(row.group("a1"))

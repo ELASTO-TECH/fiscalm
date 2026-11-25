@@ -384,6 +384,11 @@ def test_a_bt_pdfs_month_is_its_sections_and_a_line_needs_its_day():
             False,
         ),  # next statement's
         ("            RULAJ TOTAL CONT     60.00     200.00\n            SOLD FINAL CONT     1,150.00", False),
+        (  # a third set agreeing again does not undo the contradiction
+            "            RULAJ TOTAL CONT     60.00     200.00\n            RULAJ TOTAL CONT     50.00     200.00\n"
+            "            SOLD FINAL CONT     1,150.00",
+            False,
+        ),
         ("            SOLD FINAL CONT estimat            1,150.00", False),
         ("", False),  # really missing
     ],
