@@ -6,7 +6,7 @@ import { Button, Input, Select, Label, Form, Actions, Panel, detailListStyle, no
 // (`tx-link`); the app lists the partner's open invoices, shows the difference and posts the choice.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { post } from "@/lib/api";
-import { cents, fromCents, curOf, dm, lei, phrase } from "@/lib/format";
+import { cents, fromCents, curOf, dm, docName, lei, phrase } from "@/lib/format";
 import { type Label as TransactionLabel, type LinkKind, type MemoryKey, type Partner, type Reason, type Transaction,
   type TxLink, type CoveredRow, type TransactionChoices, type TransactionInvoiceChoice, type TransactionChoiceRows } from "@/lib/types";
 import { useApp, useCan, useCompany } from "./context";
@@ -352,16 +352,27 @@ function Explain({ t, link, onDone, onCancel }: { t: Transaction; link?: TxLink;
   );
 }
 
-/** Bon / chitanță: one photo, uploaded as this debit's bon; it takes the debit's amount, day and card. */
+/** Bon / chitanță: one photo, uploaded as this debit's bon, or a file already uploaded with no data of its own yet
+ * (`tx-receipt`); either takes the debit's amount, day and card. */
 function Receipt({ t }: { t: Transaction }) {
+  const s = useCompany();
   const up = useExpenseUpload(undefined, t.id);
-  if (!up) return null;
-  return <Actions>
-    {up.input}
-    <Button type="button" className="btn" disabled={up.busy} aria-busy={up.busy} onClick={up.pick}>
-      <I n="camera" />{up.busy ? "Se încarcă…" : "Încarcă bonul"}
-    </Button>
-  </Actions>;
+  const unread = useDetail().transaction?.choices.receipts?.data ?? [];
+  return <>
+    {up ? <Actions>
+      {up.input}
+      <Button type="button" className="btn" disabled={up.busy} aria-busy={up.busy} onClick={up.pick}>
+        <I n="camera" />{up.busy ? "Se încarcă…" : "Încarcă bonul"}
+      </Button>
+    </Actions> : null}
+    {unread.length ? <section aria-label="Bonuri încărcate fără date" className="grid gap-2">
+      <h3 className={sectionHeadingStyle}>Sau alege un bon deja încărcat</h3>
+      {unread.map((d) => <div key={d.id} className="flex flex-wrap items-center justify-between gap-2">
+        <span>{docName(d, s.today)}</span>
+        <Act action="tx-receipt" body={{ tx: t.id, id: d.id }} label="Este bonul acestei plăți" cls="btn g" />
+      </div>)}
+    </section> : null}
+  </>;
 }
 
 /** Aștept factura: the debit stays to explain, last in De explicat, with an optional note; it can stop waiting. */

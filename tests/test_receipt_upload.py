@@ -16,6 +16,7 @@ from fiscalm.api import (
     lists,
     receipts as intake,
     state as api,
+    transaction_choices,
     upload_assignment,
     uploads as upload_links,
     v1 as api_v1,
@@ -909,6 +910,27 @@ def test_a_bon_for_a_debit_it_cannot_explain_is_refused(ledger, server, case):
     assert not ledger.document(hashlib.sha256(PNG).hexdigest())
     assert ledger.linked_receipts("NORD") == {hashlib.sha256(JPEG).hexdigest()}  # the first bon is not moved
     assert explanation(ledger, first)["document"] == hashlib.sha256(JPEG).hexdigest()
+
+
+def test_a_bon_already_uploaded_is_named_for_its_card_payment(ledger):
+    key = card_debit(ledger)
+    (stored,) = intake.accept_member(ledger, intake.member("NORD", "u_member"), [("jpg", JPEG)])
+
+    def offered(co="NORD"):
+        full = api.state(ledger, co)
+        return [
+            d["id"]
+            for d in transaction_choices.project(full, {"id": key, "collection": "receipts"})["pages"]["receipts"][
+                "data"
+            ]
+        ]
+
+    assert offered() == [stored["sha"]]
+    body = {"tx": key, "id": stored["sha"]}
+    assert not actions.act("tx-receipt", "STUDIO9", body)["ok"]  # another firm's debit and file
+    assert actions.act("tx-receipt", "NORD", body)["ok"]
+    assert explanation(ledger, key)["document"] == stored["sha"] and offered() == []
+    assert not actions.act("tx-receipt", "NORD", body)["ok"]  # one debit, one bon
 
 
 def test_two_connections_naming_one_bon_for_two_debits_have_one_winner(ledger):

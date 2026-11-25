@@ -55,6 +55,7 @@
   "credit-pick": "member",
   "card-owner": "member",
   "tx-link": "member",
+  "tx-receipt": "member",
   "tx-await": "member",
   "tx-unlink": "member",
   "memory-forget": "member",

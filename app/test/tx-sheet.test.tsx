@@ -372,6 +372,20 @@ describe("a transaction's sheet", () => {
     expect(fake.posts().at(-1)!.body).toEqual({ co: "NORD", tx: NIMBUS, ...body, was: "" });
   });
 
+  it("names a receipt already uploaded, with no data yet, as a card payment's bon", async () => {
+    const full = fixture(), d = full.documents.find((x) => x.vendor === "Benzinaria Nord")!;
+    Object.assign(d, { vendor: "", date: null, amount: null, held: true, sent: false, invoice: null });
+    at(`?co=NORD&tab=tranzactii&tx=${NIMBUS}`);
+    const fake = renderApp({ state: () => json(summaryResult(full)), detail: (url) => json(detailResult(full, query(url))),
+      transactionChoices: (url) => json(choicesResult(full, query(url))) });
+    const s = await sheet();
+    const picker = s.getByRole("region", { name: "Bonuri încărcate fără date" });
+    expect(within(picker).getAllByRole("button", { name: "Este bonul acestei plăți" })).toHaveLength(1);
+    await userEvent.click(within(picker).getByRole("button", { name: "Este bonul acestei plăți" }));
+    expect(fake.posts().at(-1)!.body).toEqual({ co: "NORD", tx: NIMBUS, id: d.id });
+    expect(fake.posts().at(-1)!.url).toContain("tx-receipt");
+  });
+
   it("starts a card payment on its invoices when the engine proposes some", async () => {
     const full = fixture(), t = full.transactions.rows.find((r) => r.id === NIMBUS)!;
     t.proposal = { kind: "invoices", invoices: [full.invoices[0].id] };

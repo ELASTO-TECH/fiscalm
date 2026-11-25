@@ -569,6 +569,18 @@ def memory_forget(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     return _res(ok, "Asocierea a fost ștearsă." if ok else "Asocierea nu mai există.")
 
 
+def tx_receipt(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    """Bon / chitanță with a file already uploaded: the user names it as this debit's bon (links.receipt), the same answer
+    as uploading it from the debit's sheet. Only an upload of this firm with no data of its own is taken."""
+    try:
+        links.receipt(L, co, ctx.get("tx"), ctx.get("id"), ctx.created_by)
+        out = _res(True, "Bonul a fost asociat cu plata.")
+    except links.LinkRefused as e:
+        out = _res(False, links.REFUSED.get(e.code, BAD))
+    ctx.log(f"web: tx-receipt {ctx.get('tx')[:20]}: {'ok' if out['ok'] else 'refused'}")
+    return out
+
+
 def tx_await(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     """Aștept factura: on=1, a debit stays to explain, with the user's optional note (links.await_invoice); on=0 stops."""
     on = ctx.get("on")
@@ -1231,6 +1243,7 @@ ACTIONS = {
     'credit-pick': Action(credit_pick, 'id target', public_description='id: a received credit note with credit_question; target: one of its credit_question[].id, or "-" when it cancels none of them. The first answer stands; local operation.'),
     'card-owner': Action(card_owner, 'tx owner', public=False, actor=True, description='tx (an observed card transaction), owner (a companies[].key or personal); first answer wins, never confirms payment'),
     'tx-link': Action(tx_link, 'tx kind invoices payment reason note who holder was remember', public=False, actor=True, description='kind (documents, the default; label: Fără document, reason one of bank_fee, interest, personal, other and an optional note for the accountant, required for other, at most 200 characters; transfer: Transfer între conturi; advance: Avans, who the administrator or associate, 1 to 100 characters), tx (a transactions.rows[].id; for an explanation already made, its link.tx), invoices (comma-separated ids: issued[].id for a credit, invoices[].id for a debit) or payment (one payments.*[].item_id, debits only), reason ("" or one of rest, courier_fee, bank_fee, fx, other), note (other only, 1 to 200 characters), was (the row\'s explanation.link.id, "" for none), remember ("", or one of the row\'s remember keys: iban, card for a label only, name; never for a transfer)'),
+    'tx-receipt': Action(tx_receipt, 'tx id', public=False, actor=True, description='tx (a card debit in transactions.rows[].id, not explained), id (documents[].id of an upload of this firm whose amount is still null): the upload is this debit\'s bon and takes its amount, day and card. Local bookkeeping; refused when the debit or the upload is already explained or the upload has data of its own.'),
     'tx-await': Action(tx_await, 'tx on note', public=False, actor=True, description='tx (a debit in transactions.rows[].id, not explained or settled), on ("1" waits, "0" stops waiting), note (on=1 only, optional, what is expected, at most 200 characters). Aștept factura: the debit stays to explain, listed last, and reserves nothing. Local operation.'),
     'tx-unlink': Action(tx_unlink, 'tx was', public=False, actor=True, description="tx, was (the explanation's id)"),
     'memory-forget': Action(memory_forget, 'id', public=False, description='id (a transactions.remembered[].id)'),
