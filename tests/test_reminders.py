@@ -168,6 +168,7 @@ def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, c
         ("explained_and_unexplained_copy", False),
         ("two_twins_original_and_its_duplicate", False),
         ("duplicate", False),
+        ("twin_redated_to_an_unexplained_copy", False),  # a later read moves it next to an unexplained line
     ],
 )
 def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
@@ -204,6 +205,18 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
         _reserve(L, settled, "issued other")
         if case == "two_twins_original_and_its_duplicate":
             _reserve(L, blank, "duplicate:" + statements.tx_key(settled))
+    if case == "twin_redated_to_an_unexplained_copy":  # the twin first sat beside `blank`, explained; then on 20.11
+        _reserve(L, blank, "issued other")
+        late = _client_credit(L, iid, day=date(2026, 11, 20), counterparty="", iban="", desc="Incasare 4")
+        L.record_statement(_st(late))
+        redated = dict(
+            json.loads(
+                L.db.execute("SELECT tx FROM statement_txs WHERE tx_key=?", (statements.tx_key(named),)).fetchone()[0]
+            ),
+            date="2026-11-19",
+        )
+        L.db.execute("INSERT INTO statement_tx_readings VALUES(?,?)", (statements.tx_key(named), json.dumps(redated)))
+        L.db.commit()
     rows = api._issued(L, "NORD", TODAY, True)
     assert bool(r.tasks(L, "NORD", TODAY, rows)) is reminded
 

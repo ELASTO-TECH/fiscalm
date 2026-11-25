@@ -205,8 +205,8 @@ def _explained(rows: list) -> set[str]:
 def _copy(twin, line) -> bool:
     """`line` could be the other source's copy of `twin`: brought by another source (two lines of one source are two
     payments), the same known amount and currency, the same account (or one unknown), days apart at most
-    BOUNDARY_DAYS (Ledger.account_lines pairs twins the same way)."""
-    apart = abs((date.fromisoformat(twin["day"]) - date.fromisoformat(line["day"])).days)
+    BOUNDARY_DAYS by any of their readings' dates (Ledger.account_lines pairs twins the same way)."""
+    apart = min(abs((a - b).days) for a in _days(twin) for b in _days(line))
     same_account = not twin["iban"] or not line["iban"] or twin["iban"] == line["iban"]
     same_money = twin["amount"] is not None and twin["amount"] == line["amount"] and _currency(twin) == _currency(line)
     return (
@@ -215,6 +215,12 @@ def _copy(twin, line) -> bool:
         and same_account
         and apart <= BOUNDARY_DAYS
     )
+
+
+def _days(line) -> set[date]:
+    """Every booking day a line was read with: a bank may correct the date on a later read."""
+    others = (json.loads(x)["date"] for x in json.loads(line["readings"] or "[]"))
+    return {date.fromisoformat(line["day"]), *map(date.fromisoformat, others)}
 
 
 def _currency(line) -> str | None:
