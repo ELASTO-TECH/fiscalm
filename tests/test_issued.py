@@ -284,6 +284,7 @@ def test_ambiguous_credit_settles_nothing(ledger, home, sec, monkeypatch):
         ("ION POPESCU", "", "ION POPESCU", "", "name"),  # a private buyer by name
         ("BETA SOFTWARE SRL", "RO66666666", "BETA SOFTW", "servicii", "amount"),  # abbreviated, one of its amount
         ("BETA SOFTWARE SRL", "RO66666666", "MAMA HOLDING SRL", "Plata factura NRD 0010", "ref"),  # someone else pays
+        ("BETA SOFTWARE SRL", "RO66666666", "GAMMA SRL", "Plata factura NRD 0010", "ref"),  # another client pays it
     ],
 )
 def test_a_credit_collects_the_one_invoice_it_fits(
@@ -327,6 +328,9 @@ def test_an_account_shown_on_the_statement_pays_no_one_else_by_amount(ledger, ho
     gamma = _credit("100.00", date(2026, 10, 20), counterparty="X", iban=OTHER_IBAN, desc="CUI 66666666")
     other = _credit("200.00", date(2026, 10, 21), counterparty="XYZ", iban=OTHER_IBAN, desc="servicii")
     assert issued.match_statement(ledger, _st(*((gamma, other) if gamma_first else (other, gamma)))) == ["7002"]
+    partial = _credit("40.00", date(2026, 10, 22), counterparty="BETA LABS SRL", iban=CLIENT_IBAN, desc="avans")
+    abbreviated = _credit("200.00", date(2026, 10, 22), counterparty="BL", iban=CLIENT_IBAN, desc="x")
+    assert issued.match_statement(ledger, _st(partial, abbreviated)) == []  # its partial payment showed Beta
 
 
 @pytest.mark.parametrize("desc,collected", [("comanda 0042", []), ("NRD 0042 si NRD 0043", []), ("NRD 0042", ["7001"])])
@@ -335,6 +339,7 @@ def test_only_one_whole_identifier_picks_among_amount_twins(ledger, home, sec, m
     anonymous = _credit("1190.00", date(2026, 10, 21), counterparty="Y", iban="", desc="plata")
     named = _credit("1190.00", date(2026, 10, 20), counterparty="NEW PAYER", iban=OTHER_IBAN, desc=desc)
     assert issued.match_statement(ledger, _st(anonymous, named)) == collected
+    assert issued.match_statement(ledger, _st(anonymous, named)) == []  # the same statement again: the same answer
 
 
 def test_a_private_name_from_a_client_account_collects_nothing(ledger, home, sec, monkeypatch):
@@ -377,12 +382,13 @@ def test_wrong_client_amount_debit_or_own_transfer_never_collects(ledger, home, 
     other = _credit("1190.00", date(2026, 10, 20), counterparty="DELTA SOFTWARE SRL", iban=OTHER_IBAN, desc="servicii")
     card_refund = _credit("1190.00", date(2026, 10, 20), counterparty="BETA SOFTWARE SRL", iban="", desc="RETUR")
     card_refund.card_last4 = "4242"
+    pos = _credit("1190.00", date(2026, 10, 20), counterparty="", iban="", desc="POS refund")  # MT940 drops the card
     amount = _credit("1189.99", date(2026, 10, 20))
     early = _credit("1190.00", date(2026, 9, 1))
     debit = _credit("1190.00", date(2026, 10, 20))
     debit.direction = "debit"
     own = _credit("1190.00", date(2026, 10, 20), iban="RO71BTRLEURCRT0000000001")
-    for t in (other, card_refund, amount, early, debit, own):
+    for t in (other, card_refund, pos, amount, early, debit, own):
         assert issued.match_statement(ledger, _st(t)) == []
     assert ledger.issued("7001")["status"] == "open"
 
