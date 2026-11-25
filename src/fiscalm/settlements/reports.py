@@ -189,13 +189,13 @@ def _typed(z: zipfile.ZipFile) -> list[str]:
     types = "{http://schemas.openxmlformats.org/package/2006/content-types}"
     root = _xml(z.read("[Content_Types].xml"))
     if root.tag != types + "Types" or any(
-        "worksheet" in d.get("ContentType", "") for d in root.iter(types + "Default")
+        "worksheet" in d.get("ContentType", "").lower() for d in root.iter(types + "Default")
     ):
         raise ReportError("Unreadable worksheet")
     parts = [
         o.get("PartName", "").lstrip("/")
         for o in root.iter(types + "Override")
-        if o.get("ContentType", "").endswith("worksheet+xml")
+        if o.get("ContentType", "").lower().endswith("worksheet+xml")
     ]
     if any(not re.fullmatch(r"xl/[A-Za-z0-9_/]+\.xml", p) or p not in z.namelist() for p in parts):
         raise ReportError("Unreadable worksheet")

@@ -83,7 +83,8 @@ def test_xlsx_sparse_and_formula():
 
 
 def excel_package(*sheets) -> bytes:
-    """A workbook laid out as Excel saves one: every manifest, styles, theme and document properties."""
+    """A synthetic workbook in the layout Excel saves: package, workbook and content-type manifests, styles, a theme
+    and document properties."""
     pkg, rel = "http://schemas.openxmlformats.org/package/2006", "http://schemas.openxmlformats.org/officeDocument/2006"
     ct = "application/vnd.openxmlformats-officedocument"
     parts = {
