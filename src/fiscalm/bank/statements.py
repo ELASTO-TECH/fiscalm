@@ -442,6 +442,11 @@ def parse_text(text: str, company: str) -> Statement:
         if s.startswith("BANCA TRANSILVANIA S.A."):
             in_table = False  # page footer; current tx may continue on next page
             continue
+        if not in_table and acct is not None and id(acct) not in final and _closing_row(ln):
+            # the account's totals or final balance alone on the next page, before any column header
+            close()
+            _pdf_balance(acct, _ROW.match(ln), _ROW.match(ln).group("title").strip(), opening, final)
+            continue
         if not in_table or not s:
             continue
         row = _ROW.match(ln)
@@ -485,6 +490,12 @@ def parse_text(text: str, company: str) -> Statement:
     return Statement(
         company=company, period_start=period_start, period_end=period_end, accounts=accounts, one_period=one_period
     )
+
+
+def _closing_row(line: str) -> bool:
+    """A row of an account's totals or final balance, read by its title: it may follow a page break."""
+    row = _ROW.match(line)
+    return bool(row) and row.group("title").strip().startswith(("RULAJ TOTAL CONT", "SOLD FINAL CONT"))
 
 
 def _pdf_columns(line: str) -> tuple[int, int] | None:

@@ -31,12 +31,21 @@ def text_pdf(lines: list[str], *, font: str = "Helvetica") -> bytes:
     return bytes(out)
 
 
-def bt_statement(path, cui: str, period: tuple[str, str], accounts, password: str | None = "synthetic", pages=False):
+def bt_statement(
+    path,
+    cui: str,
+    period: tuple[str, str],
+    accounts,
+    password: str | None = "synthetic",
+    pages=False,
+    final="same page",
+):
     """A synthetic encrypted BT statement PDF laid out as pdftotext reads BT's: the holder's CUI, the period
     (dd/mm/yyyy, dd/mm/yyyy) and one section per account, (currency, iban, opening, lines[, its own period printed
     above it: (first, last), or (day,) with its number after it, as older daily statements print]), each line
     (dd/mm/yyyy, reference, Decimal amount: below zero a debit). `password=None`: a plain PDF, as BT24 downloads.
-    `pages`: each section on a page of its own, as a statement of several months prints them."""
+    `pages`: each section on a page of its own, as a statement of several months prints them. `final`: "next page"
+    prints the final balance after the page footer and the bank's info block, "missing" leaves it out."""
 
     def at(text: str, amount, end: int) -> str:  # an amount right-aligned under its column (Debit ends at 68)
         shown = f"{abs(amount):,.2f}"
@@ -61,7 +70,11 @@ def bt_statement(path, cui: str, period: tuple[str, str], accounts, password: st
                 f"Plata;Synthetic Partner SRL;REF: {ref}",
             ]
         lines += [at(at(" " * 12 + "RULAJ TOTAL CONT", debit, 68), credit, 84)]
-        lines += [at(" " * 12 + "SOLD FINAL CONT", opening + credit - debit, 68)]
+        if final != "same page":
+            lines += ["BANCA TRANSILVANIA S.A. - synthetic footer".ljust(80) + "4/5", " " * 30 + "BANCA TRANSILVANIA"]
+            lines += [" " * 30 + "Info clienti: 0800 000 000", " " * 30 + "Tiparit: 2026-11-01 20:26:35", ""]
+        if final != "missing":
+            lines += [at(" " * 12 + "SOLD FINAL CONT", opening + credit - debit, 68)]
     with pikepdf.Pdf.new() as pdf:
         font = pikepdf.Dictionary(Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1, BaseFont=pikepdf.Name.Courier)
         font = pdf.make_indirect(font)
