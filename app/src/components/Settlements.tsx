@@ -9,7 +9,7 @@ import { Act, L, Task } from "./ui";
 
 export function SettlementTasks({ s, co }: { s: State; co?: string }) {
   return (s.settlements ?? []).filter((r) => r.status === "pending").map((r) => (
-    <Task key={`${s.co}set${r.id}`} co={co} icon="bank" title={r.error === "statement_confirmation_required" ? "Decontare de confirmat" : "Decontare de verificat"}
+    <Task key={`${s.co}set${r.id}`} co={co} icon="bank" title={r.can_confirm ? "Decontare de confirmat" : "Decontare de verificat"}
       body={[`${nOf(r.invoice_count, "O factură", "facturi")}, net ${lei(r.net)} ${curOf(r.currency)}, de la ${r.payer.name}.`, details(r, s.today)].filter(Boolean).join(" ")}>
       {r.can_confirm && r.credit ? <Confirm r={r} /> : null}
       <L to={{ co: s.co, set: r.id }} className="btn g">Vezi decontarea</L>

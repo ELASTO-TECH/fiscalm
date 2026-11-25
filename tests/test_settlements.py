@@ -283,10 +283,27 @@ def test_payer_iban_never_falls_back_to_name(ledger, identity, right):
         ({"payer_name": "Atelier Sa SRL"}, {"counterparty": "Atelier"}, "Atelier Sa"),
         ({"payer_cui": "12345678"}, {"counterparty": "Other SRL", "description": "CUI 12345678"}, "Other 12345678"),
         ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE123456789"}, "Other RO123456789"),
-        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH VAT DE 123456789"}, "Other SA 123456789"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH VAT DE\xa0123456789"}, "Other SA 123456789"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE-123456789"}, "Other, RO 123456789"),
+        ({"payer_cui": "12345678"}, {"counterparty": "Other Kft 12345678-2-41"}, "Other (12345678)"),
+        ({"payer_cui": "123456"}, {"counterparty": "Other SRL J40/123456/2026"}, "Other SRL 123456"),
+        ({"payer_cui": "12345678"}, {"counterparty": "Other Firm 12345678ă"}, "Other Firm 12345678"),
         ({"payer_cui": "12345678"}, {"counterparty": "Other Firm ID 12345678X"}, "Other Firm CUI:12345678"),
     ],
-    ids=["legal_form", "alphabet", "inner_word", "form_word", "memo", "foreign_vat", "spaced_vat", "longer_id"],
+    ids=[
+        "legal_form",
+        "alphabet",
+        "inner_word",
+        "form_word",
+        "memo",
+        "foreign_vat",
+        "spaced_vat",
+        "dashed_vat",
+        "compound_id",
+        "register_no",
+        "letter_after",
+        "longer_id",
+    ],
 )
 def test_first_report_needs_its_own_payer(ledger, identity, wrong, right):
     """With no confirmation gate, only the payer itself can bring a batch's credit."""
@@ -351,10 +368,14 @@ def test_refused_batch_credit_stays_out_of_single_invoice_matching(ledger):
 
 
 def test_retired_gate_reason_is_replaced(ledger):
-    """A report waiting under the retired payer gate gets today's reason when its credit becomes ambiguous."""
-    setup(ledger)
+    """A report waiting under the retired payer gate stays confirmable until a recheck, which gives it today's reason
+    when its credit becomes ambiguous."""
+    rid = setup(ledger)
+    credit = '{"id": "aaaaaaaaaaaaaaaaaaaa", "date": "2026-10-12", "amount": "196.00", "currency": "RON"}'
     with ledger.tx() as db:
         db.execute("UPDATE settlement_reports SET error='confirmation_required'")
+        db.execute("INSERT INTO settlement_credits VALUES(?,?,?)", (rid, credit, 2))
+    assert settlements.state(ledger, "NORD")[0]["can_confirm"]
     store_bank(ledger, statement())
     store_bank(ledger, statement(ref="second"))
     settlements.match_statement(ledger, statement())

@@ -113,26 +113,33 @@ def _payer(report: dict, credit: statements.Tx, company: str, *, claim: bool = F
     if report["payer_iban"]:
         return credit.counterparty_iban == report["payer_iban"]
     if claim:
-        line = f"{credit.counterparty} {credit.description}"
+        named = issued.same_firm(report["payer_name"], credit.counterparty) or same_payer(
+            report["payer_name"], credit.counterparty
+        )
         return (
-            issued._cui_on(report["payer_cui"], line)
-            if report["payer_cui"]
-            else (
-                issued.same_firm(report["payer_name"], credit.counterparty)
-                or same_payer(report["payer_name"], credit.counterparty)
-            )
+            named
+            or bool(report["payer_cui"])
+            and issued._cui_on(report["payer_cui"], f"{credit.counterparty} {credit.description}")
         )
     if report["payer_cui"]:
         return _cui_named(report["payer_cui"], credit.counterparty or "")
     return same_payer(report["payer_name"], credit.counterparty)
 
 
+_TAX_LABEL = re.compile(r"(?:C\.?U\.?I\.?|C\.?I\.?F\.?)[:.]?", re.I)
+
+
 def _cui_named(cui: str, party: str) -> bool:
-    """The paying party names this Romanian CUI as a whole id (`RO` allowed). A memo can name anyone's tax id, and
-    after another country's code (`DE123456789`, `VAT DE 123456789`) the digits are another firm's."""
-    for m in re.finditer(rf"(?<![A-Za-z0-9])(?:RO)?{cui}(?![A-Za-z0-9])", party, re.I):
-        code = re.search(r"(?:^|[^A-Za-z0-9])([A-Za-z]{2})[ \t]*$", party[: m.start()])
-        if not code or code[1].upper() in {"RO"} | companies.LEGAL_FORMS:
+    """The paying party names this Romanian CUI as a whole word: `12345678`, `RO12345678`, `CUI:12345678`. A memo can
+    name anyone's tax id; any other word holding the digits (`DE-123456789`, `12345678-2-41`, `J40/123456/2026`) is
+    another id, and after another country's code (`VAT DE 123456789`) the digits are another firm's."""
+    words = re.split(r"[\s,;()]+", party)
+    for n, word in enumerate(words):
+        bare = word[_TAX_LABEL.match(word).end() :] if _TAX_LABEL.match(word) else word
+        before = words[n - 1].upper() if n else ""
+        if bare.upper().removeprefix("RO") == cui and not (
+            re.fullmatch(r"[A-Z]{2}", before) and before not in {"RO"} | companies.LEGAL_FORMS
+        ):
             return True
     return False
 
@@ -141,7 +148,7 @@ def _readings(name: str) -> list[tuple[list[str], str]]:
     """A name's words (`identity.firm_name`, any alphabet) as written, and, when its last word is a legal form,
     without it: (words, the form left out)."""
     words = firm_name(name).split("-")
-    last = words[-1] if len(words) > 1 and words[-1].upper() in companies.LEGAL_FORMS else ""
+    last = words[-1] if len(words) > 1 and words[-1].upper() in companies.LEGAL_FORMS - {"SC"} else ""
     return [(words, ""), (words[:-1], last)] if last else [(words, "")]
 
 
@@ -437,7 +444,7 @@ def snapshot(L: Ledger, company: str) -> tuple[list[dict], list[dict]]:
                 "invoice_count": r["invoice_count"] if r["credit"] else len(lines),
                 "human_confirmed": bool(r["human_confirmed"]),
                 "can_confirm": r["status"] == "pending"
-                and error == "statement_confirmation_required"
+                and error in ("confirmation_required", "statement_confirmation_required")  # the first: retired gate
                 and bool(r["credit"]),
                 "failed_line": int(failed[1]) if failed else None,
                 "sheet": {"co": company, "set": r["id"]},
