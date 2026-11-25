@@ -595,7 +595,8 @@ password is read for it). `fiscalm ingest` refuses a CSV on its own: it is uploa
 month may start after the 1st, as older statements print it, only when no day with movements is left out: the days
 before are no banking day (weekends and Romanian legal holidays, Orthodox Easter included, `bank.banking_days`), or
 the account opened that month (`fiscalm company opened`) at a zero balance. Its opening balance must be proven by the
-statement and equal the previous month's stored closing balance for that account, when one is on record. CAMT.053 is accepted by an administrator in Tranzacții, or from the operator CLI:
+statement and equal the previous month's stored closing balance for that account, when one is on record, whichever
+of the two months is imported first. CAMT.053 is accepted by an administrator in Tranzacții, or from the operator CLI:
 `fiscalm ingest FILE` (store and reconcile) or `fiscalm statement FILE` (inspect). Mail and public
 receipt links do not accept CAMT. XML is unsigned text: a matching IBAN and consistent balances
 do not authenticate its author. Only full calendar months are accepted; a different document

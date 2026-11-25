@@ -369,6 +369,7 @@ def usd(opening: str, lo: str = "10/10/2026"):
         ("2 May 2022 is a banking day", [("03/05/2022", "31/05/2022")], "", "full calendar month"),
         ("chains with April", [("01/04/2022", "30/04/2022", "90.00"), ("02/05/2022", "31/05/2022")], "", None),
         ("April closes elsewhere", [("01/04/2022", "30/04/2022"), ("02/05/2022", "31/05/2022")], "", "chain"),
+        ("May first, then April", [("02/05/2022", "31/05/2022"), ("01/04/2022", "30/04/2022")], "", "chain"),
         ("USD opened in October at zero", [("01/10/2026", "31/10/2026", "100.00", usd("0.00"))], "2026-10", None),
         ("USD opened in October", [("01/10/2026", "31/10/2026", "100.00", usd("7.00"))], "2026-10", "full calendar"),
         ("USD not marked opened", [("01/10/2026", "31/10/2026", "100.00", usd("0.00"))], "", "full calendar month"),

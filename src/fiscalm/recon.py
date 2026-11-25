@@ -218,7 +218,8 @@ def ingest_statements(
                 groups.setdefault((o.company, o.month), []).append(o)
             if one_set and (failed or len(groups) > 1):
                 return failed[:1] or [_refused(opened, "Statement set: files of different months or companies")]
-            return failed + [_store_set(ledger, g, home, check, source) for g in groups.values()]
+            # month by month: a month that starts after the 1st is checked against the one before it
+            return failed + [_store_set(ledger, groups[k], home, check, source) for k in sorted(groups)]
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
