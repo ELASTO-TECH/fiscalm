@@ -1080,7 +1080,7 @@ def schemas() -> dict:
         {
             "state": {
                 **ref("StateSummary"),
-                "description": "Company shell with only the requested document and its purchase, receipt proposal, refusal and partner context populated.",
+                "description": "Company shell with only the requested document and its purchase, refusal and partner context populated.",
             },
             "related": obj(
                 {
