@@ -200,22 +200,22 @@ def _explained(rows: list) -> set[str]:
     for keys in copies.values():
         for k in keys:
             wanted[k] = wanted.get(k, 0) + 1
-    split = {t["tx_key"] for t in twins if not _one_money(t)}  # readings that disagree on the money: never excused
-    excused |= {
-        t for t, keys in copies.items() if keys and t not in split and all(k in done and wanted[k] == 1 for k in keys)
-    }
+    excused |= {t for t, keys in copies.items() if keys and all(k in done and wanted[k] == 1 for k in keys)}
     return done | excused
 
 
 def _copy(twin, line) -> bool:
     """`line` could be the other source's copy of `twin`: brought by another source (two lines of one source are two
     payments), the same known amount and currency, the same account (or one unknown), days apart at most
-    BOUNDARY_DAYS by any of their readings' dates (Ledger.account_lines pairs twins the same way)."""
+    BOUNDARY_DAYS by any of their readings' dates (Ledger.account_lines pairs by the stored day alone). Neither may
+    have a reading with other money, so a date from one reading never combines with an amount from another."""
     apart = min(abs((a - b).days) for a in _days(twin) for b in _days(line))
     same_account = not twin["iban"] or not line["iban"] or twin["iban"] == line["iban"]
     same_money = twin["amount"] is not None and twin["amount"] == line["amount"] and _currency(twin) == _currency(line)
     return (
-        (twin["source"] or "file") != (line["source"] or "file")
+        _one_money(twin)  # a line read with other money on another read is no one's copy: in doubt, never paired
+        and _one_money(line)
+        and (twin["source"] or "file") != (line["source"] or "file")
         and same_money
         and same_account
         and apart <= BOUNDARY_DAYS
