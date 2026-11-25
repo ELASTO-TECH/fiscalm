@@ -278,11 +278,11 @@ def _month_end(day: date) -> date:
 
 
 def _consecutive(before: statements.Account, after: statements.Account) -> bool:
-    """Two proven daily statements with no other between them: the next number. (A number 1 of a new year proves
-    where that year starts, not that the year before ended with the last one it holds.)"""
+    """Two proven daily statements of one year with no other between them: the next number. Across a new year the
+    numbering may restart, so no number proves that the year before ended with the last statement it holds."""
     if before.serial is None or after.serial is None or not (before.trustworthy and after.trustworthy):
         return False
-    return after.serial == before.serial + 1
+    return after.serial == before.serial + 1 and before.period[1].year == after.period[0].year
 
 
 def opening(a: statements.Account) -> Decimal:

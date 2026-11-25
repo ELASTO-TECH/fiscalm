@@ -601,9 +601,9 @@ file whose pages can't be split that way, or whose parts don't read back to exac
 app takes one month per upload). Older daily BT statements (`EXTRAS CONT Numarul: N din dd/mm/yyyy`, one per day with
 movements) make a month when every number is there and balances chain from file to file; the month's first one is
 number 1 or follows the previous month's last, and its last one is followed by the next month's first, so a month of
-daily statements is imported together with its neighbours, the latest one waiting for the next month. Numbering that
-restarts with a new year proves where January starts, not where December ended: such a December is refused (import
-its monthly statement instead). Its opening balance must be proven by the
+daily statements is imported together with its neighbours, the latest one waiting for the next month. Numbers prove
+continuity only within a year (the numbering may restart): a December of daily statements is refused (import its
+monthly statement instead). Its opening balance must be proven by the
 statement and equal the previous month's stored closing balance for that account, when one is on record, whichever
 of the two months is imported first. CAMT.053 is accepted by an administrator in Tranzacții, or from the operator CLI:
 `fiscalm ingest FILE` (store and reconcile) or `fiscalm statement FILE` (inspect). Mail and public

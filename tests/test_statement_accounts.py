@@ -524,20 +524,31 @@ def test_older_daily_bt_pdfs_make_a_month_only_when_numbers_and_balances_leave_n
     assert february[0]["status"] == "refused" and "last statement" in february[0]["errors"][0]
 
 
-def test_only_the_next_number_proves_where_a_month_of_daily_statements_ends(ledger, tmp_path):
-    """Review: January's number 1 shows where January starts, not that December's last file was its last; and two
+@pytest.mark.parametrize(
+    "case,files",
+    [
+        ("a new year's next number", [("02/12/2019", 1), ("20/12/2019", 2), ("15/01/2020", 3), ("05/02/2020", 4)]),
+        ("a number skipped on consecutive days", [("13/01/2020", 1), ("14/01/2020", 3), ("05/02/2020", 4)]),
+    ],
+)
+def test_only_the_next_number_of_the_same_year_proves_nothing_was_left_out(ledger, tmp_path, case, files):
+    """Review: numbering may restart with a year, so January proves nothing about December's last days; and two
     statements on consecutive days must be numbered one after the other."""
-    dec = daily(tmp_path, ["16/12/2019", "20/12/2019"], first=249)
-    skipped = daily(tmp_path, ["13/01/2020"], "120.00") + daily(tmp_path, ["14/01/2020"], "130.00", first=3)
-    results = recon.ingest_files(
-        ledger,
-        dec + skipped + daily(tmp_path, ["05/02/2020"], "140.00", first=4),
-        password_lookup=lambda co: "synthetic",
-    )
-    assert [
-        (r["status"], "last statement" in r["errors"][0] or "full calendar" in r["errors"][0]) for r in results[:2]
-    ] == [("refused", True)] * 2
-    assert not ledger.documents(kind="statement")
+    paths = [daily(tmp_path, [day], str(100 + 10 * n), first=number)[0] for n, (day, number) in enumerate(files)]
+    first, *_ = recon.ingest_files(ledger, paths, password_lookup=lambda co: "synthetic")
+    assert first["status"] == "refused" and ("last statement" in first["errors"][0]) == ("year" in case)
+    month = files[0][0][6:] + "-" + files[0][0][3:5]
+    assert month not in {d["month"] for d in ledger.documents(kind="statement")}
+
+
+def test_a_quarterly_pdf_with_an_account_twice_in_a_month_is_refused_alone(ledger, tmp_path):
+    """Review: two April sections of RON, one unproven (a line outside its period), never crash the import."""
+    ron, april = companies.get("NORD").ibans["RON"], ("01/04/2022", "30/04/2022")
+    sections = [("RON", ron, Decimal(100), [(day, day, Decimal(10))], april) for day in ("05/04/2022", "05/05/2022")]
+    sections += [("RON", ron, Decimal(110), [], ("01/05/2022", "31/05/2022"))]
+    pdf = bt_statement(tmp_path / "q.pdf", "11111111", ("01/04/2022", "31/05/2022"), sections, pages=True)
+    results = recon.ingest_files(ledger, [pdf], password_lookup=lambda co: "synthetic")
+    assert {r["status"] for r in results} == {"refused"} and not ledger.documents(kind="statement")
 
 
 def test_a_neighbour_is_what_is_stored_or_what_passes_its_own_checks(ledger, tmp_path):

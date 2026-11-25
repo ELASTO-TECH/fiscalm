@@ -11,6 +11,7 @@ import hashlib
 import itertools
 import json
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -585,7 +586,7 @@ def split_months(path: Path, company: str, st: Statement, folder: Path) -> list[
             if not names_cui(text, companies.get(company).cui):
                 raise StatementError(SEVERAL_MONTHS)
             parts.append((month, out, parse_text(text, company)))
-    if sorted(map(_section, st.accounts)) != sorted(_section(a) for *_, p in parts for a in p.accounts) or any(
+    if Counter(map(_section, st.accounts)) != Counter(_section(a) for *_, p in parts for a in p.accounts) or any(
         a.period[0].strftime("%Y-%m") != month for month, _, p in parts for a in p.accounts
     ):
         raise StatementError(SEVERAL_MONTHS)
