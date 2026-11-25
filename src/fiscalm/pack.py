@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from fiscalm import companies
 from fiscalm.bank import catalogue as banks, statements
+from fiscalm.bank.intake import month_missing
 from fiscalm.identity import partner_id
 from fiscalm.ledger import Ledger, finance_home, now
 from fiscalm.payments.engine import pay_lock
@@ -92,12 +93,13 @@ def held_upload(d, named: set[str]) -> bool:
 
 
 def ready(ledger: Ledger, company: str, month: str) -> bool:
-    """A pack is ready once that month's statement is in and something is unsent."""
+    """A pack is ready once that month's statement is in, with every account of its banks, and something is unsent."""
     # a CSV is partial (its own days): it never stands for the month's statement
     has_statement = any(
         not str(d["path"]).endswith(".csv") for d in ledger.documents(company=company, month=month, kind="statement")
     )
-    return has_statement and bool(pending_docs(ledger, company, month))
+    complete = has_statement and not month_missing(ledger, company, month)
+    return complete and bool(pending_docs(ledger, company, month))
 
 
 _NOT_NAME = re.compile(r"[^A-Za-z0-9]+")

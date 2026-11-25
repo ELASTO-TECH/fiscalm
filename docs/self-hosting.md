@@ -590,8 +590,10 @@ text is supplied as document data. A failed call or invalid JSON produces no dec
 Supported bank statements: BT monthly PDF (encrypted or unprotected) and ISO 20022 CAMT.053 XML
 (camt.053.001.02 through .08), selected by content. Older BT exports come as one PDF per account, or as daily PDFs
 of one account: pass all of a month's files to one `fiscalm ingest FILE...`, or pick them together in Încarcă extras. They are checked as one statement (the
-whole calendar month, every account the firm held at BT that month, each day once, no gap, balances chaining from
-file to file) and stored together, or none is stored. A BT PDF is recognised by "allmerge" in its name,
+whole calendar month, each account's days once, no gap, balances chaining from file to file) and stored together, or
+none is stored. A statement may hold only some of the firm's accounts at its bank: it is imported, the answer names
+the accounts still to come, and the month's pack for the accountant waits for them. An account twice for the same
+days refuses the statement. A BT PDF is recognised by "allmerge" in its name,
 by its password, or by its text (an unprotected BT statement under any name, whose header CUI names the firm; no
 password is read for it). `fiscalm ingest` refuses a CSV on its own: it is uploaded on its account. A stored statement copy passed to `fiscalm ingest` again
 (after a parser fix) is its own document: `duplicate`, its lines recorded and matched again, nothing new stored. A BT account's

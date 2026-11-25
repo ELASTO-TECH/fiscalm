@@ -235,7 +235,6 @@ NORD_RON, NORD_EUR, STUDIO9_RON = "RO24BTRLRONCRT0000000001", "RO71BTRLEURCRT000
     [
         ([(STUDIO9_RON, "RON")], su.OTHER_ACCOUNT, {}),  # NORD's CUI in the text, STUDIO9's account in the statement
         ([(NORD_RON, "RON"), (STUDIO9_RON, "RON")], su.OTHER_ACCOUNT, {}),
-        ([(NORD_RON, "RON")], su.incomplete(["EUR 0001"]), {}),  # BT's EUR account missing, named
         ([], su.NOT_READ, {}),
         ([], su.NOT_READ, {"parse_error": ValueError("day 99 out of range")}),  # the parser chokes
         (
@@ -358,10 +357,9 @@ def multipart(files: list[bytes]) -> tuple[bytes, str]:
 def test_one_months_pdfs_uploaded_together_are_one_statement(ledger, sec, tmp_path):
     integrations.set_statement_password(ledger, "NORD", "bt", "synthetic")
     ron, eur = (p.read_bytes() for p in bt_files(tmp_path))
-    with pytest.raises(su.Refused) as e:
-        su.accept_pdfs(ledger, "NORD", "", [ron])
-    assert e.value.message == su.incomplete(["EUR 0001"]) and not ledger.documents(kind="statement")
-    r = su.accept_pdfs(ledger, "NORD", "bt", [ron, eur])
+    r = su.accept_pdfs(ledger, "NORD", "", [ron])
+    assert (r["status"], r["message"]) == ("added", su.ADDED + su.still_missing(["EUR 0001"]))
+    r = su.accept_pdfs(ledger, "NORD", "bt", [eur])
     assert (r["status"], r["message"], r["month"]) == ("added", su.ADDED, "2026-10") and "unprotected" not in r
     assert len(ledger.documents(kind="statement")) == 2 and leftovers() == []
     assert su.accept_pdfs(ledger, "NORD", "", [eur, ron])["message"] == su.DUPLICATE

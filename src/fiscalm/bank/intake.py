@@ -73,6 +73,7 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
     before accounts were recorded is read to learn its accounts; if it can't be read, nothing is imported."""
     if not st.period_start or not st.period_end:
         raise statements.StatementError("Cannot verify statement period")
+    _refuse_twice(st)
     lo, hi = span(st)
     mine = set(statement_ibans(st))
     if not mine:
@@ -113,6 +114,17 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
         theirs_lo, theirs_hi = span(previous)
         if lo <= theirs_hi and theirs_lo <= hi:
             raise statements.StatementError("Overlapping statement already imported")
+
+
+def _refuse_twice(st: statements.Statement) -> None:
+    """One statement holds an account's days once: two sections of one account for the same days settle nothing."""
+    seen: dict[tuple[str, str], list[tuple[date, date]]] = {}
+    for a in st.accounts:
+        lo, hi = a.period or (st.period_start, st.period_end)
+        run = seen.setdefault((companies.normalize_iban(a.iban), a.currency), [])
+        if any(lo <= theirs_hi and theirs_lo <= hi for theirs_lo, theirs_hi in run):
+            raise statements.StatementError("Statement: an account appears twice for the same days")
+        run.append((lo, hi))
 
 
 def span(st: statements.Statement) -> tuple[date, date]:
@@ -225,7 +237,7 @@ def combine(parts: list[statements.Statement]) -> statements.Statement:
     An account's days may start after the 1st only where none is left out (`_late_start`). Older daily statements
     come only for days with movements: numbered ones one after the other may leave days between them, and the month
     may start or end with such days, proven by the neighbouring months' statements (`refuse_unchained`, the caller's,
-    as is completeness, `refuse_incomplete`)."""
+    completeness is a warning, `month_missing`)."""
     if any(not p.period_start or not p.period_end or p.period_end < p.period_start for p in parts):
         raise statements.StatementError("Cannot verify statement period")
     first, last = min(p.period_start for p in parts), max(p.period_end for p in parts)
@@ -449,11 +461,16 @@ def _refuse_break(before: statements.Account, after: statements.Account, numbere
         raise statements.StatementError("Statement balances do not chain with the next or previous month")
 
 
-def refuse_incomplete(st: statements.Statement) -> None:
-    """Refuse a whole-month statement that leaves out an account its bank holds for the company in that month."""
-    missing = [] if st.partial else missing_accounts(st)  # a partial import (CSV) speaks for its one account only
-    if missing:
-        raise statements.MissingAccounts(missing)
+def month_missing(L: Ledger, company: str, month: str) -> list[str]:
+    """The accounts the month's stored statements leave out at their banks (missing_accounts of them together); a
+    statement of one account is imported on its own, and this says which ones are still to come."""
+    co = companies.get(company)
+    docs = [d for d in L.documents(company=company, month=month, kind="statement") if not d["path"].endswith(".csv")]
+    owned = [co.account(i) for d in docs for i in json.loads(d["accounts"] or "[]")]
+    first = date.fromisoformat(month + "-01")
+    accounts = [statements.Account(a.iban, a.currency) for a in owned if a]
+    st = statements.Statement(company, first, _month_end(first), accounts)
+    return missing_accounts(st) if accounts else []
 
 
 def ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: tuple[str, dict] | None = None) -> dict:
@@ -492,7 +509,6 @@ def _ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: t
     digest = identity(data, csv_account)
     if check:
         check(st)
-    refuse_incomplete(st)
     refuse_overlap(L, st, digest)
     if not st.partial:  # a CAMT or MT940 month next to a BT month that starts after the 1st
         refuse_unchained(L, st)
@@ -567,6 +583,7 @@ def _ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: t
         "unprotected": str(dest),
         "transactions": len(st.txs),
         "balanced": not issues,
+        "missing": [] if st.partial else month_missing(L, st.company, st.month),
         "payments_marked_paid": paid,
         "efactura_marked_paid": ef_paid,
     }
