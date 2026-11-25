@@ -1607,6 +1607,7 @@ class Ledger:
                             "INSERT OR IGNORE INTO settled_tx VALUES(?,?,?)", (key, "bank reference conflict", now())
                         )
                         self._reference_copy(db, st.company, t, key, iban, True, statement_keys)
+                    self._keep_reading(db, st.company, key, t)
                     # A row recorded before accounts were (iban NULL) learns its account from the same statement
                     # read again; a recorded account is never overwritten, and another company's row is never touched.
                     db.execute(
@@ -1732,15 +1733,18 @@ class Ledger:
         return [r for r in rows if r["tx_key"] not in hidden and r["day"] >= since]
 
     def credit_lines(self, company: str, since: str) -> list:
-        """Every credit on record for the company from `since` (an ISO day) on, each with its settled_tx reservation
+        """Every credit on record for the company from `since` (an ISO day) on, by any reading's date (a bank may
+        correct a booking date on a later read), each with its settled_tx reservation
         (`what`, or null), twins and conflicts included: the raw evidence of who may have paid, which account_lines
         narrows to one line per payment. Rows: tx_key, iban, day, amount, source, tx (statements.Tx as JSON, or null),
-        what."""
+        readings (a JSON array of the line's other readings, statements.Tx JSON each) and what."""
         return self.db.execute(
-            "SELECT t.tx_key, t.iban, t.day, t.amount, t.source, t.tx, s.what FROM statement_txs t "
-            "LEFT JOIN settled_tx s ON s.tx_key=t.tx_key WHERE t.company=? AND t.direction='credit' AND t.day>=? "
+            "SELECT t.tx_key, t.iban, t.day, t.amount, t.source, t.tx, s.what, (SELECT json_group_array(r.tx) "
+            "FROM statement_tx_readings r WHERE r.tx_key=t.tx_key) AS readings FROM statement_txs t "
+            "LEFT JOIN settled_tx s ON s.tx_key=t.tx_key WHERE t.company=? AND t.direction='credit' AND (t.day>=? "
+            "OR EXISTS (SELECT 1 FROM statement_tx_readings r WHERE r.tx_key=t.tx_key AND json_extract(r.tx,'$.date')>=?)) "
             "ORDER BY t.day, t.rowid",
-            (company, since),
+            (company, since, since),
         ).fetchall()
 
     @staticmethod
@@ -1749,6 +1753,40 @@ class Ledger:
         all its reads: a month it read from its first day is the bank's, whatever day this read starts."""
         rows = db.execute("SELECT covered FROM bank_connections WHERE company=?", (company,))
         return any(json.loads(c).get(iban, "9999-12-31") <= day for (c,) in rows)
+
+    # What a reading of a credit says about who paid, what and when: another reading differing only elsewhere (a
+    # category worked out later) adds nothing.
+    READING_EVIDENCE = (
+        "date",
+        "title",
+        "description",
+        "amount",
+        "currency",
+        "iban",
+        "ref",
+        "counterparty",
+        "counterparty_iban",
+    )
+
+    @classmethod
+    def _keep_reading(cls, db, company: str, key: str, t) -> None:
+        """Keep another reading of a stored credit beside it (statement_tx_readings), the stored line unchanged: a
+        later read may name the payer, name it differently or correct its date, and who paid is what a client
+        reminder checks. Only a reading that differs in that evidence from the stored one and every kept one."""
+        if (
+            t.direction != "credit"
+            or not db.execute("SELECT 1 FROM statement_txs WHERE tx_key=? AND company=?", (key, company)).fetchone()
+        ):
+            return  # another firm's line under the same key never gets this firm's reading
+        known = db.execute(
+            "SELECT tx FROM statement_txs WHERE tx_key=:k AND tx IS NOT NULL "
+            "UNION ALL SELECT tx FROM statement_tx_readings WHERE tx_key=:k",
+            {"k": key},
+        ).fetchall()
+        new = t.to_dict()
+        evidence = lambda d: tuple(d.get(f) for f in cls.READING_EVIDENCE)  # noqa: E731
+        if all(evidence(json.loads(x)) != evidence(new) for (x,) in known):
+            db.execute("INSERT OR IGNORE INTO statement_tx_readings VALUES(?,?)", (key, json.dumps(new)))
 
     @staticmethod
     def _file_has(db, company: str, iban: str, month: str) -> bool:

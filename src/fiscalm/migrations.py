@@ -648,6 +648,13 @@ def ai_transaction_proposals(db: sqlite3.Connection) -> None:
     )
 
 
+def statement_tx_readings(db: sqlite3.Connection) -> None:
+    # A statement line read again (a parser that learned the layout, the bank feed adding text to a reference it
+    # already sent) can name its payer differently. The stored line stays as first read; every other reading is kept
+    # here, so a client reminder checks each one for the client.
+    db.execute("CREATE TABLE statement_tx_readings (tx_key TEXT NOT NULL, tx TEXT NOT NULL, PRIMARY KEY (tx_key, tx))")
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     baseline,
     transaction_links,
@@ -693,6 +700,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     credit_references_reread,
     bank_coverage,
     ai_transaction_proposals,
+    statement_tx_readings,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

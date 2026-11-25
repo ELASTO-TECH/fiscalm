@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import pytest
@@ -7,43 +8,31 @@ from ubl_fake import ubl
 
 from fiscalm import companies
 from fiscalm.api import state as api
-from fiscalm.bank import statements
+from fiscalm.bank import coverage, statements
 from fiscalm.invoicing import engine as i
 from fiscalm.mail import reminders as r
 
 TODAY = date(2026, 12, 7)
 
 
-def cover_accounts(st):
-    from fiscalm import companies
-    from fiscalm.bank import statements
-
-    st.period_start = date(2026, 10, 1)
-    txs = st.txs
-    st.accounts = [
-        statements.Account(iban, currency, txs if currency == "RON" else [])
-        for currency, iban in companies.get("NORD").ibans.items()
-    ]
+def cover(L, last=TODAY, first=date(2026, 10, 1)):
+    """A stored statement covering every NORD current account from `first` to `last` (bank.coverage)."""
+    L.db.execute("DELETE FROM documents WHERE kind='statement'")
+    L.db.commit()
+    L.add_document("coverage", "NORD", "2026-10", "statement", "NORD/2026-10/statement.pdf")
+    days = [first.isoformat(), last.isoformat(), True]
+    coverage.record(
+        L, "coverage", {companies.normalize_iban(a.iban): days for a in companies.get("NORD", L=L).current_accounts}
+    )
 
 
 @pytest.fixture
-def reminder(setup_invoice, home, monkeypatch, mail_account):
+def reminder(setup_invoice, home, mail_account):
     L, _ = setup_invoice
     iid = draft(setup_invoice)
     i.issue(L, iid, "2026-10-31", company="NORD", version=1)
     (home / "state" / "LIVE").touch()
-    from test_issued import _st
-
-    from fiscalm.bank import statements
-
-    st = _st()
-    cover_accounts(st)
-    st.period_end = TODAY
-    statement = home / "NORD" / "2026-10" / "statement.pdf"
-    statement.parent.mkdir(parents=True, exist_ok=True)
-    statement.write_bytes(b"%PDF-synthetic-" + iid.encode())
-    L.add_document("coverage", "NORD", "2026-10", "statement", str(statement))
-    monkeypatch.setattr(statements, "parse", lambda *args: st)
+    cover(L)
     return L, iid
 
 
@@ -73,11 +62,26 @@ def test_reminder_keeps_money_and_company_refusals(reminder, change):
         r.eligible(L, co, iid, today, rows=rows)
 
 
-def test_missing_or_stale_statement_refuses_text(reminder):
+# A person sends the text, so statements behind (monthly ones, mid-month) or missing warn on the card instead of
+# hiding the reminder; current ones (up to STATEMENT_MAX_AGE_DAYS behind) say nothing.
+@pytest.mark.parametrize(
+    "last, warning",
+    [
+        (TODAY, None),
+        (date(2026, 11, 30), None),
+        (date(2026, 10, 31), r.STALE.format(date="31.10.2026")),
+        (None, r.NO_STATEMENTS),
+    ],
+)
+def test_statements_behind_or_missing_warn_on_the_text(reminder, last, warning):
     L, iid = reminder
-    L.db.execute("DELETE FROM documents WHERE kind='statement'")
-    with pytest.raises(r.Refused, match=r.STATEMENTS):
-        r.eligible(L, "NORD", iid, TODAY)
+    if last:
+        cover(L, last)
+    else:
+        L.db.execute("DELETE FROM documents WHERE kind='statement'")
+        L.db.commit()
+    tasks = r.tasks(L, "NORD", TODAY, api._issued(L, "NORD", TODAY, True))
+    assert [(t["id"], t["warning"]) for t in tasks] == [(i.import_id("local", iid), warning)]
 
 
 @pytest.mark.parametrize("known", [False, True])
@@ -85,13 +89,10 @@ def test_reminder_bank_reads_do_not_scale_with_invoices(reminder, monkeypatch, k
     L, iid = reminder
     invoice = i.invoice(L, iid, company="NORD")
     st = _st(_credit("121.00", TODAY, counterparty=invoice["data"]["client"]["name"]))
-    cover_accounts(st)
-    st.period_end = TODAY
     L.record_statement(st)
     if known:
         L.db.execute("UPDATE issued SET collected_from_iban=? WHERE company='NORD'", (st.txs[0].counterparty_iban,))
         L.db.commit()
-    monkeypatch.setattr(statements, "parse", lambda *args: st)
     rows = api._issued(L, "NORD", TODAY, True)
     counts = []
     for n in (10, 100):
@@ -104,7 +105,8 @@ def test_reminder_bank_reads_do_not_scale_with_invoices(reminder, monkeypatch, k
         finally:
             L.db.set_trace_callback(None)
         counts.append(len(queries))
-    assert counts[0] == counts[1] <= 4
+    accounts = len(companies.get("NORD", L=L).current_accounts)  # bank.coverage reads each account once
+    assert counts[0] == counts[1] <= 3 + accounts
 
 
 def _client_credit(L, iid, day=date(2026, 11, 10), **kw):
@@ -120,32 +122,29 @@ def _reserve(L, tx, what):
 
 
 # A repeat client's credit already settled to another invoice says nothing about this one; a conflict, a twin
-# whose copy explains nothing, a credit not on record yet or one without its details may still be this payment.
+# whose copy explains nothing or one without its details may still be this payment.
 @pytest.mark.parametrize(
     "case, reminded",
     [
         ("unexplained", False),
         ("explained", True),
         ("conflict", False),
-        ("not_recorded", False),
-        ("recorded_blank", False),  # on record without the payer the stored statement names
+        ("named_on_a_later_read", False),  # first recorded without its payer, then read again naming the client
+        ("named_after_its_account", False),  # first recorded with the payer's account only
+        ("named_in_full_later", False),  # first with a truncated name, then the client's full name
         ("no_details", False),
     ],
 )
 def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, case, reminded):
     L, iid = reminder
     credit = _client_credit(L, iid)
-    if case == "recorded_blank":
-        blank = _client_credit(L, iid, counterparty="", iban="", desc=credit.description)
+    if case in ("named_on_a_later_read", "named_after_its_account", "named_in_full_later"):
+        iban = credit.counterparty_iban if case == "named_after_its_account" else ""
+        name = credit.counterparty[:6] if case == "named_in_full_later" else ""
+        blank = _client_credit(L, iid, counterparty=name, iban=iban, desc=credit.description)
         assert statements.tx_key(blank) == statements.tx_key(credit)
         L.record_statement(_st(blank))
-    if case in ("not_recorded", "recorded_blank"):  # the stored statement's lines are not (all) on record
-        st = _st(credit)
-        cover_accounts(st)
-        st.period_end = TODAY
-        monkeypatch.setattr(statements, "parse", lambda *args: st)
-    else:
-        L.record_statement(_st(credit))
+    L.record_statement(_st(credit))
     if case in ("explained", "conflict"):
         _reserve(L, credit, "issued other" if case == "explained" else "bank reference conflict")
     if case == "no_details":
@@ -165,10 +164,14 @@ def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, c
         ("twin_of_explained", True),
         ("twin_and_explained_line_of_one_source", False),  # two lines of one source are two payments
         ("two_payers_one_explained", False),  # another client's twin wants the same explained payment
+        ("two_payers_other_read_again", False),  # ... and was read again with other money: it still competes
         ("two_twins_one_explained", False),
         ("explained_and_unexplained_copy", False),
         ("two_twins_original_and_its_duplicate", False),
         ("duplicate", False),
+        ("twin_redated_to_an_unexplained_copy", False),  # a later read moves it next to an unexplained line
+        ("twin_read_again_with_other_money", False),  # its readings disagree on the amount
+        ("copy_read_again_with_other_money", False),  # the explained line's readings disagree on the amount
     ],
 )
 def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
@@ -182,6 +185,7 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
     )
     extra = {
         "two_payers_one_explained": [other],
+        "two_payers_other_read_again": [other],
         "two_twins_one_explained": [second],
         "explained_and_unexplained_copy": [settled],
         "two_twins_original_and_its_duplicate": [second, settled],
@@ -192,10 +196,13 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
         if twin in extra:
             _reserve(L, twin, "twin feed")
     if case in (
+        "copy_read_again_with_other_money",
+        "twin_read_again_with_other_money",
         "twin_of_explained",
         "two_twins_one_explained",
         "twin_and_explained_line_of_one_source",
         "two_payers_one_explained",
+        "two_payers_other_read_again",
     ):
         _reserve(L, blank, "issued other")
     if case == "twin_and_explained_line_of_one_source":
@@ -205,8 +212,69 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
         _reserve(L, settled, "issued other")
         if case == "two_twins_original_and_its_duplicate":
             _reserve(L, blank, "duplicate:" + statements.tx_key(settled))
+    if case.endswith(("read_again_with_other_money", "other_read_again")):  # read again, with other money
+        read = {"twin_read_again_with_other_money": named, "copy_read_again_with_other_money": blank}.get(case, other)
+        other = dict(
+            json.loads(
+                L.db.execute("SELECT tx FROM statement_txs WHERE tx_key=?", (statements.tx_key(read),)).fetchone()[0]
+            ),
+            amount="70.00",
+        )
+        L.db.execute("INSERT INTO statement_tx_readings VALUES(?,?)", (statements.tx_key(read), json.dumps(other)))
+        L.db.commit()
+    if case == "twin_redated_to_an_unexplained_copy":  # the twin first sat beside `blank`, explained; then on 20.11
+        _reserve(L, blank, "issued other")
+        late = _client_credit(L, iid, day=date(2026, 11, 20), counterparty="", iban="", desc="Incasare 4")
+        L.record_statement(_st(late))
+        redated = dict(
+            json.loads(
+                L.db.execute("SELECT tx FROM statement_txs WHERE tx_key=?", (statements.tx_key(named),)).fetchone()[0]
+            ),
+            date="2026-11-19",
+        )
+        L.db.execute("INSERT INTO statement_tx_readings VALUES(?,?)", (statements.tx_key(named), json.dumps(redated)))
+        L.db.commit()
     rows = api._issued(L, "NORD", TODAY, True)
     assert bool(r.tasks(L, "NORD", TODAY, rows)) is reminded
+
+
+@pytest.mark.parametrize("later", ["payer", "cui", "corrected_day"])
+def test_a_later_reading_of_a_feed_line_is_kept_beside_the_first(reminder, later):
+    # The feed keys a line by the bank's reference: a later read may name the payer, or carry the client's CUI in
+    # new text. The stored line stays as first read; the reminder checks every reading.
+    L, iid = reminder
+    # corrected_day: first booked before the invoice's lookback, then on a day inside it.
+    day = date(2026, 10, 15) if later == "corrected_day" else date(2026, 11, 10)
+    first = _client_credit(L, iid, day=day, counterparty="", iban="", desc="Plata FACT TEST-42")
+    cui = i.invoice(L, iid, company="NORD")["data"]["client"]["cui"]
+    kw = dict(counterparty="", iban="") if later == "cui" else {}
+    second = _client_credit(L, iid, desc=f"Plata CUI {cui}" if later == "cui" else "", **kw)
+    first.ref = second.ref = "eb:ref-1"
+    L.record_statement(_st(first))
+    L.record_statement(_st(second))
+    (tx,) = L.db.execute("SELECT tx FROM statement_txs").fetchone()
+    assert statements.Tx.from_dict(json.loads(tx)) == first
+    assert r.tasks(L, "NORD", TODAY, api._issued(L, "NORD", TODAY, True)) == []
+
+
+@pytest.mark.parametrize("direction", ["credit", "debit"])
+def test_a_reading_that_adds_no_evidence_is_not_kept(reminder, direction):
+    L, iid = reminder
+    line = _client_credit(L, iid, counterparty="", iban="")
+    line.direction = direction
+    L.record_statement(_st(line))
+    line.category, line.counterparty = "needs_invoice", "" if direction == "credit" else "Client"
+    L.record_statement(_st(line))
+    assert L.db.execute("SELECT count(*) FROM statement_tx_readings").fetchone()[0] == 0
+
+
+def test_another_firms_reading_never_joins_a_line(reminder):
+    L, iid = reminder
+    line = _client_credit(L, iid, counterparty="", iban="")
+    L.record_statement(_st(line))
+    line.counterparty = "Client"
+    L.record_statement(_st(line, company="STUDIO9"))
+    assert L.db.execute("SELECT count(*) FROM statement_tx_readings").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

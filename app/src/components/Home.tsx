@@ -158,7 +158,7 @@ function reminderCard(s: State, t: ReminderTask, own: string | undefined): React
   const r = findIssued(s, t.id)?.[0];
   return <Task co={own} key={`${s.co}rem${t.id}`} icon="envelope-simple"
     title={r ? `${r.client}: încasare restantă` : "Încasare restantă"} late
-    body="Copiază textul și trimite-l clientului din e-mail.">
+    body={t.warning ?? "Copiază textul și trimite-l clientului din e-mail."}>
     <ReminderText t={t} />
   </Task>;
 }
