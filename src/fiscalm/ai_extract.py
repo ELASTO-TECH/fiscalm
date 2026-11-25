@@ -147,7 +147,7 @@ def _firm(name: str, tax_id: str, firms: dict[str, companies.Company], text: str
 
 def _card_printed(card: str, text: str) -> bool:
     """The text prints these last four digits as a card's: masked (docs._card) or right after a card word."""
-    near = rf"\b(?:card|visa|mastercard|maestro|amex|ending(?: in)?)\b[^\d\n]{{0,20}}{card}\b"
+    near = rf"\b(?:card|visa|mastercard|maestro|amex|ending(?: in)?)[\s:#*xX•·-]{{0,12}}{card}(?![\d]|[.,]\d)"
     return docs._card(text) == card or re.search(near, text, re.I) is not None
 
 
