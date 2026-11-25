@@ -50,6 +50,7 @@ ACTION_FIELDS = {
     "issued-mark": (("id", "method"), ("detail",)),
     "issued-unmark": (("id",), ()),
     "resolve-debit": (("tx", "target"), ()),
+    "credit-pick": (("id", "target"), ()),
     "settlement-withdraw": (("id",), ()),
     "settlement-confirm": (("id", "tx", "confirmed"), ()),
     "emag-refund": (("id",), ()),
