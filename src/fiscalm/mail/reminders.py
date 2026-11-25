@@ -158,7 +158,7 @@ class StatementView:
         self.coverage(since, today, max_age)
         if self._lines is None or since < self._lines[0]:
             start = min(since, self.since or since)
-            lo = start - timedelta(days=BOUNDARY_DAYS)  # an explained copy can sit just before
+            lo = start - timedelta(days=2 * BOUNDARY_DAYS)  # an explained copy just before, and the twins it could be
             lines = self.L.credit_lines(self.co, lo.isoformat())
             self._lines = (start, lines, _explained(lines))
         explained = self._lines[2]
@@ -230,36 +230,41 @@ class StatementView:
 def _explained(rows: list) -> set[str]:
     """The keys of credit lines proved to be something other than an unexplained payment: an original line reserved
     in `settled_tx` as collecting or explaining an item; a duplicate line whose original is; a twin (the other
-    source's copy of a payment) whose every possible copy among the original lines is explained, paired one to one
-    with them, closest days first: one explained payment excuses one twin, never two, and a duplicate is never
-    a copy of its own. A conflict is never explained."""
+    source's copy of a payment) when every original line it could be a copy of is explained and could be the copy
+    of no other twin. Two twins wanting one explained payment may be two payers: neither is excused, since only one
+    of them is that payment. A conflict is never explained."""
     what = {r["tx_key"]: r["what"] or "" for r in rows}
     copy_of = lambda w: w.startswith(("twin ", "duplicate:"))  # noqa: E731
     originals = [r for r in rows if not copy_of(what[r["tx_key"]])]
     done = {r["tx_key"] for r in originals if what[r["tx_key"]] and not what[r["tx_key"]].startswith(UNEXPLAINED)}
     excused = {k for k, w in what.items() if w.startswith("duplicate:") and w.removeprefix("duplicate:") in done}
-    pairs = []
-    for t in (r for r in rows if what[r["tx_key"]].startswith("twin ")):
-        copies = [e for e in originals if _copy(t, e)]
-        if copies and all(e["tx_key"] in done for e in copies):
-            day = date.fromisoformat(t["day"])
-            pairs += [(abs((day - date.fromisoformat(e["day"])).days), t["tx_key"], e["tx_key"]) for e in copies]
-    used: set[str] = set()
-    for _, twin, copy in sorted(pairs):
-        if twin not in excused and copy not in used:
-            excused.add(twin)
-            used.add(copy)
+    twins = [r for r in rows if what[r["tx_key"]].startswith("twin ")]
+    copies = {t["tx_key"]: [e["tx_key"] for e in originals if _copy(t, e)] for t in twins}
+    wanted: dict[str, int] = {}
+    for keys in copies.values():
+        for k in keys:
+            wanted[k] = wanted.get(k, 0) + 1
+    excused |= {t for t, keys in copies.items() if keys and all(k in done and wanted[k] == 1 for k in keys)}
     return done | excused
 
 
 def _copy(twin, line) -> bool:
     """`line` could be the other source's copy of `twin`: brought by another source (two lines of one source are two
-    payments), same amount, same account (or one unknown), days apart at most BOUNDARY_DAYS (Ledger.account_lines
-    pairs twins the same way)."""
+    payments), the same known amount and currency, the same account (or one unknown), days apart at most
+    BOUNDARY_DAYS (Ledger.account_lines pairs twins the same way)."""
     apart = abs((date.fromisoformat(twin["day"]) - date.fromisoformat(line["day"])).days)
     same_account = not twin["iban"] or not line["iban"] or twin["iban"] == line["iban"]
-    other_source = twin["source"] != line["source"]
-    return other_source and twin["amount"] == line["amount"] and same_account and apart <= BOUNDARY_DAYS
+    same_money = twin["amount"] is not None and twin["amount"] == line["amount"] and _currency(twin) == _currency(line)
+    return (
+        (twin["source"] or "file") != (line["source"] or "file")
+        and same_money
+        and same_account
+        and apart <= BOUNDARY_DAYS
+    )
+
+
+def _currency(line) -> str | None:
+    return json.loads(line["tx"]).get("currency") if line["tx"] else None
 
 
 def _ours(L: Ledger, co: str, stored: dict) -> bool:
@@ -283,6 +288,12 @@ def _ours(L: Ledger, co: str, stored: dict) -> bool:
     return (
         sha == stored["xml_sha"] and not foreign and history_invoices.direction(companies.get(co, L=L), inv) == "issued"
     )
+
+
+def _lookback(issue_date: str, due_date: str) -> date:
+    """The first day a credit paying the invoice may sit on: COLLECT_DAYS_BEFORE before its issue date, or before
+    its due date when an SPV invoice's comes first."""
+    return min(_shift(d, -issued.COLLECT_DAYS_BEFORE) for d in (issue_date, due_date))
 
 
 def _shift(day: str, days: int) -> date:
@@ -341,7 +352,7 @@ def eligible(
         if not stored or stored["parse_error"] or not _ours(L, co, stored):
             raise Refused(CLOSED)  # not proved this firm's to claim
     row = row | {"due_date": due_date}
-    since = _shift(row["issue_date"], -issued.COLLECT_DAYS_BEFORE)
+    since = _lookback(row["issue_date"], due_date)
     for tx in view.credits(since, today, max_age):
         if issued.credit_from_client(L, co, name, cui, tx, accounts=view.client_accounts):
             raise Refused(PARTIAL)
@@ -351,8 +362,9 @@ def eligible(
 def tasks(L: Ledger, co: str, today: date, rows: list[dict], *, invoices: dict[str, dict] | None = None) -> list[dict]:
     starts = []
     for row in rows:
-        with suppress(Refused):
-            starts.append(_shift(row["issue_date"], -issued.COLLECT_DAYS_BEFORE))
+        if row["status"] == "open":  # only these may be reminded: the window need not reach further back
+            with suppress(Refused):
+                starts.append(_lookback(row["issue_date"], row.get("due_date") or row["issue_date"]))
     since = min(starts, default=None)
     out, view = [], StatementView(L, co, since)
     row_index: dict = {}

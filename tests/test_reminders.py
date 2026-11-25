@@ -164,6 +164,7 @@ def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, c
         ("twin", False),
         ("twin_of_explained", True),
         ("twin_and_explained_line_of_one_source", False),  # two lines of one source are two payments
+        ("two_payers_one_explained", False),  # another client's twin wants the same explained payment
         ("two_twins_one_explained", False),
         ("explained_and_unexplained_copy", False),
         ("two_twins_original_and_its_duplicate", False),
@@ -176,16 +177,24 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
     second = _client_credit(L, iid, day=date(2026, 11, 12), desc="Incasare 2")
     blank = _client_credit(L, iid, day=date(2026, 11, 11), counterparty="", iban="", desc="Incasare")
     settled = _client_credit(L, iid, day=date(2026, 11, 9), counterparty="", iban="", desc="Incasare 0")
+    other = _client_credit(L, iid, day=date(2026, 11, 8), counterparty="OTHER CLIENT SRL", desc="Incasare 3")
     extra = {
+        "two_payers_one_explained": [other],
         "two_twins_one_explained": [second],
         "explained_and_unexplained_copy": [settled],
         "two_twins_original_and_its_duplicate": [second, settled],
     }.get(case, [])
     L.record_statement(_st(named, blank, *extra))
     _reserve(L, named, "duplicate:" + statements.tx_key(blank) if case == "duplicate" else "twin feed")
-    if second in extra:
-        _reserve(L, second, "twin feed")
-    if case in ("twin_of_explained", "two_twins_one_explained", "twin_and_explained_line_of_one_source"):
+    for twin in (second, other):
+        if twin in extra:
+            _reserve(L, twin, "twin feed")
+    if case in (
+        "twin_of_explained",
+        "two_twins_one_explained",
+        "twin_and_explained_line_of_one_source",
+        "two_payers_one_explained",
+    ):
         _reserve(L, blank, "issued other")
     if case == "twin_and_explained_line_of_one_source":
         L.db.execute("UPDATE statement_txs SET source='ob'")
