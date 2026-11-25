@@ -257,6 +257,17 @@ def test_a_later_reading_of_a_feed_line_is_kept_beside_the_first(reminder, later
     assert r.tasks(L, "NORD", TODAY, api._issued(L, "NORD", TODAY, True)) == []
 
 
+@pytest.mark.parametrize("direction", ["credit", "debit"])
+def test_a_reading_that_adds_no_evidence_is_not_kept(reminder, direction):
+    L, iid = reminder
+    line = _client_credit(L, iid, counterparty="", iban="")
+    line.direction = direction
+    L.record_statement(_st(line))
+    line.category, line.counterparty = "needs_invoice", "" if direction == "credit" else "Client"
+    L.record_statement(_st(line))
+    assert L.db.execute("SELECT count(*) FROM statement_tx_readings").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize(
     "invoice, change, reminded",
     [

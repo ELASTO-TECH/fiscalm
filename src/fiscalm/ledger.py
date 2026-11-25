@@ -1607,14 +1607,7 @@ class Ledger:
                             "INSERT OR IGNORE INTO settled_tx VALUES(?,?,?)", (key, "bank reference conflict", now())
                         )
                         self._reference_copy(db, st.company, t, key, iban, True, statement_keys)
-                    # Every other reading of the same line is kept beside it (statement_tx_readings), the stored one
-                    # unchanged: a later read may name the payer, or name it differently, and who paid is what a
-                    # client reminder checks.
-                    db.execute(
-                        "INSERT OR IGNORE INTO statement_tx_readings SELECT tx_key, ? FROM statement_txs "
-                        "WHERE tx_key=? AND company=? AND tx IS NOT ?",
-                        (shown, key, st.company, shown),
-                    )
+                    self._keep_reading(db, st.company, key, t)
                     # A row recorded before accounts were (iban NULL) learns its account from the same statement
                     # read again; a recorded account is never overwritten, and another company's row is never touched.
                     db.execute(
@@ -1760,6 +1753,38 @@ class Ledger:
         all its reads: a month it read from its first day is the bank's, whatever day this read starts."""
         rows = db.execute("SELECT covered FROM bank_connections WHERE company=?", (company,))
         return any(json.loads(c).get(iban, "9999-12-31") <= day for (c,) in rows)
+
+    # What a reading of a credit says about who paid, what and when: another reading differing only elsewhere (a
+    # category worked out later) adds nothing.
+    READING_EVIDENCE = (
+        "date",
+        "title",
+        "description",
+        "amount",
+        "currency",
+        "iban",
+        "ref",
+        "counterparty",
+        "counterparty_iban",
+    )
+
+    @classmethod
+    def _keep_reading(cls, db, company: str, key: str, t) -> None:
+        """Keep another reading of a stored credit beside it (statement_tx_readings), the stored line unchanged: a
+        later read may name the payer, name it differently or correct its date, and who paid is what a client
+        reminder checks. Only a reading that differs in that evidence from the stored one and every kept one."""
+        if t.direction != "credit":
+            return
+        known = db.execute(
+            "SELECT tx FROM statement_txs WHERE tx_key=:k AND company=:co AND tx IS NOT NULL "
+            "UNION ALL SELECT r.tx FROM statement_tx_readings r JOIN statement_txs s USING(tx_key) "
+            "WHERE r.tx_key=:k AND s.company=:co",
+            {"k": key, "co": company},
+        ).fetchall()
+        new = t.to_dict()
+        evidence = lambda d: tuple(d.get(f) for f in cls.READING_EVIDENCE)  # noqa: E731
+        if all(evidence(json.loads(x)) != evidence(new) for (x,) in known):
+            db.execute("INSERT OR IGNORE INTO statement_tx_readings VALUES(?,?)", (key, json.dumps(new)))
 
     @staticmethod
     def _file_has(db, company: str, iban: str, month: str) -> bool:
