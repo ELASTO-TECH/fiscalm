@@ -383,7 +383,23 @@ def test_an_ai_reading_never_overrules_the_document(ledger, fields, result):
 )
 def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
     got = ai_extract.check(reading(**{field: value})("", "", {}), companies.all(ledger))
-    assert getattr(got, field) == kept
+    assert (getattr(got, field), got.rejected) == (kept, () if kept else (field,))
+
+
+@pytest.mark.parametrize(
+    ("doc", "fields"),
+    [
+        (invoice(buyer="Atelier Nord SRL"), {"total": "999.00"}),  # a total it doesn't print: its buyer counts neither
+        (invoice("Total paid 15.00 EUR"), {"total": "15.00", "buyer_tax_id": "RO44444444"}),  # an id none of ours
+        (invoice(buyer="Atelier Nord SRL", number=""), {"confidence": "low", "number": "NRD-7"}),  # our own number
+    ],
+)
+def test_a_contradicted_or_unsure_ai_reading_keeps_the_question(ledger, doc, fields):
+    ledger.db.execute(
+        "INSERT INTO issued(message_id,company,number,raw_path,status,created_at) VALUES('x','NORD','NRD-7','x','open','t')"
+    )
+    ledger.db.commit()
+    assert mi.handle(ledger, message(("pdf", doc)), ask=reading(**fields)) == "asked:1"
 
 
 def test_a_scanned_invoice_is_read_from_its_picture(ledger):
@@ -408,6 +424,8 @@ def test_a_scanned_invoice_is_read_from_its_picture(ledger):
         ("Refund USD -12.00", "12.00", "USD", False),  # a negative amount
         ("Paid 12.00\nAll prices in EUR", "12.00", "EUR", True),
         ("Paid 12.00\nFee USD 1.00\nEUR", "12.00", "EUR", False),  # no currency on its line, two on the document
+        ("Charged 12.10", "12.10", "EUR", False),  # no currency anywhere: the AI's alone counts for nothing
+        ("Subtotal 10.00 EUR\nCharged EUR 12.10", "10.00", "EUR", False),
     ],
 )
 def test_an_ai_total_needs_its_amount_printed_with_its_currency(text, total, currency, ok):
