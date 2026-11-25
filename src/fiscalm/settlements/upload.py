@@ -447,7 +447,7 @@ def accept_report(
 def _said(row) -> str:
     if row["status"] == "collected":
         return COLLECTED
-    if row["error"] in ("confirmation_required", "statement_confirmation_required"):
+    if row["error"] in settlements.CONFIRMABLE:
         return TO_CONFIRM
     return WAITING if row["error"] in (None, "credit_missing_or_ambiguous") else TO_CHECK
 
@@ -460,9 +460,11 @@ def _store(
             if still_allowed is not None and not still_allowed(db):
                 raise Refused(409, REVOKED)  # rechecked under the write lock: a person may have just changed it
             if new:  # a saved format is used as it is now, never written back from what was read before
-                db.execute(
+                db.execute(  # the senders a person named stay: a description never carries them
                     "INSERT INTO partner_settlement_formats VALUES(?,?,?,?) "
-                    "ON CONFLICT(company,partner,signature) DO UPDATE SET data=excluded.data",
+                    "ON CONFLICT(company,partner,signature) DO UPDATE SET data=CASE "
+                    "WHEN json_extract(data,'$.senders') IS NULL THEN excluded.data "
+                    "ELSE json_set(excluded.data,'$.senders',json_extract(data,'$.senders')) END",
                     (company, described["partner"], sig, json.dumps(described, ensure_ascii=False)),
                 )
             return settlements.import_payouts(L, company, data, spec)
@@ -583,7 +585,10 @@ def from_mail(L: Ledger, address: str, tables: tuple, firms, today: date | None 
         return "settlement:ambiguous-sender"  # the attachment never chooses between firms or payers
     counts: dict[str, int] = {}
     for attached in tables:
-        result = _mailed_table(L, attached, formats, address, firms, today or date.today())
+        try:
+            result = _mailed_table(L, attached, formats, address, firms, today or date.today())
+        except Exception:  # noqa: BLE001 - an attachment is untrusted: whatever it breaks, the mail's invoices are read
+            result = "unreadable"
         counts[result] = counts.get(result, 0) + 1
     return ",".join(f"settlement:{k}:{v}" for k, v in sorted(counts.items()))
 

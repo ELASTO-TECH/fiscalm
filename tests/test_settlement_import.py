@@ -684,6 +684,13 @@ def test_mailed_report_from_a_named_sender_is_imported(ledger, mail_account, mon
     assert bank_upload.set_senders(ledger, "NORD", partner, sig, "Rapoarte@Curier.example\n") == [
         "rapoarte@curier.example"
     ]
+    other = (header + f"TEST-1;50,00;1,00;{(day - timedelta(days=1)):%d.%m.%Y}\n").encode()
+    again = bank_upload.accept_report(
+        ledger, "NORD", other, "text/csv", description=described, report_date=day.isoformat()
+    )
+    assert ledger.withdraw_report(again["id"], "NORD")
+    kept = json.loads(ledger.db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])["senders"]
+    assert kept == ["rapoarte@curier.example"]  # the same description uploaded again keeps the senders
 
     def mailed(sender):
         mail = EmailMessage()
@@ -797,7 +804,8 @@ def test_an_unreadable_workbook_never_stops_the_mails_invoices(ledger, mail_acco
     damaged = bytearray(damaged.getvalue())
     start = damaged.index(b"sheet1.xml") + len(b"sheet1.xml")
     damaged[start : start + 40] = b"\xff" * 40
-    for bad in (bytes(broken), bytes(damaged)):
+    unknown = workbook(sheet='<?xml version="1.0" encoding="x-unknown"?><worksheet/>')  # an encoding Python lacks
+    for bad in (bytes(broken), bytes(damaged), unknown):
         with pytest.raises(ReportError):
             table(bad, "xlsx")
     assert bank_upload._mailed_date(ledger, "NORD", "gone", "gone", [["Data"], ["01.10.2026"]]) == ""  # deleted
