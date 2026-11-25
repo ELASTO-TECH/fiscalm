@@ -408,15 +408,24 @@ def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
         (invoice("Total paid 15.00 EUR"), {"total": "15.00", "buyer_tax_id": "RO44444444"}),  # an id none of ours
         (invoice("Order ABC-1984", buyer="Atelier Nord SRL", number=""), {"number": "ABC-1984"}),  # our own number
         (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {}),  # a currency the document never shows
-        (invoice("Ship to: Atelier", "Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),  # a wrapped name
-        (invoice("    Ship to: Atelier", "    Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),  # indented
+        (
+            invoice("Ship to: Atelier", "Nord SRL", buyer="Bill to: Foreign Customer Ltd"),
+            {"buyer_tax_id": ""},
+        ),  # a wrapped name
+        (
+            invoice("    Ship to: Atelier", "    Nord SRL", buyer="Bill to: Foreign Customer Ltd"),
+            {"buyer_tax_id": ""},
+        ),  # indented
         (invoice(buyer="Atelier Nord SRL", total="Charged 12.10 EUR"), {"buyer_tax_id": "RO11111111"}),  # unprinted id
         (
             invoice(buyer="Bill to: Other Client SA", total="Charged 12.10 EUR"),
             {"buyer_name": "Other Client SA", "buyer_tax_id": ""},
         ),
-        (invoice("Ship to: Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),  # only its delivery address
-        (invoice("Ship to:  Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),
+        (
+            invoice("Ship to: Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"),
+            {"buyer_tax_id": ""},
+        ),  # only its delivery address
+        (invoice("Ship to:  Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {"buyer_tax_id": ""}),
         (invoice(buyer="Atelier Nord SRL", total="Total 12.10 EUR MegaCloud"), {"seller_name": "Cloud"}),
         (invoice(buyer="Atelier Nord SRL"), {"seller_name": "Invented Vendor"}),  # a supplier it doesn't print
         (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {"total": "", "currency": ""}),
@@ -451,6 +460,7 @@ def test_a_contradicted_or_unsure_ai_reading_keeps_the_question(ledger, doc, fie
         ("77777777", "VAT: DE                 77777777", False),
         ("77777777", "VAT: DE-77777777", False),
         ("77777777", "VAT: CHE 77777777", False),
+        ("77777777", "Tax ID 77777777", True),
         ("2026", "03.11.2026", False),
         ("119", "119,00 lei", False),
     ],
@@ -495,6 +505,7 @@ def test_a_scanned_invoice_is_read_from_its_picture(ledger):
         ("VAT 2.10 EUR\nCharged 12.10 EUR", "2.10", "EUR", False),
         ("Date: 28.10.2026\nCharged 49.00 EUR", "28.10", "EUR", False),  # a date
         ("Standard rate 19.00%\nCharged 49.00 EUR", "19.00", "EUR", False),  # a rate
+        ("Standard rate 19.00 %\nCharged 49.00 EUR", "19.00", "EUR", False),
         ("VAT 2.10 EUR\nTotal incl. VAT 12.10 EUR", "12.10", "EUR", True),
     ],
 )

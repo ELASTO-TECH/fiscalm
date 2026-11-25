@@ -31,7 +31,9 @@ from fiscalm.ledger import Ledger
 
 TEXT_LIMIT = 12000  # characters of a document sent: the header and totals are on its first pages
 DOC_TYPES = ("invoice", "receipt", "proforma", "credit_note", "other")
-AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[ .,'\u00a0]\d{3})+|\d+)([.,]\d{2})(?![\d%]|[.,]\d)")  # not a date or rate
+AMOUNT = re.compile(
+    r"(?<![\d.,])(\d{1,3}(?:[ .,'\u00a0]\d{3})+|\d+)([.,]\d{2})(?!\d|[ \t]*%|[.,]\d)"
+)  # not a date or rate
 _TEXT = {"type": "string"}
 SCHEMA = {
     "type": "object",
@@ -203,7 +205,7 @@ def printed_id(token: str, text: str) -> bool:
     for m in re.finditer(rf"(?<![A-Z0-9]){prefix}{body}(?![A-Z0-9]|[ \t]*\d|[.,/-]\d)", text):
         tail = text[: m.start()].rstrip(" \t-")[-4:]  # what stands before it, however far the spacing
         foreign = re.search(r"(?<![A-Z])([A-Z]{2}|CHE)$", tail)  # DE 77777777 is DE77777777, never 77777777
-        runs_into = re.search(r"\d[.,/]?$", tail) or (foreign and foreign[1] != "RO")
+        runs_into = re.search(r"\d[.,/]?$", tail) or (foreign and foreign[1] not in ("RO", "ID"))  # Tax ID: a label
         if not (m.group(0)[0].isdigit() and runs_into):
             return True  # no digit or foreign prefix runs into it, spaced or not
     return False
