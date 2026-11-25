@@ -831,7 +831,7 @@ def _ai_would_refuse(L: Ledger, x: ai_extract.Extraction) -> bool:
     )
 
 
-def _printed(text: str, amount: str, currency: str) -> bool:
+def printed_total(text: str, amount: str, currency: str) -> bool:
     """The amount stands positive on a line of the text in this currency, not on a subtotal, tax or discount line:
     the line's only currency, or none on the line and the document's only one."""
     shown = {_currency(m.group(0)) for m in _CUR.finditer(text)}
@@ -854,7 +854,11 @@ def _agreed_totals(doc: Doc, x: ai_extract.Extraction) -> list[tuple[str, str]] 
     if doc.totals:
         picked = [t for t in doc.totals if t == (x.total, x.currency) and x.currency]  # the rules showed its currency
         return picked if len(picked) == 1 else None
-    return [(x.total, x.currency)] if x.currency and (not doc.text or _printed(doc.text, x.total, x.currency)) else None
+    return (
+        [(x.total, x.currency)]
+        if x.currency and (not doc.text or printed_total(doc.text, x.total, x.currency))
+        else None
+    )
 
 
 def ai_reading(L: Ledger, doc: Doc, data: bytes, *, ask: Callable | None = None) -> Doc | None:

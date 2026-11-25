@@ -20,7 +20,7 @@ from pdf_fake import text_pdf
 from test_issued import _credit, _st, anaf_zip, ubl
 from test_settlement_import import workbook
 
-from fiscalm import ai, cli, history, history_invoices, history_pdf, integrations
+from fiscalm import ai, ai_extract, cli, history, history_invoices, history_pdf, integrations
 from fiscalm.api import lists, state as api
 from fiscalm.bank import statements
 from fiscalm.efactura import inbox as efactura
@@ -694,6 +694,7 @@ FACTURA = ["Factura SB-0099", *HISTORY_TEXT]
         (FACTURA, {"confidence": "low"}),
         (FACTURA, {"seller_tax_id": "RO88888888"}),  # a partner id it doesn't print
         (FACTURA, {"seller_tax_id": "7777"}),  # a fragment of the printed one
+        (FACTURA, {"currency": "EUR"}),  # the document prints lei
         (FACTURA, {"issue_date": "03.11.2026"}),  # a field failing its rule
         (FACTURA + ["Total 120,00 RON"], {}),  # the rules found another total
         (FACTURA + ["Total 120,00 RON", "Total 121,00 RON", "Subtotal 119,00 RON"], {}),  # none of their totals
@@ -716,6 +717,14 @@ def test_history_pdf_read_by_ai_in_sandbox(ledger, monkeypatch, lines):
     row = history.rows(ledger, "NORD")[0]
     got = tuple(row[k] for k in ("direction", "number", "issue_date", "total", "party_tax_id"))
     assert got == ("received", "SB-0099", "2026-11-03", "119.00", "77777777")
+
+
+@pytest.mark.parametrize(
+    ("token", "text", "printed"),
+    [("77777777", "CUI: RO 7777 7777", True), ("7777", "CUI RO7777 7777", False), ("7777", "RO77777777", False)],
+)
+def test_a_partner_id_counts_only_printed_whole(token, text, printed):
+    assert ai_extract.printed_id(token, text) is printed
 
 
 def history_ai(ledger, monkeypatch, fields):
@@ -1161,7 +1170,11 @@ def test_archive_pdf_number_is_never_a_label_and_xml_still_supersedes_it(ledger,
 
 
 @pytest.mark.parametrize("series", [["ABC 0065", "XYZ 0066"], ["Data scadenta 30.09.2026"], ["ABC 0065/2026"]])
-def test_archive_pdf_with_bare_heading_and_no_single_series_stays_in_review(ledger, series):
+def test_archive_pdf_with_bare_heading_and_no_single_series_stays_in_review(ledger, monkeypatch, series):
+    seller = {"seller_name": "Atelier Nord SRL", "seller_tax_id": "RO11111111", "buyer_name": "Firma Exemplu SRL"}
+    history_ai(
+        ledger, monkeypatch, seller | {"buyer_tax_id": "RO77777777", "number": "ABC 0065", "issue_date": "2026-09-12"}
+    )
     assert run(ledger, archive_pdf(FGO_BARE + series)).review == 1
     assert history.rows(ledger, "NORD") == []
 
