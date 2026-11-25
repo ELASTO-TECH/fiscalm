@@ -21,6 +21,8 @@ from fiscalm.api.receipts import directory
 from fiscalm.bank import banking_days, statements
 from fiscalm.bank.camt import MAX_XML, parse_camt
 from fiscalm.ledger import Ledger, finance_home
+from fiscalm.pdftext import pdf_text
+from fiscalm.storage import read_file
 
 
 def identity(data: bytes, csv_account: tuple[str, dict] | None = None) -> str:
@@ -318,6 +320,7 @@ def refuse_unchained(L: Ledger, st: statements.Statement) -> None:
     for iban, sections in _by_account(st).items():
         first, last = sections[0], sections[-1]
         if first[0].day != 1:
+            _refuse_booked(L, st.company, iban, first[0].replace(day=1), first[0])
             before = _stored_sections(L, st.company, first[0].replace(day=1) - timedelta(days=1), iban)
             if before:
                 _refuse_break(before[-1][1], first[1])
@@ -344,7 +347,7 @@ def _stored_sections(L: Ledger, company: str, day: date, iban: str) -> list[tupl
         named = json.loads(doc["accounts"]) if doc["accounts"] else None
         if str(doc["path"]).endswith(".csv") or (named is not None and iban not in named):
             continue
-        sections = _by_account(_read_stored(doc, company)).get(iban, [])
+        sections = _by_account(_read_evidence(L, doc, company)).get(iban, [])
         if named is not None and not sections:
             raise StoredStatementUnavailable(
                 "A stored statement of a neighbouring month does not show this account; restore it and retry"
@@ -353,7 +356,42 @@ def _stored_sections(L: Ledger, company: str, day: date, iban: str) -> list[tupl
     return sorted(found, key=lambda s: s[0])
 
 
+def _read_evidence(L: Ledger, doc, company: str) -> statements.Statement:
+    """A stored statement read as evidence: inside the company's own storage, on the opened file, its bytes the ones
+    stored (the decrypted copy's digest for a PDF), the firm's CUI in a PDF's header."""
+    root = finance_home().resolve() / company
+    data = read_file(doc["path"], [root], 32 * 1024 * 1024)
+    pdf = bool(data) and data[1].startswith(b"%PDF-")
+    expected = L.get_meta("statement_stored_sha:" + doc["sha"]) if pdf else doc["sha"]
+    if not data or not expected or identity(data[1]) != expected:
+        raise StoredStatementUnavailable("Cannot read a stored statement; restore the stored document and retry")
+    if not pdf:
+        return parse_structured(data[1], company)[0]
+    try:
+        text = pdf_text(data[1])
+    except RuntimeError as exc:
+        raise StoredStatementUnavailable(
+            "Cannot read a stored statement; restore the stored document and retry"
+        ) from exc
+    if not statements.names_cui(text, companies.get(company, L=L).cui):
+        raise StoredStatementUnavailable("Cannot read a stored statement; restore the stored document and retry")
+    return statements.parse_text(text, company)
+
+
+def _refuse_booked(L: Ledger, company: str, iban: str, lo: date, hi: date) -> None:
+    """No line already on record for the account (a CSV, the bank feed) is booked on the days a statement skips."""
+    if L.db.execute(
+        "SELECT 1 FROM statement_txs WHERE company=? AND iban=? AND day>=? AND day<?",
+        (company, iban, lo.isoformat(), hi.isoformat()),
+    ).fetchone():
+        raise statements.PartialMonth("Statement", lo.replace(day=1))
+
+
 def _refuse_break(before: statements.Account, after: statements.Account) -> None:
+    """`after`, starting after its month's 1st, opens where `before` closed, on the eve of `after`'s month."""
+    month = (after.period[0] if after.period else after.closing_day).replace(day=1)
+    if before.closing_day != month - timedelta(days=1):
+        raise statements.StatementError("Statement balances do not chain with the next or previous month")
     if before.closing is None or not after.trustworthy:
         raise statements.StatementError(
             "Statement starts after the 1st and a neighbouring month's balance is not proven"

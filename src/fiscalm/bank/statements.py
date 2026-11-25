@@ -450,6 +450,8 @@ def parse_text(text: str, company: str) -> Statement:
                     in_table = False
                 continue
             close()
+            if cur_date is None:
+                raise StatementError("PDF line without a booking date; download a complete statement")
             a1_end = row.end("a1")
             direction = "debit" if abs(a1_end - debit_end) <= abs(a1_end - credit_end) else "credit"
             cur = Tx(
@@ -472,6 +474,8 @@ def parse_text(text: str, company: str) -> Statement:
             cur_lines.append(s)
     close()
     _pdf_trust(accounts, opening, final)
+    if periods := [a.period for a in accounts if a.period]:  # the sections' days, not a period printed elsewhere
+        period_start, period_end = min(p[0] for p in periods), max(p[1] for p in periods)
     return Statement(
         company=company, period_start=period_start, period_end=period_end, accounts=accounts, one_period=one_period
     )

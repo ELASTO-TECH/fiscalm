@@ -355,18 +355,35 @@ def test_a_neighbouring_month_on_record_for_the_account_must_show_where_it_close
     """Review: April is on record for RON and EUR, but its file shows only EUR: May's chain can't be checked."""
     nord = companies.get("NORD")
     eur = [("EUR", nord.ibans["EUR"], Decimal("90.00"), [("01/04/2022", "A-EUR", Decimal("10.00"))])]
-    april = bt_statement(tmp_path / "april.pdf", nord.cui, ("01/04/2022", "30/04/2022"), eur, password=None)
+    folder = recon.month_dir("NORD", "2022-04") / "extrase"
+    folder.mkdir(parents=True)
+    april = bt_statement(folder / "april.pdf", nord.cui, ("01/04/2022", "30/04/2022"), eur, password=None)
     ledger.add_document("a" * 64, "NORD", "2022-04", "statement", str(april), accounts=list(nord.ibans.values()))
+    ledger.set_meta("statement_stored_sha:" + "a" * 64, recon.sha256(april))
     (result,) = recon.ingest_files(ledger, [month_file(tmp_path, *MAY)], password_lookup=lambda co: "synthetic")
     assert result["status"] == "error" and "does not show this account" in result["errors"][0]
 
 
-def month_file(folder, lo: str, hi: str, opening: str = "100.00", *first):
+def test_a_neighbouring_month_counts_only_as_its_stored_bytes(ledger, tmp_path):
+    """Review: April's stored copy replaced by another file with the same balance proves nothing for May."""
+    stored = recon.ingest_files(
+        ledger, [month_file(tmp_path, "01/04/2022", "30/04/2022", "90.00")], password_lookup=lambda co: "synthetic"
+    )
+    assert stored[0]["status"] == "added"
+    (doc,) = ledger.documents(kind="statement")
+    (tmp_path / "other").mkdir()
+    other = month_file(tmp_path / "other", "01/04/2022", "30/04/2022", "90.00", password=None)  # same balances
+    Path(doc["path"]).write_bytes(other.read_bytes().replace(b"M-RON", b"X-RON"))
+    (result,) = recon.ingest_files(ledger, [month_file(tmp_path, *MAY)], password_lookup=lambda co: "synthetic")
+    assert result["status"] == "error" and "restore" in result["errors"][0]
+
+
+def month_file(folder, lo: str, hi: str, opening: str = "100.00", *first, password="synthetic"):
     """NORD's BT PDF for lo..hi, each section under its own period: `first` sections, then RON and EUR, each opening at
     `opening` and crediting 10.00 on `lo`."""
     nord = companies.get("NORD")
     own = [(c, nord.ibans[c], Decimal(opening), [(lo, f"M-{c}", Decimal("10.00"))], (lo, hi)) for c in ("RON", "EUR")]
-    return bt_statement(folder / f"extras-{lo.replace('/', '')}.pdf", nord.cui, (lo, hi), [*first, *own])
+    return bt_statement(folder / f"extras-{lo.replace('/', '')}.pdf", nord.cui, (lo, hi), [*first, *own], password)
 
 
 def usd(opening: str, lo: str = "10/10/2026"):

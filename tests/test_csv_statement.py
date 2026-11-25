@@ -355,6 +355,19 @@ def test_a_csv_overlaps_a_pdf_section_by_section(ledger, tmp_path):
     assert len(ledger.documents(kind="statement")) == 1
 
 
+def test_a_month_starting_after_a_day_a_csv_has_movements_on_is_partial(ledger, tmp_path):
+    """Review: 1 May 2022 is a Sunday, but a CSV already shows a RON line booked that day: a PDF from the 2nd leaves
+    it out."""
+    columns(RON)
+    sunday = SIGNED.replace(b"02.10.2026", b"01.05.2022").replace(b"15.10.2026", b"01.05.2022").replace(b"R2", b"R3")
+    assert su.accept(ledger, "NORD", "", sunday, "text/csv", rid(RON))["status"] == "added"
+    nord, may = companies.get("NORD"), ("02/05/2022", "31/05/2022")
+    sections = [(c, i, Decimal("100.00"), [], may) for c, i in (("RON", RON), ("EUR", EUR))]
+    pdf = bt_statement(tmp_path / "may.pdf", nord.cui, may, sections)
+    (r,) = recon.ingest_statements(ledger, [pdf], finance_home(), lambda co: "synthetic")
+    assert r["status"] == "refused" and r["partial"] == "2022-05-01"
+
+
 def test_a_csv_never_stands_for_the_months_statement(ledger):
     columns(RON)
     su.accept(ledger, "NORD", "", SIGNED, "text/csv", rid(RON))
