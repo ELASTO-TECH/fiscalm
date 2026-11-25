@@ -572,7 +572,42 @@ def test_short_card_descriptors_match_but_only_near_the_invoice_date(ledger, hom
         _tx("931.90", date(2026, 9, 9), desc="Plata la POS non-BT cu card VISA EPOS PayU*valea.example"),
     ]
     assert efactura.match_statement(ledger, st) == []  # each fits by its short descriptor: both wait for the user
-    assert len(ledger.ambiguous("NORD")) == 2
+    assert len(ledger.ambiguous("NORD")) == 3  # and the late one too, by its amount alone
+
+
+@pytest.mark.parametrize(
+    "invoices,debit,offered",
+    [
+        (
+            {"3001": "56.27"},
+            _tx("56.27", date(2026, 10, 20), desc="Plata la POS EPOS SHOPX7K2"),
+            ["3001"],
+        ),  # card, same day
+        ({"3001": "11.22"}, _tx("11.22", date(2026, 11, 4), desc="Plata clienti speciali VDF123"), ["3001"]),  # D+15
+        (
+            {"3001": "11.22", "3002": "11.22"},
+            _tx("11.22", date(2026, 10, 21), desc="Debit direct VDF123"),
+            ["3001", "3002"],
+        ),
+        ({"3001": "11.22"}, _tx("11.22", date(2026, 12, 20), desc="Debit direct VDF123"), []),  # two months later
+        ({"3001": "11.22"}, _tx("11.22", date(2026, 10, 21), desc="Plata BUGETUL DE STAT"), []),  # a tax: never
+    ],
+)
+def test_a_debit_fitting_invoices_by_amount_alone_waits_for_a_person(
+    ledger, home, sec, monkeypatch, invoices, debit, offered
+):
+    """Nothing in the bank's text names the supplier: no matcher settles it; the invoices of exactly its amount are
+    offered as a Plată de lămurit, and the person's pick settles the one chosen."""
+    _stored(ledger, monkeypatch, **{m: ubl(total=v, number=f"N{m}", issue="2026-10-20") for m, v in invoices.items()})
+    assert efactura.match_statement(ledger, _debit_st(debit)) == [] and debit_key(debit) not in ledger.used_txs()
+    recorded = ledger.ambiguous("NORD")
+    assert [sorted(c[1] for c in json.loads(a["candidates"])) for a in recorded] == ([offered] if offered else [])
+    if offered:
+        assert efactura.resolve_debit(ledger, "NORD", debit_key(debit), offered[0]) == ("efactura", offered[0])
+        assert ledger.efactura(offered[0])["paid_tx"] == debit_key(debit) and not ledger.ambiguous("NORD")
+
+
+debit_key = efactura.tx_key
 
 
 def test_eur_invoice_matches_original_amount(ledger, home, sec, monkeypatch):

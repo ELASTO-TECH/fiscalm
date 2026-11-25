@@ -27,6 +27,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from functools import cache
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -793,11 +794,7 @@ def rivals(L: Ledger, company: str):
     from fiscalm import history
 
     old = history.rivals(L, company, "received")
-    have = covered(L, company, "efactura")
-    rows = [r for r in [*L.efactura_rows(status=OPEN, company=company), *awaiting(L, company)] if not r["parse_error"]]
-    credits = credited(L, company)
-    rows = net_invoices(L, rows)
-    invoices = [r for r in rows if r["message_id"] not in have and r["message_id"] not in credits]
+    invoices, rows, have, credits = _open_invoices(L, company)
     partial = [
         dict(r) | {"total": f"{Decimal(r['total']) - have.get(r['message_id'], Decimal(0)):.2f}"}
         for r in rows
@@ -823,6 +820,46 @@ def rivals(L: Ledger, company: str):
         return {key for key, no, fits in cands if (not names or no in names) and fits(t)}
 
     return of
+
+
+def _open_invoices(L: Ledger, company: str):
+    """The received invoices still to pay in full (open or marked), and what rivals needs to see the rest."""
+    have = covered(L, company, "efactura")
+    rows = [r for r in [*L.efactura_rows(status=OPEN, company=company), *awaiting(L, company)] if not r["parse_error"]]
+    credits = credited(L, company)
+    rows = net_invoices(L, rows)
+    invoices = [r for r in rows if r["message_id"] not in have and r["message_id"] not in credits]
+    return invoices, rows, have, credits
+
+
+AMOUNT_DAYS = 45  # a debit that fits an invoice by its amount alone is suggested only this close after it
+
+
+def candidates(L: Ledger, company: str) -> Callable[[statements.Tx], set[tuple[str, str]]]:
+    """What a person may pick for a debit (Plată de lămurit): its rivals, or, when it fits none, the invoices still
+    to pay whose exact amount it has, dated from 5 days after to AMOUNT_DAYS before it. An amount alone proves
+    nothing: no matcher settles by it (they use rivals); a person confirms the one or chooses among several."""
+    fit = rivals(L, company)
+
+    @cache
+    def known() -> tuple:  # read only once a debit fits no rival
+        return remembered_advance(L, company), _open_invoices(L, company)[0]
+
+    def alone(t: statements.Tx) -> set[tuple[str, str]]:
+        statements.classify_tx(t)
+        if t.category in (statements.TAX, statements.OWNER_ADVANCE) or not L.card_allows(company, t.card_last4):
+            return set()
+        advance, invoices = known()
+        if advance(t):
+            return set()
+        return {
+            ("efactura", r["message_id"])
+            for r in invoices
+            if _amount_matches(t, Decimal(r["total"]), r["currency"])
+            and -5 <= (t.date - date.fromisoformat(r["issue_date"])).days <= AMOUNT_DAYS
+        }
+
+    return lambda t: fit(t) or alone(t)
 
 
 def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
@@ -894,15 +931,18 @@ def _settle_debits(L: Ledger, st: statements.Statement) -> list[str]:
 
 def note_ambiguous(L: Ledger, st: statements.Statement) -> None:
     """After the matchers ran (every sync matches the statement again): each free debit of the statement that
-    still fits several candidates, or one invoice by the supplier's name alone (_named_only), is recorded, with them;
-    one that fits one or none now, or that settled something since, is dropped. The user sees it as "Plată de
-    lămurit" and picks the invoice (resolve_debit)."""
-    fit, used, unconfirmed = rivals(L, st.company), L.used_txs(), _named_only(L, st.company)
+    still fits several candidates, one invoice by the supplier's name alone (_named_only), or, fitting none, invoices
+    by their amount alone (candidates), is recorded, with them; one that settled something since, or fits nothing, is
+    dropped. The user sees it as "Plată de lămurit" and picks the invoice (resolve_debit)."""
+    fit, cands, used = rivals(L, st.company), candidates(L, st.company), L.used_txs()
+    unconfirmed = _named_only(L, st.company)
     L.drop_ambiguous()
     for t in st.settlement_txs:
         key = tx_key(t)
-        left = fit(t) if (t.direction == "debit" and key not in used and not statements.pays_nothing(t)) else set()
-        if len(left) > 1 or unconfirmed(t, left):
+        free = t.direction == "debit" and key not in used and not statements.pays_nothing(t)
+        rival = fit(t) if free else set()
+        left = rival or (cands(t) if free else set())
+        if len(left) > 1 or unconfirmed(t, left) or (left and not rival):
             L.set_ambiguous(key, st.company, t.to_dict(), [list(c) for c in left])
         else:
             L.drop_ambiguous(key)
@@ -924,12 +964,12 @@ def resolve_debit(L: Ledger, co: str, key: str, target: str) -> tuple[str, str]:
     if not pick or pick[0] in ("history", "partial"):  # before the firm's start, or paid in part: never settled here
         raise ResolveError("not one of the debit's candidates")
     t = statements.Tx.from_dict(json.loads(rec["tx"]))
-    fits = [] if key in L.used_txs() or statements.pays_nothing(t) else rivals(L, co)(t)
+    fits = [] if key in L.used_txs() or statements.pays_nothing(t) else candidates(L, co)(t)
     if pick not in fits:
         if not any(tuple(c) in fits for c in json.loads(rec["candidates"])):
             L.drop_ambiguous(key)  # nothing left to choose; the next match records it again if it fits several
         raise ResolveError("the debit or the candidate changed since; look again")
-    note = f"statement {t.date} REF {t.ref}, chosen by the user (it fit several invoices)"
+    note = f"statement {t.date} REF {t.ref}, chosen by the user (no single invoice proven by the bank's text)"
     if pick[0] == "payment":
         ok = L.mark_paid(pick[1], note, key)
     elif pick[1] in {r["message_id"] for r in bon_paid(L, co)}:
