@@ -375,11 +375,11 @@ def _refused(L: Ledger, co: str) -> tuple[list[dict], efactura.PaymentFacts]:
 def _approval(L: Ledger, r, facts: efactura.PaymentFacts, eligible: bool) -> dict:
     """`can_approve`, and `accounts`: the invoice's IBANs a person picks from when no evidence decides which one is paid
     (efactura.payee_choices, never one of the firms' own accounts), each named by its position in the invoice, its
-    bank code and the shortest ending (4 characters or more) that tells them apart; never the whole IBAN."""
+    bank code and the shortest ending (4 characters or more) that, with the bank, tells them apart; never the whole IBAN."""
     refusal = efactura.payment_refusal(L, r, facts, unfiled=True) if eligible else None
     choices = efactura.payee_choices(r, facts) if refusal and refusal.code == "several_ibans" else []
     choices = [i for i in choices if not companies.company_by_iban(i)] if r["status"] == "open" else []
-    n = next(n for n in range(4, 35) if len({i[-n:] for i in choices}) == len(choices))
+    n = next(n for n in range(4, 35) if len({(i[4:8], i[-n:]) for i in choices}) == len(choices))
     ibans = json.loads(r["ibans"] or "[]")
     accounts = [{"index": k, "bank": i[4:8], "ending": i[-n:]} for k, i in enumerate(ibans) if i in choices]
     return {"accounts": accounts, "can_approve": eligible and (refusal is None or bool(accounts))}

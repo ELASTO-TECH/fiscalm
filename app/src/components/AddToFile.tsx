@@ -44,7 +44,8 @@ export function AddToFile({ s, invoices, left = [], onDone }: { s: State; invoic
   // An invoice listing several IBANs that no evidence decides: the person picks the account; fiscalm remembers it once paid.
   const [picks, setPicks] = useState<Record<string, number>>({});
   const asked = invoices.filter((r) => r.accounts.length > 0);
-  const unpicked = asked.some((r) => picks[r.id] === undefined);
+  // A pick must be one of the accounts offered now: a refresh that narrows the list asks again.
+  const unpicked = asked.some((r) => !r.accounts.some((a) => a.index === picks[r.id]));
   // A file chosen and then imported or deleted elsewhere is no longer offered: nothing is chosen until the person picks again.
   const chosen = files.find((f) => f.id === choice);
   const fresh = choice === "new" || !files.length;

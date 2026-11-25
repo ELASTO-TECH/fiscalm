@@ -421,6 +421,23 @@ describe("Received invoices and payment confirmation", () => {
     await waitFor(() => expect(api.posts().map((c) => (c.body as { accounts?: unknown }).accounts)).toEqual([{ "102": 2 }]));
   });
 
+  it("asks again when a refresh no longer offers the picked account among several", async () => {
+    at("?co=NORD&tab=cheltuieli&inv=102");
+    let s = fixture();
+    const ask = [{ index: 0, bank: "BTRL", ending: "2222" }, { index: 1, bank: "INGB", ending: "1111" }, { index: 2, bank: "RNCB", ending: "3333" }];
+    s.invoices = s.invoices.map((r) => r.id === "102" ? { ...r, accounts: ask } : r);
+    const api = renderApp({ state: () => json(s) });
+    await userEvent.click(within(await screen.findByRole("dialog", { busy: false })).getByRole("button", { name: "Pune în fișier" }));
+    const dialog = await screen.findByRole("dialog", { name: /^(Pune în fișier|Fișier nou)$/ });
+    await userEvent.click(within(dialog).getByRole("radio", { name: "RNCB •••• 3333" }));
+    s = structuredClone(s);
+    s.invoices = s.invoices.map((r) => r.id === "102" ? { ...r, accounts: ask.slice(0, 2) } : r);
+    act(() => becomeVisible());
+    await waitFor(() => expect(within(dialog).queryByRole("radio", { name: "RNCB •••• 3333" })).toBeNull());
+    expect(within(dialog).getByRole("button", { name: "Pune în fișier" })).toBeDisabled();
+    expect(api.posts()).toEqual([]);
+  });
+
   it.each([["102", "RON"], ["103", "EUR"]])("offers a payment file only for lei; marking %s (%s) is always there", async (id, currency) => {
     at(`?co=NORD&tab=cheltuieli&inv=${id}`);
     renderApp();
