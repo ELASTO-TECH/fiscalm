@@ -695,6 +695,15 @@ FACTURA = ["Factura SB-0099", *HISTORY_TEXT]
         (FACTURA, {"seller_tax_id": "RO88888888"}),  # a partner id it doesn't print
         (FACTURA, {"seller_tax_id": "7777"}),  # a fragment of the printed one
         (FACTURA, {"currency": "EUR"}),  # the document prints lei
+        (
+            [
+                "Factura SB-0099",
+                "Bill to: Firma Exemplu SRL RO77777777",
+                "Ship to: Atelier Nord SRL",
+                *HISTORY_TEXT[2:],
+            ],
+            {},
+        ),
         (FACTURA, {"issue_date": "03.11.2026"}),  # a field failing its rule
         (FACTURA + ["Total 120,00 RON"], {}),  # the rules found another total
         (FACTURA + ["Total 120,00 RON", "Total 121,00 RON", "Subtotal 119,00 RON"], {}),  # none of their totals
