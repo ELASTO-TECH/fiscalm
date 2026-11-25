@@ -1343,9 +1343,12 @@ class PaymentFacts:
         return self._proved[(r["supplier_cui"], r["company"])]
 
 
-def check_payment(L: Ledger, r: dict, facts: PaymentFacts | None = None, *, unfiled: bool = False) -> str:
+def check_payment(
+    L: Ledger, r: dict, facts: PaymentFacts | None = None, *, unfiled: bool = False, account: str | None = None
+) -> str:
     """Validate a stored invoice for bank-file preparation without building a payment row; returns the IBAN to pay
-    (payee_iban). `facts` only batches the reads (PaymentFacts); without it they are read for this invoice."""
+    (payee_iban, held to `account` when given; an unfiled queued payment is held to the account it already pays).
+    `facts` only batches the reads (PaymentFacts); without it they are read for this invoice."""
     facts = facts or PaymentFacts(L)
     eligible = r["status"] == OPEN or (unfiled and r["status"] == "linked" and facts.unfiled(r))
     if not eligible or r["parse_error"]:
@@ -1364,7 +1367,10 @@ def check_payment(L: Ledger, r: dict, facts: PaymentFacts | None = None, *, unfi
     blocking = [i for i in json.loads(r["issues"] or "[]") if not i.startswith(INFORMATIONAL_ISSUES)]
     if blocking:
         raise ApproveError("invoice_issues", "invoice has issues: " + "; ".join(blocking))
-    return payee_iban(r, facts)
+    if account is None and r["status"] == "linked":
+        queued = L.payment(r["item_id"])
+        account = queued["payee_iban"] if queued else None
+    return payee_iban(r, facts, account)
 
 
 # Issues parse_ubl notes that never decide who is paid or how much: a due date it could not read, or an extra account
@@ -1372,10 +1378,23 @@ def check_payment(L: Ledger, r: dict, facts: PaymentFacts | None = None, *, unfi
 INFORMATIONAL_ISSUES = ("bad due date ", "payee account ")
 
 
-def payee_iban(r, facts: PaymentFacts) -> str:
-    """The one account of the invoice's own valid Romanian IBANs to pay: the only one; else the only one already proved
-    for this supplier (a statement or a settled payment-file payment); else the only commercial one beside Treasury
-    (TREZ) accounts. Several left: refused, nothing is guessed."""
+def payee_iban(r, facts: PaymentFacts, account: str | None = None) -> str:
+    """The one account payee_choices leaves. Several left: refused, nothing is guessed. `account` (the IBAN a payment
+    already pays, or was built with) must be that one: when proof arrived meanwhile and changed it, refused."""
+    ibans = payee_choices(r, facts)
+    if len(ibans) > 1:
+        raise ApproveError("several_ibans", "the invoice lists several IBANs; pay it by hand after checking which one")
+    if account is not None and account != ibans[0]:
+        raise ApproveError("several_ibans", "the account to pay changed; check the invoice again")
+    if companies.company_by_iban(ibans[0]):
+        raise ApproveError("own_iban", "payee IBAN is one of our own accounts")
+    return ibans[0]
+
+
+def payee_choices(r, facts: PaymentFacts) -> list[str]:
+    """Of the invoice's own valid Romanian IBANs: the only one; else the only one already proved for this supplier (a
+    statement or a settled payment-file payment); else the only commercial one beside Treasury (TREZ) accounts; else
+    all of them. Proof only breaks a tie between accounts the supplier itself signed in this invoice."""
     ibans = [i for i in json.loads(r["ibans"] or "[]") if i.startswith("RO") and iban_valid(i)]
     if not ibans:
         raise ApproveError("no_valid_iban", "no valid Romanian IBAN in the invoice")
@@ -1383,25 +1402,22 @@ def payee_iban(r, facts: PaymentFacts) -> str:
         proved = [i for i in ibans if i in facts.proved(r)]
         commercial = [i for i in ibans if i[4:8] != "TREZ"]
         ibans = proved if len(proved) == 1 else commercial if len(commercial) == 1 else ibans
-    if len(ibans) > 1:
-        raise ApproveError("several_ibans", "the invoice lists several IBANs; pay it by hand after checking which one")
-    if companies.company_by_iban(ibans[0]):
-        raise ApproveError("own_iban", "payee IBAN is one of our own accounts")
-    return ibans[0]
+    return ibans
 
 
-def payment_item(L: Ledger, message_id: str, *, unfiled: bool = False) -> PaymentItem:
+def payment_item(L: Ledger, message_id: str, *, unfiled: bool = False, account: str | None = None) -> PaymentItem:
     """A payment-file row built only from the parsed, ANAF-signed XML. Refused when anything is unsure."""
     r = L.efactura(message_id)
     if not r:
         raise ApproveError("unknown_invoice", "unknown e-Factura message")
-    iban = check_payment(L, r, unfiled=unfiled)
+    iban = check_payment(L, r, unfiled=unfiled, account=account)
     return PaymentItem(
         company=r["company"],
         kind="efactura",
         payee_name=r["supplier_name"],
         payee_iban=iban,
-        payee_bic=(r["bic"] or "") if iban == r["supplier_iban"] else "",  # the XML's BIC belongs to its first IBAN
+        # The XML's BIC is not tied to one of several accounts (parse_ubl keeps the first BIC it meets): only with one.
+        payee_bic=(r["bic"] or "") if len(json.loads(r["ibans"] or "[]")) == 1 else "",
         payee_fiscal_code="",
         amount=Decimal(r["total"]),
         details=f"Plata factura {r['number']} din {date.fromisoformat(r['issue_date']):%d.%m.%Y}",

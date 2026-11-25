@@ -365,19 +365,24 @@ def _refused(L: Ledger, co: str) -> tuple[list[dict], efactura.PaymentFacts]:
         refused.append(
             {
                 **x,
-                "iban_last4": (row["supplier_iban"] or "")[-4:],
+                "iban_last4": (_payee(row, facts) or "")[-4:],
                 "supplier": row["supplier_name"],
             }
         )
     return refused, facts
 
 
+def _payee(r, facts: efactura.PaymentFacts) -> str:
+    """The account fiscalm would pay for this invoice (efactura.payee_iban), else the XML's first."""
+    try:
+        return efactura.payee_iban(r, facts)
+    except efactura.ApproveError:
+        return r["supplier_iban"]
+
+
 def _previous_ibans(r, facts: efactura.PaymentFacts) -> list[str]:
     """Last 4 digits of the supplier's proved accounts when the account fiscalm would pay is not one of them."""
-    try:
-        payee = efactura.payee_iban(r, facts)
-    except efactura.ApproveError:
-        payee = r["supplier_iban"]
+    payee = _payee(r, facts)
     proved = facts.proved(r)
     return sorted(i[-4:] for i in proved if i != payee) if payee and payee not in proved else []
 

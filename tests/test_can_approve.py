@@ -152,12 +152,34 @@ def test_an_invoice_with_several_ibans_pays_the_one_account_it_can_prove(
     _stored(ledger, monkeypatch, **{"3001": ubl()})
     _set(ledger, "ibans=?,supplier_iban=?", json.dumps(ibans), ibans[0])
     if proved:
-        ledger.db.execute(
-            "INSERT INTO supplier_ibans SELECT company,supplier_cui,?,'statement:x' FROM efactura", (proved,)
-        )
-        ledger.db.commit()
+        _prove(ledger, proved)
     refusal = efactura.payment_refusal(ledger, ledger.efactura("3001"))
     assert (refusal.code if refusal else efactura.payment_item(ledger, "3001").payee_iban) == pays
+    assert refusal or efactura.payment_item(ledger, "3001").payee_bic == ""  # the XML's BIC is not tied to one of them
+
+
+def _prove(ledger, iban):
+    ledger.db.execute(
+        "INSERT OR IGNORE INTO supplier_ibans SELECT company,supplier_cui,?,'statement:x' FROM efactura", (iban,)
+    )
+    ledger.db.commit()
+
+
+def test_proof_arriving_after_the_account_was_chosen_refuses_instead_of_paying_the_old_one(ledger, home, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(), "3002": ubl(number="X2")})
+    for mid in ("3001", "3002"):
+        _set(ledger, "ibans=?,supplier_iban=?", json.dumps([TREZ_IBAN, SUPPLIER_IBAN]), TREZ_IBAN, mid=mid)
+    queued = efactura.approve(ledger, "3001", origin="person")["item_id"]  # unfiled, paying the commercial account
+    item = efactura.payment_item(ledger, "3002")  # read before the writer lock
+    ledger.set_meta("efactura_autopay_refused:3002", "stored before")
+    assert api.state(ledger, "NORD")["refused"][0]["iban_last4"] == SUPPLIER_IBAN[-4:]  # the account it would pay
+    _prove(ledger, TREZ_IBAN)
+    with pytest.raises(efactura.ApproveError):
+        ledger.queue_efactura(item, "3002", "person")
+    assert ledger.efactura("3002")["status"] == "open"
+    assert ledger.payment(queued)["payee_iban"] == SUPPLIER_IBAN
+    assert efactura.payment_refusal(ledger, ledger.efactura("3001"), unfiled=True).code == "several_ibans"
+    assert _can_approve(ledger) == (False, False)
 
 
 @pytest.mark.parametrize(("issue", "blocks"), [("bad due date '2026-13-01'", False), ("buyer CUI 5 is not NORD", True)])

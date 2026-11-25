@@ -1920,9 +1920,8 @@ class Ledger:
                 or db.execute("SELECT 1 FROM tx_link_items WHERE item=?", ("efactura " + message_id,)).fetchone()
             ):
                 return None
-            payment_item(
-                self, message_id
-            )  # Re-check account trust while holding the write lock (including revocations).
+            # Re-check account trust while holding the write lock (including revocations), for the account it pays.
+            payment_item(self, message_id, account=item.payee_iban)
             if not db.execute(
                 "UPDATE efactura SET status='linked', item_id=?, paid_note=? WHERE message_id=? AND status='open'",
                 (item.item_id, f"added to the payment file by {AUTHORS[origin]}", message_id),
