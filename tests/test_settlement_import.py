@@ -98,7 +98,8 @@ def test_xlsx_sheets_with_one_header_read_as_one_table():
             sheet = f"<worksheet {NS}><sheetData>{{}}</sheetData></worksheet>"
             z.writestr("xl/worksheets/sheet1.xml", sheet.format(cells(header, ["T", "1", "0"])))
             z.writestr(
-                "xl/_rels/workbook.xml.rels", rels.format(f'<Relationship Type="x/worksheet" Target="{target}"/>')
+                "xl/_rels/workbook.xml.rels",
+                rels.format(f'<Relationship Id="rId9" Type="x/worksheet" Target="{target}"/>'),
             )
             if extra:
                 z.writestr("xl/" + target, sheet.format(extra))
@@ -132,9 +133,36 @@ def test_xlsx_sheets_with_one_header_read_as_one_table():
                     else info.filename
                 )
                 z.writestr(name, body.replace(old, new) if name.endswith("sheet2.xml") else body)
-            z.writestr("_rels/.rels", rels.format('<Relationship Type="x/officeDocument" Target="xl/workbook.xml"/>'))
+            z.writestr(
+                "_rels/.rels", rels.format('<Relationship Id="rId1" Type="x/officeDocument" Target="xl/workbook.xml"/>')
+            )
         with pytest.raises(ReportError):
             table(broken.getvalue(), "xlsx")
+
+    def variant(**parts):  # `both` with parts replaced or added (None drops one)
+        out = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(both)) as src, zipfile.ZipFile(out, "w") as z:
+            files = {n: src.read(n) for n in src.namelist()} | parts
+            for name, body in files.items():
+                if body is not None:
+                    z.writestr(name, body)
+        return out.getvalue()
+
+    refunds = f"<worksheet {NS}><sheetData>{cells(['Gross'], ['-5.00'])}</sheetData></worksheet>".encode()
+    twice = rels.format(
+        '<Relationship Id="rId1" Type="x/worksheet" Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId1" Type="x/worksheet" Target="worksheets/sheet2.xml"/>'
+    )
+    strict = both_book = zipfile.ZipFile(io.BytesIO(both)).read("xl/workbook.xml")
+    strict = both_book.replace(NS.split('"')[1].encode(), b"http://purl.oclc.org/ooxml/spreadsheetml/main")
+    for parts in (
+        {"xl/_rels/workbook.xml.rels": twice.encode()},  # one id twice: a sheet could be dropped
+        {"xl/workbook.xml": strict},  # another dialect: its sheet list can't be read
+        {"xl/worksheets/sub/refunds.xml": refunds},  # nested under xl/worksheets/
+        {"xl/worksheets/SHEET3.XML": refunds},  # upper case
+    ):
+        with pytest.raises(ReportError):
+            table(variant(**parts), "xlsx")
 
 
 @pytest.mark.parametrize("data", [b"a,a\n1,2", b"a,b\n1", b"a,b\n1,2,3"])

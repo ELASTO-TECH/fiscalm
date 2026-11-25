@@ -283,8 +283,8 @@ def verify(L: Ledger, stored: sqlite3.Row, st: statements.Statement) -> tuple[st
     for n, line in enumerate(r["lines"], 1):
         if line.get("adjustment"):
             raise SettlementError(f"line_{n}_adjustment")  # a refund or adjustment is checked by a person
-    gross = sum((money(x["gross"], signed=True) for x in r["lines"]), Decimal(0))
-    fee = sum((money(x["fee"], signed=True) for x in r["lines"]), Decimal(0))
+    gross = sum((money(x["gross"]) for x in r["lines"]), Decimal(0))  # no adjustment line left: all positive
+    fee = sum((money(x["fee"]) for x in r["lines"]), Decimal(0))
     candidates = [
         t
         for t in st.settlement_txs

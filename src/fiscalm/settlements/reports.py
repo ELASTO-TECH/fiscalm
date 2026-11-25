@@ -137,32 +137,42 @@ _RELS = "{http://schemas.openxmlformats.org/package/2006/relationships}Relations
 _RID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 
 
+def _relationships(z: zipfile.ZipFile, name: str) -> list[tuple[str, str, str]]:
+    """(id, type, target) of a relationships part, read strictly: its own root, and every id present and unique."""
+    root = _xml(z.read(name))
+    rels = [(r.get("Id") or "", r.get("Type", ""), r.get("Target", "")) for r in root.iter(_RELS)]
+    if root.tag != _RELS + "s" or any(not i for i, _, _ in rels) or len({i for i, _, _ in rels}) != len(rels):
+        raise ReportError("Unreadable worksheet")
+    return rels
+
+
 def _worksheets(z: zipfile.ZipFile) -> list[str]:
-    """Every worksheet of the workbook, none left unread: each sheet the workbook declares must resolve through its
-    relationships to a part that is there (a chart sheet holds no lines), and every other worksheet part named by a
-    relationship or kept in xl/worksheets/ is read too."""
+    """Every worksheet of the workbook, none left unread. Any manifest present is read strictly: the package's one
+    office document is xl/workbook.xml and is there; the workbook lists its sheets, each resolving through the
+    workbook relationships to a part that is there (a chart sheet holds no lines). Every worksheet relationship and
+    every part under xl/worksheets/ (any depth or case) is read too."""
     names = set(z.namelist())
-    if "_rels/.rels" in names and any(
-        r.get("Type", "").endswith("/officeDocument")
-        and (r.get("Target", "").lstrip("/") != "xl/workbook.xml" or "xl/workbook.xml" not in names)
-        for r in _xml(z.read("_rels/.rels")).iter(_RELS)
-    ):
-        raise ReportError("Unreadable worksheet")  # the workbook that lists the sheets is not there
+    if "_rels/.rels" in names:
+        office = [t.lstrip("/") for _, kind, t in _relationships(z, "_rels/.rels") if kind.endswith("/officeDocument")]
+        if office != ["xl/workbook.xml"] or "xl/workbook.xml" not in names:
+            raise ReportError("Unreadable worksheet")  # the workbook that lists the sheets is not there
     rels = {}
     if "xl/_rels/workbook.xml.rels" in names:
-        for r in _xml(z.read("xl/_rels/workbook.xml.rels")).iter(_RELS):
-            target = r.get("Target", "")
-            rels[r.get("Id")] = (r.get("Type", ""), target.lstrip("/") if target.startswith("/") else "xl/" + target)
+        for rid, kind, target in _relationships(z, "xl/_rels/workbook.xml.rels"):
+            rels[rid] = (kind, target.lstrip("/") if target.startswith("/") else "xl/" + target)
     declared = []
     if "xl/workbook.xml" in names:
-        for sheet in _xml(z.read("xl/workbook.xml")).iter(f"{{{NS['s']}}}sheet"):
-            kind, path = rels.get(sheet.get(_RID), ("", ""))
+        book = _xml(z.read("xl/workbook.xml"))
+        if book.tag != f"{{{NS['s']}}}workbook" or book.find("s:sheets", NS) is None:
+            raise ReportError("Unreadable worksheet")  # another dialect (Strict OOXML) or no sheet list
+        for sheet in book.findall("s:sheets/s:sheet", NS):
+            kind, path = rels.get(sheet.get(_RID) or "-", ("", ""))
             if not kind.endswith("/chartsheet"):
                 declared.append(path if kind.endswith("/worksheet") else "")
     named = [path for kind, path in rels.values() if kind.endswith("/worksheet")]
     if any(not re.fullmatch(r"xl/[A-Za-z0-9_/]+\.xml", n) or ".." in n or n not in names for n in declared + named):
         raise ReportError("Unreadable worksheet")
-    found = sorted(n for n in names if re.fullmatch(r"xl/worksheets/[^/]+\.xml", n))
+    found = sorted(n for n in names if re.fullmatch(r"(?i)xl/worksheets/(?!_rels/).+\.xml", n))
     return list(dict.fromkeys([*declared, *named, *found]))
 
 

@@ -98,7 +98,7 @@ function SettlementBody({ id, onClose }: { id: string; onClose: () => void }) {
       <DetailPages />
       <ul className="m-0 list-none divide-x-0 divide-y divide-solid divide-line p-0">
         {r.lines.map((line) => <li className="flex items-start justify-between gap-4 p-4 text-sm leading-relaxed" key={line.position}>
-          <span className="min-w-0 wrap-anywhere">{line.invoice ? <L to={{ co: s.co, iss: line.invoice }}>Factura {line.reference || line.order || line.awb || "emisă"}</L> : line.reference || line.awb || line.order}</span>
+          <span className="min-w-0 wrap-anywhere">{line.invoice ? <L to={{ co: s.co, iss: line.invoice }}>Factura {line.reference || line.order || line.awb || "emisă"}</L> : line.reference || line.awb || line.order || "Ajustare"}</span>
           <span className="shrink-0 tabular-nums">{lei(line.gross)} {curOf(r.currency)}</span>
         </li>)}
       </ul>
