@@ -165,7 +165,11 @@ def _prove(ledger, iban):
     ledger.db.commit()
 
 
-def test_proof_arriving_after_the_account_was_chosen_refuses_instead_of_paying_the_old_one(ledger, home, monkeypatch):
+def test_proof_arriving_after_the_account_was_chosen_keeps_paying_that_account_of_the_invoice(
+    ledger, home, monkeypatch
+):
+    """The TREZ rule picked the commercial account; a later proof of the Treasury one changes only the default for new
+    payments: the account queued (or built before the writer lock) is the supplier's own, signed in this invoice."""
     _stored(ledger, monkeypatch, **{"3001": ubl(), "3002": ubl(number="X2")})
     for mid in ("3001", "3002"):
         _set(ledger, "ibans=?,supplier_iban=?", json.dumps([TREZ_IBAN, SUPPLIER_IBAN]), TREZ_IBAN, mid=mid)
@@ -174,12 +178,12 @@ def test_proof_arriving_after_the_account_was_chosen_refuses_instead_of_paying_t
     ledger.set_meta("efactura_autopay_refused:3002", "stored before")
     assert api.state(ledger, "NORD")["refused"][0]["iban_last4"] == SUPPLIER_IBAN[-4:]  # the account it would pay
     _prove(ledger, TREZ_IBAN)
-    with pytest.raises(efactura.ApproveError):
-        ledger.queue_efactura(item, "3002", "person")
-    assert ledger.efactura("3002")["status"] == "open"
-    assert ledger.payment(queued)["payee_iban"] == SUPPLIER_IBAN
-    assert efactura.payment_refusal(ledger, ledger.efactura("3001"), unfiled=True).code == "several_ibans"
-    assert _can_approve(ledger) == (False, False)
+    assert ledger.queue_efactura(item, "3002", "person") is True
+    assert ledger.payment(item.item_id)["payee_iban"] == SUPPLIER_IBAN
+    assert efactura.approve(ledger, "3001", origin="person", unfiled=True)["item_id"] == queued  # same row, offered
+    assert _can_approve(ledger) == (True, True)
+    with pytest.raises(efactura.ApproveError):  # an account the invoice does not list is never paid
+        efactura.payment_item(ledger, "3001", account=OTHER_IBAN)
 
 
 @pytest.mark.parametrize(("issue", "blocks"), [("bad due date '2026-13-01'", False), ("buyer CUI 5 is not NORD", True)])

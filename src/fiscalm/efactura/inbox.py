@@ -1379,23 +1379,30 @@ INFORMATIONAL_ISSUES = ("bad due date ", "payee account ")
 
 
 def payee_iban(r, facts: PaymentFacts, account: str | None = None) -> str:
-    """The one account payee_choices leaves. Several left: refused, nothing is guessed. `account` (the IBAN a payment
-    already pays, or was built with) must be that one: when proof arrived meanwhile and changed it, refused."""
+    """`account` when given (the IBAN a payment already pays, or an item was built with), else the one account
+    payee_choices leaves; several left: refused, nothing is guessed. A given account must be one of the invoice's own
+    valid Romanian IBANs: every one is the supplier's, signed in this invoice; the choice rule only picks a default, so
+    proof arriving later never makes a queued account wrong."""
     ibans = payee_choices(r, facts)
-    if len(ibans) > 1:
+    if account is not None and account not in _ro_ibans(r):
+        raise ApproveError("several_ibans", "the account is not one of the invoice's")
+    if account is None and len(ibans) > 1:
         raise ApproveError("several_ibans", "the invoice lists several IBANs; pay it by hand after checking which one")
-    if account is not None and account != ibans[0]:
-        raise ApproveError("several_ibans", "the account to pay changed; check the invoice again")
-    if companies.company_by_iban(ibans[0]):
+    iban = account or ibans[0]
+    if companies.company_by_iban(iban):
         raise ApproveError("own_iban", "payee IBAN is one of our own accounts")
-    return ibans[0]
+    return iban
+
+
+def _ro_ibans(r) -> list[str]:
+    return [i for i in json.loads(r["ibans"] or "[]") if i.startswith("RO") and iban_valid(i)]
 
 
 def payee_choices(r, facts: PaymentFacts) -> list[str]:
     """Of the invoice's own valid Romanian IBANs: the only one; else the only one already proved for this supplier (a
     statement or a settled payment-file payment); else the only commercial one beside Treasury (TREZ) accounts; else
     all of them. Proof only breaks a tie between accounts the supplier itself signed in this invoice."""
-    ibans = [i for i in json.loads(r["ibans"] or "[]") if i.startswith("RO") and iban_valid(i)]
+    ibans = _ro_ibans(r)
     if not ibans:
         raise ApproveError("no_valid_iban", "no valid Romanian IBAN in the invoice")
     if len(ibans) > 1:
