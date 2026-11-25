@@ -191,6 +191,16 @@ def check(raw: dict, firms: dict[str, companies.Company], text: str = "") -> Ext
     )
 
 
+def printed_id(token: str, text: str) -> bool:
+    """A whole tax id (identity.tax_token form) stands in the text, spaces allowed between its characters; a Romanian
+    one with or without its RO prefix. A fragment of a longer id never counts."""
+    if not token:
+        return False
+    body = r"[ \t]*".join(map(re.escape, token))
+    prefix = r"(?:RO[ \t]*)?" if token.isdigit() else ""
+    return re.search(rf"(?<![A-Z0-9]){prefix}{body}(?![A-Z0-9])", text.upper()) is not None
+
+
 def ro_seller(x: Extraction, firms: Collection[companies.Company]) -> bool:
     """A Romanian seller that is none of the firms: its invoice reaches SPV, not the mailbox."""
     m = re.fullmatch(r"(?:RO)?(\d{2,10})", x.seller_tax_id)

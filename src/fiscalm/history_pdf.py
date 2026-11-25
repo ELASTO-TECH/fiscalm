@@ -54,8 +54,8 @@ def _ai_fields(x: ai_extract.Extraction, company: str, text: str) -> dict:
         way, ("", "")
     )
     tax = tax_token(tax)
-    if text and tax not in re.sub(r"[^A-Z0-9]", "", text.upper()):
-        tax = ""  # a partner id the document doesn't print
+    if text and not ai_extract.printed_id(tax, text):
+        tax = ""  # a partner id the document doesn't print whole
     return {
         "direction": way,
         "number": x.number if plausible_number(x.number) else "",
@@ -81,7 +81,11 @@ def _with_ai(L: Ledger, raw: bytes, company: str, doc: reader.Doc, rules: dict) 
     ai = _ai_fields(x, company, doc.text)
     same = {"number": lambda a, b: number_key(a) == number_key(b), "party_name": lambda a, b: True}  # a name's spelling
     agree = all(not rules[k] or not v or same.get(k, str.__eq__)(rules[k], v) for k, v in ai.items())
-    certain = x.confident and not x.rejected and x.doc_type == "invoice" and agree
+    # A number or a total the rules saw but couldn't pick (several, a separate series) stays the reviewer's choice.
+    number_open = rules["number"] or not (reader.numbers(doc.text) or re.search(r"\bseria\b", doc.text, re.I))
+    total_open = rules["total"] or not doc.totals or (ai["total"], ai["currency"]) in doc.totals
+    party = rules["party_tax_id"] or ai["party_tax_id"]  # a partner id printed whole, as an import requires
+    certain = all((x.confident, not x.rejected, x.doc_type == "invoice", agree, number_open, total_open, party))
     return {k: rules[k] or v for k, v in ai.items()} | {"reason": "" if certain else "unsure"}
 
 

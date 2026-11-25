@@ -349,6 +349,17 @@ def _ro_supplier(text: str, ev: docs.Evidence) -> bool:
     return bool(ev.other_ro_tax_ids or labelled)
 
 
+def numbers(text: str) -> list[str]:
+    """The distinct invoice-number candidates the document prints after a number label, in order."""
+    return list(
+        dict.fromkeys(
+            n
+            for n in (m.group(1).strip("._-/") for m in NUMBER.finditer(text))
+            if re.search(r"\d", n) and not re.fullmatch(r"\d{4}-\d{2}-\d{2}|\d{2}[./]\d{2}[./]\d{4}", n)
+        )
+    )
+
+
 def read_pdf(data: bytes, *, allow_ro_supplier: bool = False, strict_fields: bool = False) -> Doc:
     text = pdf_text(data)
     if not text or not text.strip():
@@ -364,14 +375,8 @@ def read_pdf(data: bytes, *, allow_ro_supplier: bool = False, strict_fields: boo
         card_last4=ev.card_last4,
         evidence=ev,
     )
-    numbers = list(
-        dict.fromkeys(
-            n
-            for n in (m.group(1).strip("._-/") for m in NUMBER.finditer(text))
-            if re.search(r"\d", n) and not re.fullmatch(r"\d{4}-\d{2}-\d{2}|\d{2}[./]\d{2}[./]\d{4}", n)
-        )
-    )
-    doc.number = numbers[0] if numbers and (not strict_fields or len(numbers) == 1) else ""
+    found_numbers = numbers(text)
+    doc.number = found_numbers[0] if found_numbers and (not strict_fields or len(found_numbers) == 1) else ""
     if not TITLE.search(text):
         doc.refused = "not-invoice"
     elif ev.is_proforma or PROFORMA.search(text):
