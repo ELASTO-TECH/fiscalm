@@ -263,6 +263,7 @@ def ingest(L: Ledger, iid: str, row: dict, today: str) -> dict:
             new_order
             and body["placed_at"] == today
             and order["status"] == "draft"
+            and not order["reason"]  # a draft waiting for its VAT treatment is never issued on its own
             and not row["cancelledAt"]
             and not row["refunds"]
             and is_live()

@@ -251,6 +251,13 @@ export function taskCards(s: State, { tag = false }: TaskOpts = {}): Card[] {
       <L to={{ co, ord: `${co}:${task.id}` }} className="btn g">Vezi comanda</L>
     </Task>);
   }
+  for (const task of s.order_tasks ?? []) {
+    if (task.kind !== "order_vat_review" || !task.draft_id) continue;
+    add(<Task co={own} key={`${co}ordvat${task.order_id}`} icon="warning-circle" title="Comandă cu TVA 0% de verificat"
+      body="Confirmă sau schimbă tratamentul TVA al liniilor cu 0% din ciornă, apoi emite factura.">
+      <DraftLink co={co} id={task.draft_id} />
+    </Task>);
+  }
   for (const node of bankTasks(s, own)) add(node);
   const a = s.system.anaf;
   if (anafExpiringSoon(a)) {

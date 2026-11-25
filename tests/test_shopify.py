@@ -382,7 +382,7 @@ def test_http_hook_is_public_post_only(shop, monkeypatch):
         worker.join()
 
 
-def test_gross_mixed_tax_discount_shipping_and_zero_vat_refusal(shop):
+def test_gross_mixed_tax_discount_shipping_and_zero_vat_review(shop, home):
     L, iid, row = shop
     row["lineItems"][0]["discountAllocations"] = [dict(allocatedAmountSet=amount("24.20"))]
     row["lineItems"][0]["taxLines"][0]["priceSet"] = amount("37.80")
@@ -398,8 +398,11 @@ def test_gross_mixed_tax_discount_shipping_and_zero_vat_refusal(shop):
     result = s.ingest(L, iid, row, "2026-10-31")
     assert inv.invoice(L, result["draft_id"], company="NORD")["data"]["totals"]["total"] == "228.90"
     row["lineItems"][0]["taxLines"] = []
-    with pytest.raises(s.commerce.Error):
-        s.ingest(L, iid, row, "2026-10-31")
+    (home / "state" / "LIVE").touch()
+    integrations.update(L, iid, {"auto_issue": "true"})
+    row["id"], row["createdAt"] = "gid://shopify/Order/14", "2026-10-31T10:00:00Z"
+    result = s.ingest(L, iid, row, "2026-10-31")  # a new order placed today, in Live, with auto issue
+    assert result["status"] == "draft" and s.commerce.get(L, "NORD", result["id"])["reason"]["code"] == "vat_review"
 
 
 def test_tax_mismatch_refuses_before_live_auto_issue(shop, home):

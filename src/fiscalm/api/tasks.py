@@ -103,6 +103,9 @@ def _other_references(s: dict) -> Iterator[tuple[str, bool, dict]]:
         yield co + "rec" + r["id"], True, {"recurring_refused": [r]}
     for r in s.get("emag_tasks", []):
         yield "emag" + str(r["id"]), False, {"emag_tasks": [r]}
+    for r in s.get("order_tasks", []):
+        if r["kind"] == "order_vat_review" and r["draft_id"]:
+            yield co + "ordvat" + r["order_id"], False, {"order_tasks": [r]}
     for r in s.get("bank_connections", []):
         if r["connection"] and r["connection"]["state"] != "ok":
             yield "bank" + co + r["bank"], r["connection"]["state"] == "expired", {"bank_connections": [r]}
