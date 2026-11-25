@@ -185,54 +185,70 @@ def _explained(rows: list) -> set[str]:
     in `settled_tx` as collecting or explaining an item; a duplicate line whose original is; a twin (the other
     source's copy of a payment) when every original line it could be a copy of is explained and could be the copy
     of no other twin. Two twins wanting one explained payment may be two payers: neither is excused, since only one
-    of them is that payment. A conflict is never explained."""
+    of them is that payment. Any reading counts towards what could be a copy; excusing needs every reading of both
+    lines to carry the same money. A conflict is never explained."""
     what = {r["tx_key"]: r["what"] or "" for r in rows}
     copy_of = lambda w: w.startswith(("twin ", "duplicate:"))  # noqa: E731
     originals = [r for r in rows if not copy_of(what[r["tx_key"]])]
     done = {r["tx_key"] for r in originals if what[r["tx_key"]] and not what[r["tx_key"]].startswith(UNEXPLAINED)}
     excused = {k for k, w in what.items() if w.startswith("duplicate:") and w.removeprefix("duplicate:") in done}
     twins = [r for r in rows if what[r["tx_key"]].startswith("twin ")]
-    by_amount: dict[str, list] = {}  # a copy has the same amount: compare only those
+    by_amount: dict[str, dict] = {}  # a copy has an amount in common: compare only those
     for e in originals:
-        by_amount.setdefault(e["amount"], []).append(e)
-    copies = {t["tx_key"]: [e["tx_key"] for e in by_amount.get(t["amount"], ()) if _copy(t, e)] for t in twins}
+        for _, amount, _, _ in _readings(e):
+            by_amount.setdefault(amount, {})[e["tx_key"]] = e
+    copies = {
+        t["tx_key"]: [
+            k
+            for k, e in {k: e for _, m, _, _ in _readings(t) for k, e in by_amount.get(m, {}).items()}.items()
+            if _copy(t, e)
+        ]
+        for t in twins
+    }
     wanted: dict[str, int] = {}
     for keys in copies.values():
         for k in keys:
             wanted[k] = wanted.get(k, 0) + 1
-    excused |= {t for t, keys in copies.items() if keys and all(k in done and wanted[k] == 1 for k in keys)}
+    clean = {r["tx_key"] for r in rows if _one_money(r)}
+    excused |= {
+        t
+        for t, keys in copies.items()
+        if keys and t in clean and all(k in done and k in clean and wanted[k] == 1 for k in keys)
+    }
     return done | excused
 
 
 def _copy(twin, line) -> bool:
     """`line` could be the other source's copy of `twin`: brought by another source (two lines of one source are two
-    payments), the same known amount and currency, the same account (or one unknown), days apart at most
-    BOUNDARY_DAYS by any of their readings' dates (Ledger.account_lines pairs by the stored day alone). Neither may
-    have a reading with other money, so a date from one reading never combines with an amount from another."""
-    apart = min(abs((a - b).days) for a in _days(twin) for b in _days(line))
-    same_account = not twin["iban"] or not line["iban"] or twin["iban"] == line["iban"]
-    same_money = twin["amount"] is not None and twin["amount"] == line["amount"] and _currency(twin) == _currency(line)
-    return (
-        _one_money(twin)  # a line read with other money on another read is no one's copy: in doubt, never paired
-        and _one_money(line)
-        and (twin["source"] or "file") != (line["source"] or "file")
-        and same_money
-        and same_account
-        and apart <= BOUNDARY_DAYS
+    payments), and some reading of each with the same known amount and currency, the same account (or one unknown),
+    days apart at most BOUNDARY_DAYS (Ledger.account_lines pairs by the stored line alone)."""
+    if (twin["source"] or "file") == (line["source"] or "file"):
+        return False
+    return any(
+        m1 is not None
+        and (m1, c1) == (m2, c2)
+        and (not a1 or not a2 or a1 == a2)
+        and abs((d1 - d2).days) <= BOUNDARY_DAYS
+        for d1, m1, c1, a1 in _readings(twin)
+        for d2, m2, c2, a2 in _readings(line)
     )
 
 
+def _readings(line) -> list[tuple[date, str | None, str | None, str]]:
+    """(day, amount, currency, account) of the stored line and of every other reading kept of it: a bank may correct
+    the date, or read other money, under the same reference."""
+    out = [(date.fromisoformat(line["day"]), line["amount"], _currency(line), line["iban"] or "")]
+    for x in json.loads(line["readings"] or "[]"):
+        d = json.loads(x)
+        out.append(
+            (date.fromisoformat(d["date"]), d["amount"], d["currency"], companies.normalize_iban(d["iban"]) or "")
+        )
+    return out
+
+
 def _one_money(line) -> bool:
-    """Every reading of the line carries the same amount, currency and account as the stored one."""
-    stored = json.loads(line["tx"]) if line["tx"] else {}
-    money = lambda d: (d.get("amount"), d.get("currency"), d.get("iban"))  # noqa: E731
-    return all(money(json.loads(x)) == money(stored) for x in json.loads(line["readings"] or "[]"))
-
-
-def _days(line) -> set[date]:
-    """Every booking day a line was read with: a bank may correct the date on a later read."""
-    others = (json.loads(x)["date"] for x in json.loads(line["readings"] or "[]"))
-    return {date.fromisoformat(line["day"]), *map(date.fromisoformat, others)}
+    """Every reading of the line carries the same amount, currency and account."""
+    return len({(m, c, a) for _, m, c, a in _readings(line)}) == 1
 
 
 def _currency(line) -> str | None:

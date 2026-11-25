@@ -164,6 +164,7 @@ def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, c
         ("twin_of_explained", True),
         ("twin_and_explained_line_of_one_source", False),  # two lines of one source are two payments
         ("two_payers_one_explained", False),  # another client's twin wants the same explained payment
+        ("two_payers_other_read_again", False),  # ... and was read again with other money: it still competes
         ("two_twins_one_explained", False),
         ("explained_and_unexplained_copy", False),
         ("two_twins_original_and_its_duplicate", False),
@@ -184,6 +185,7 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
     )
     extra = {
         "two_payers_one_explained": [other],
+        "two_payers_other_read_again": [other],
         "two_twins_one_explained": [second],
         "explained_and_unexplained_copy": [settled],
         "two_twins_original_and_its_duplicate": [second, settled],
@@ -200,6 +202,7 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
         "two_twins_one_explained",
         "twin_and_explained_line_of_one_source",
         "two_payers_one_explained",
+        "two_payers_other_read_again",
     ):
         _reserve(L, blank, "issued other")
     if case == "twin_and_explained_line_of_one_source":
@@ -209,8 +212,8 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
         _reserve(L, settled, "issued other")
         if case == "two_twins_original_and_its_duplicate":
             _reserve(L, blank, "duplicate:" + statements.tx_key(settled))
-    if case in ("twin_read_again_with_other_money", "copy_read_again_with_other_money"):  # read again, other money
-        read = named if case == "twin_read_again_with_other_money" else blank
+    if case.endswith(("read_again_with_other_money", "other_read_again")):  # read again, with other money
+        read = {"twin_read_again_with_other_money": named, "copy_read_again_with_other_money": blank}.get(case, other)
         other = dict(
             json.loads(
                 L.db.execute("SELECT tx FROM statement_txs WHERE tx_key=?", (statements.tx_key(read),)).fetchone()[0]
