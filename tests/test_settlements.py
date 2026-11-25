@@ -279,9 +279,11 @@ def test_payer_iban_never_falls_back_to_name(ledger, identity, right):
     [  # same words, another legal form or another alphabet's letters: another firm
         ({}, {"counterparty": "Synthetic Courier SA"}, "Synthetic Courier S.R.L."),
         ({"payer_name": "Synthetic 北京 SRL"}, {"counterparty": "Synthetic 上海 SRL"}, "SYNTHETIC 北京"),
+        ({"payer_name": "Atelier Sa Maison SRL"}, {"counterparty": "Atelier Maison"}, "Atelier Sa Maison"),
         ({"payer_cui": "12345678"}, {"counterparty": "Other SRL", "description": "CUI 12345678"}, "Other 12345678"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE123456789"}, "Other RO123456789"),
     ],
-    ids=["legal_form", "alphabet", "memo"],
+    ids=["legal_form", "alphabet", "inner_word", "memo", "foreign_vat"],
 )
 def test_first_report_needs_its_own_payer(ledger, identity, wrong, right):
     """With no confirmation gate, only the payer itself can bring a batch's credit."""
@@ -290,6 +292,29 @@ def test_first_report_needs_its_own_payer(ledger, identity, wrong, right):
     with pytest.raises(settlements.SettlementError, match="^credit_missing_or_ambiguous$"):
         collect(ledger, rid, statement(**wrong))
     assert collect(ledger, rid, statement(counterparty=right))
+
+
+def test_refused_batch_credit_stays_out_of_single_invoice_matching(ledger):
+    """A credit the batch refuses (its CUI only in the memo) is still its payer's: no single invoice takes it."""
+    setup(ledger)
+    edit_report(ledger, payer_cui="12345678")
+    ledger.add_issued(
+        dict(
+            message_id="courier-bill",
+            company="NORD",
+            number="TEST-9",
+            issue_date="2026-10-01",
+            currency="RON",
+            total="196.00",
+            doc_type="invoice",
+            status="open",
+            raw_path="",
+            client_name="Synthetic Courier SRL",
+            client_cui="12345678",
+        )
+    )
+    assert issued.match_statement(ledger, statement(description="CUI 12345678")) == []
+    assert {r["status"] for r in ledger.issued_rows()} == {"open"} and not ledger.used_txs()
 
 
 def test_retired_gate_reason_is_replaced(ledger):

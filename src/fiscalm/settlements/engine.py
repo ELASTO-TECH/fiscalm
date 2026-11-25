@@ -100,7 +100,9 @@ def check_company_cuis(lines: list[dict], cui: str) -> None:
         raise ReportError(f"Line {n}: company CUI differs or is unknown")
 
 
-def _payer(report: dict, credit: statements.Tx, company: str) -> bool:
+def _payer(report: dict, credit: statements.Tx, company: str, *, claim: bool = False) -> bool:
+    """The credit comes from the report's payer. `claim` is the looser test that keeps a plausible payer credit out of
+    single-invoice matching while the report is pending (its CUI anywhere on the line, an ASCII name match)."""
     if not isinstance(report.get("payer_cui", ""), str) or not isinstance(report.get("payer_iban", ""), str):
         return False
     if report.get("payer_cui") and not re.fullmatch(r"\d{6,12}", report["payer_cui"]):
@@ -110,19 +112,38 @@ def _payer(report: dict, credit: statements.Tx, company: str) -> bool:
     # An explicitly configured IBAN is authoritative: a wrong IBAN cannot fall back to a shared name.
     if report["payer_iban"]:
         return credit.counterparty_iban == report["payer_iban"]
+    if claim:
+        line = f"{credit.counterparty} {credit.description}"
+        return (
+            issued._cui_on(report["payer_cui"], line)
+            if report["payer_cui"]
+            else (
+                issued.same_firm(report["payer_name"], credit.counterparty)
+                or same_payer(report["payer_name"], credit.counterparty)
+            )
+        )
     if report["payer_cui"]:
-        # Only on the paying party: a memo can name anyone's tax id (a customer's, an order number).
-        return issued._cui_on(report["payer_cui"], credit.counterparty)
+        # Only on the paying party, as a Romanian CUI (optionally RO): a memo can name anyone's tax id, and a foreign
+        # VAT number (DE123456789) is another firm's.
+        cui = rf"(?<![A-Za-z0-9])(?:RO)?{report['payer_cui']}(?!\d)"
+        return re.search(cui, credit.counterparty or "", re.I) is not None
     return same_payer(report["payer_name"], credit.counterparty)
 
 
+def _firm(name: str) -> tuple[list[str], set[str]]:
+    """A name's words (`identity.firm_name`, any alphabet) and the legal forms it ends with, removed."""
+    words, forms = firm_name(name).split("-"), set()
+    while len(words) > 1 and words[-1].upper() in companies.LEGAL_FORMS:
+        forms.add(words.pop())
+    return words, forms
+
+
 def same_payer(named: str, paid: str) -> bool:
-    """The report's payer name is the credit's paying party: equal words in any alphabet (`identity.firm_name`), a legal
-    form missing on one side but never two different ones ('Curier SRL' = 'Curier S.R.L.' = 'Curier', != 'Curier SA')."""
-    x, y = firm_name(named).split("-"), firm_name(paid).split("-")
-    forms = [{w for w in n if w.upper() in companies.LEGAL_FORMS} for n in (x, y)]
-    core = [[w for w in n if w.upper() not in companies.LEGAL_FORMS] for n in (x, y)]
-    return len("".join(core[0])) >= 6 and core[0] == core[1] and not (all(forms) and forms[0] != forms[1])
+    """The report's payer name is the credit's paying party: the same words, a final legal form missing on one side
+    but never two different ones ('Curier SRL' = 'Curier S.R.L.' = 'Curier', != 'Curier SA'); a form inside a name
+    ('Atelier Sa Maison') is one of its words."""
+    (x, fx), (y, fy) = _firm(named), _firm(paid)
+    return len("".join(x)) >= 6 and x == y and not (fx and fy and fx != fy)
 
 
 class Resolver:
@@ -310,7 +331,7 @@ def claimed_credit(L: Ledger, company: str, credit: statements.Tx) -> bool:
     """Pending reports keep their payer's credits out of single-invoice matching, including failed totals."""
     for r in L.db.execute("SELECT data FROM settlement_reports WHERE company=? AND status='pending'", (company,)):
         try:
-            if _payer(json.loads(r["data"]), credit, company):
+            if _payer(json.loads(r["data"]), credit, company, claim=True):
                 return True
         except (ValueError, TypeError, KeyError):
             continue  # match_statement records invalid_report; malformed evidence proves no credit
