@@ -518,10 +518,13 @@ def _closing_row(line: str) -> re.Match[str] | None:
 
 def _carried_balance(acct: Account, row: re.Match[str], opening: dict, final: dict) -> None:
     """A closing row read after a page break. Totals the bank printed already are never replaced: two that disagree
-    leave the account unproven for good (its final balance is marked unknown, and nothing later sets it)."""
+    leave the account unproven and unbalanced for good (its totals and final balance are marked unknown, and nothing
+    later sets them)."""
+    if id(acct) in final and final[id(acct)] is None:
+        return
     if row.group("title").strip() == "RULAJ TOTAL CONT" and acct.total_debit is not None:
         if (acct.total_debit, acct.total_credit) != (parse_amount(row.group("a1")), parse_amount(row.group("a2"))):
-            final[id(acct)] = None
+            final[id(acct)], acct.total_debit, acct.total_credit = None, None, None
         return
     _pdf_balance(acct, row, row.group("title").strip(), opening, final)
 

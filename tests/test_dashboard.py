@@ -400,6 +400,7 @@ def test_after_a_page_footer_only_the_accounts_own_closing_rows_count(after_foot
     text = head + "BANCA TRANSILVANIA S.A. - footer      4/5\n\f      BANCA TRANSILVANIA\n\n" + after_footer + "\n"
     (account,) = statements.parse_text(text, "NORD").accounts
     assert account.trustworthy is trusted
+    assert account.balanced is not ("RULAJ TOTAL CONT     60.00" in after_footer)  # contradicted totals: unbalanced
 
 
 def test_the_newest_balance_of_a_month_wins_and_two_that_disagree_prove_none(ledger, home):
