@@ -278,11 +278,11 @@ def _month_end(day: date) -> date:
 
 
 def _consecutive(before: statements.Account, after: statements.Account) -> bool:
-    """Two proven daily statements with no other between them: the next number, or the first of a later year."""
+    """Two proven daily statements with no other between them: the next number. (A number 1 of a new year proves
+    where that year starts, not that the year before ended with the last one it holds.)"""
     if before.serial is None or after.serial is None or not (before.trustworthy and after.trustworthy):
         return False
-    later_year = after.period[0].year > before.period[1].year
-    return after.serial == before.serial + 1 or (after.serial == 1 and later_year)
+    return after.serial == before.serial + 1
 
 
 def opening(a: statements.Account) -> Decimal:
@@ -315,7 +315,8 @@ def _refuse_gaps(run: list[tuple[date, date, statements.Account]], last: date, c
     for lo, hi, a in run:
         if lo < day:
             raise statements.StatementError("Statement set: an account appears twice for the same days")
-        if lo > day and not (before and _consecutive(before, a)):  # days between numbered daily statements
+        numbered = before is not None and (before.serial is not None or a.serial is not None)
+        if (lo > day or numbered) and not (before and _consecutive(before, a)):  # numbered: one after the other
             raise statements.PartialMonth("Statement set", last.replace(day=1))
         # trustworthy: opening + credits - debits == closing, to the cent, so the opening is known
         proven = before is not None and before.trustworthy and a.trustworthy
@@ -370,10 +371,16 @@ def _late_start_unnumbered(start: date, a: statements.Account, co) -> bool:
 
 
 def _neighbours(L: Ledger, st, day: date, iban: str, others) -> list[tuple[date, statements.Account]]:
-    """The account's sections in `day`'s month: stored, or in a statement imported together with `st`."""
+    """The account's sections in `day`'s month: the stored ones when that month is on record, else those of a month
+    imported together with `st` (`others`: the firm's months that passed their own checks)."""
+    if stored := _stored_sections(L, st.company, day, iban):
+        return stored
     month = day.strftime("%Y-%m")
-    found = _stored_sections(L, st.company, day, iban) + [
-        s for o in others if o is not st for s in _by_account(o).get(iban, []) if s[0].strftime("%Y-%m") == month
+    found = [
+        s
+        for o in others
+        if o is not st and o.company == st.company and o.month == month
+        for s in _by_account(o).get(iban, [])
     ]
     return sorted(found, key=lambda s: s[0])
 

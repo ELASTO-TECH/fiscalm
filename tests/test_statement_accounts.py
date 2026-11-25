@@ -524,6 +524,40 @@ def test_older_daily_bt_pdfs_make_a_month_only_when_numbers_and_balances_leave_n
     assert february[0]["status"] == "refused" and "last statement" in february[0]["errors"][0]
 
 
+def test_only_the_next_number_proves_where_a_month_of_daily_statements_ends(ledger, tmp_path):
+    """Review: January's number 1 shows where January starts, not that December's last file was its last; and two
+    statements on consecutive days must be numbered one after the other."""
+    dec = daily(tmp_path, ["16/12/2019", "20/12/2019"], first=249)
+    skipped = daily(tmp_path, ["13/01/2020"], "120.00") + daily(tmp_path, ["14/01/2020"], "130.00", first=3)
+    results = recon.ingest_files(
+        ledger,
+        dec + skipped + daily(tmp_path, ["05/02/2020"], "140.00", first=4),
+        password_lookup=lambda co: "synthetic",
+    )
+    assert [
+        (r["status"], "last statement" in r["errors"][0] or "full calendar" in r["errors"][0]) for r in results[:2]
+    ] == [("refused", True)] * 2
+    assert not ledger.documents(kind="statement")
+
+
+def test_a_neighbour_is_what_is_stored_or_what_passes_its_own_checks(ledger, tmp_path):
+    """Review: a second April that is refused (April is on record) proves nothing for May; a file without a period
+    is refused alone."""
+    stored = month_file(tmp_path, "01/04/2022", "30/04/2022", "90.00")  # closes at 100.00
+    assert recon.ingest_files(ledger, [stored], password_lookup=lambda co: "synthetic")[0]["status"] == "added"
+    (tmp_path / "again").mkdir()
+    other = month_file(tmp_path / "again", "01/04/2022", "30/04/2022", "190.00")  # closes at 200.00
+    nord = companies.get("NORD")
+    dateless = bt_statement(
+        tmp_path / "extL_Jun_2022_allmerge.pdf", nord.cui, ("", ""), [("RON", nord.ibans["RON"], Decimal(0), [])]
+    )
+    results = recon.ingest_files(
+        ledger, [other, month_file(tmp_path, *MAY, "200.00"), dateless], password_lookup=lambda co: "synthetic"
+    )
+    assert [r["status"] for r in results] == ["refused"] * 3
+    assert "chain" in results[2]["errors"][0] and "period" in results[0]["errors"][0]
+
+
 @pytest.mark.parametrize(
     "case,refusal",
     [

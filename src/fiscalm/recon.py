@@ -226,7 +226,7 @@ def ingest_statements(
                 )
                 return failed[:1] or [_refused(opened, error)]
             # month by month: a month that starts after the 1st is checked against the one before it
-            others = [o.st for o in opened]  # the months imported together prove each other's edges
+            others = _checked(groups, check)  # the months imported together prove each other's edges
             return failed + [_store_set(ledger, groups[k], home, check, source, others) for k in sorted(groups)]
         finally:
             shutil.rmtree(work, ignore_errors=True)
@@ -245,16 +245,34 @@ def _open_statement(path: Path, out_dir: Path, kw: dict) -> list[_Opened] | dict
         return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement"]}
     try:
         st = statements.parse(out, company)
-        if st.month and st.month != month:  # the month comes from what the bank printed, never from a file name
-            raise statements.StatementError("Statement file name names another month than its period")
+        if not st.period_start or not st.period_end:
+            raise statements.StatementError("Cannot verify statement period")
         if statements.several_months(st):
             parts = statements.split_months(out, company, st, out_dir / "months")
+            if month not in {m for m, *_ in parts}:  # a name's month, or the first printed: one of its months
+                raise statements.StatementError("Statement file name names another month than its period")
             return [_Opened(path, company, m, piece, s, sha256(piece)) for m, piece, s in parts]
+        if st.month != month:  # the month comes from what the bank printed, never from a file name
+            raise statements.StatementError("Statement file name names another month than its period")
     except (ValueError, ArithmeticError):
         return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement"]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "refused", "errors": [str(e)]}
     return [_Opened(path, company, month, out, st, sha256(path))]
+
+
+def _checked(groups: dict[tuple[str, str], list[_Opened]], check) -> list[statements.Statement]:
+    """Each month of the call as one statement, only those that pass their own checks: a refused file proves no
+    neighbour's edge."""
+    out = []
+    for parts in groups.values():
+        try:
+            st = combine([o.st for o in parts])
+            _set_checks(st, parts, check)
+        except statements.StatementError:
+            continue
+        out.append(st)
+    return out
 
 
 def _refused(parts: list[_Opened], error: str, status: str = "refused", **extra) -> dict:
@@ -265,7 +283,7 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
     try:
         st = combine([o.st for o in parts])
         _set_checks(st, parts, check)
-        refuse_unchained(ledger, st, [o for o in others if o not in [p.st for p in parts]])  # under the import lock
+        refuse_unchained(ledger, st, others)  # under the import lock
         for o in parts:
             refuse_overlap(ledger, o.st, o.digest, siblings={p.digest for p in parts})
     except StoredStatementUnavailable as exc:
