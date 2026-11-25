@@ -1428,8 +1428,10 @@ def check_payment(
         raise ApproveError("not_open", f"not an open, parsed invoice (status {r['status']})")
     if r["doc_type"] != "invoice" or r["currency"] != "RON":
         raise ApproveError("not_ron", "only RON invoices can go into the payment file")
-    gross = Decimal(dict(r).get("gross_total", r["total"]))  # a state row (net_invoices) carries the net in total
-    if facts.credit(r) >= gross:  # a linked credit note (credit_links) leaves its net remaining to pay
+    gross = Decimal(
+        dict(r).get("gross_total") or r["total"] or 0
+    )  # a state row (net_invoices) carries the net in total
+    if (credit := facts.credit(r)) and credit >= gross:  # a linked credit note leaves its net remaining to pay
         raise ApproveError("credited", "invoice is fully credited; nothing remains to pay")
     status = facts.inactive(r)
     if status:

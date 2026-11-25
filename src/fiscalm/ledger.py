@@ -1434,15 +1434,25 @@ class Ledger:
         return cur.rowcount > 0
 
     def _net_changed(self, db, item_id: str) -> bool:
-        """An invoice payment built for a net (below its invoice's total) that is no longer the total minus the
-        invoice's linked credits: a debit settling it would hide the difference, so no writer settles it."""
+        """An invoice payment for a net (below its invoice's total, and a credit note of its supplier names the
+        invoice) that is no longer the total minus the invoice's linked credits: a debit settling it would hide the
+        difference, so no writer settles it. Rows no credit note names keep settling as they always did."""
         row = db.execute(
-            "SELECT p.amount,p.company,e.message_id,e.total,coalesce(nullif(e.supplier_tax_id,''),e.supplier_cui) "
-            "AS supplier FROM payments p "
-            "JOIN efactura e ON e.item_id=p.item_id WHERE p.item_id=?",
+            "SELECT p.amount,p.company,e.message_id,e.total,e.number,coalesce(nullif(e.supplier_tax_id,''),"
+            "e.supplier_cui) AS supplier FROM payments p JOIN efactura e ON e.item_id=p.item_id WHERE p.item_id=?",
             (item_id,),
         ).fetchone()
-        if not row or Decimal(row["amount"]) == Decimal(row["total"]):
+        if not row or not row["total"] or Decimal(row["amount"]) >= Decimal(row["total"]):
+            return False
+        named = credits.credit_number(row["number"] or "")
+        if not named or not any(
+            credits.credit_number(c["billing_ref"] or "") == named
+            for c in db.execute(
+                "SELECT billing_ref FROM efactura WHERE company=? AND doc_type='credit_note' "
+                "AND coalesce(nullif(supplier_tax_id,''),supplier_cui)=?",
+                (row["company"], row["supplier"]),
+            )
+        ):
             return False
         credited = credits.credited(self, row["company"])
         net = Decimal(row["total"]) - credited.get(row["message_id"], Decimal(0))
