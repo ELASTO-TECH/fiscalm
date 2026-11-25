@@ -1776,7 +1776,6 @@ class Ledger:
         closing a marked row keeps how the person said they paid."""
         note = audit.note(note)
         method, detail = how or (None, None)
-        debit = statement_tx(tx) is not None
         with self.tx() as db:
             if not self._card_proof("efactura", message_id, tx):
                 return False
@@ -1785,9 +1784,11 @@ class Ledger:
             cur = db.execute(
                 "UPDATE efactura SET status='paid', paid_at=?, paid_note=?, paid_tx=?, "
                 "paid_method=COALESCE(?,paid_method), paid_detail=COALESCE(?,paid_detail) WHERE message_id=? "
-                f"AND (status IN ('open','skipped') OR ({USER_MARKED} AND ? NOT LIKE '{USER}%') OR ({MAIL_PROVED} AND ?)) "
+                f"AND (status IN ('open','skipped') OR ({USER_MARKED} AND ? NOT LIKE '{USER}%') OR ({MAIL_PROVED} "
+                "AND EXISTS (SELECT 1 FROM statement_txs t WHERE t.tx_key=? AND t.company=efactura.company "
+                "AND t.direction='debit'))) "  # only this firm's recorded debit replaces a mail
                 f"AND (? IS NULL OR {unlinked('efactura')})",  # a proof never closes one paid in part
-                (now(), note, tx, method, detail, message_id, note, debit, tx),
+                (now(), note, tx, method, detail, message_id, note, tx, tx),
             )
             if cur.rowcount and tx and not tx.startswith(("bon:", "ef-proof:")) and to_iban:
                 db.execute(

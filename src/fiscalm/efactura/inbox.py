@@ -87,8 +87,8 @@ def awaiting(L: Ledger, company: str | None = None) -> list:
 def mail_proved(L: Ledger, company: str) -> list:
     """Invoices a payment mail proved paid whose bank debit hasn't been seen yet (ledger.MAIL_PROVED): a debit
     that fits one confirms it in the mail's place, so it is never left unexplained nor taken by another invoice."""
-    rows = L.db.execute(f"SELECT * FROM efactura WHERE {MAIL_PROVED} AND company=? ORDER BY message_id", (company,))
-    return net_invoices(L, rows.fetchall())
+    q = f"SELECT * FROM efactura WHERE {MAIL_PROVED} AND company=? AND parse_error IS NULL ORDER BY message_id"
+    return L.db.execute(q, (company,)).fetchall()  # whole rows: their readers net the credits once
 
 
 def bon_paid(L: Ledger, company: str) -> list:
@@ -710,7 +710,7 @@ def _named_only(L: Ledger, company: str) -> Callable[[statements.Tx, set], bool]
         for r in [
             *L.efactura_rows(status=OPEN, company=company),
             *awaiting(L, company),
-            *mail_proved(L, company),
+            *net_invoices(L, mail_proved(L, company)),
             *bon_paid(L, company),
         ]
     }  # a bon's card debit is found by name too
@@ -921,15 +921,14 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
 
 
 def _settle_debits(L: Ledger, st: statements.Statement) -> list[str]:
-    marked = awaiting(L, st.company)
-    open_rows = [*L.efactura_rows(status=OPEN, company=st.company), *marked, *mail_proved(L, st.company)]
+    marked, proved = awaiting(L, st.company), net_invoices(L, mail_proved(L, st.company))
+    open_rows = [*L.efactura_rows(status=OPEN, company=st.company), *marked, *proved]
     open_rows = [r for r in open_rows if not r["parse_error"]]
     if not open_rows and not bon_paid(L, st.company):
         return []
     used = L.used_txs()
-    withdrawn = {
-        r["item_id"] for r in marked if r["item_id"]
-    }  # their payment-file row was dropped: the debit is the invoice's
+    # their payment-file row was dropped (marked, then maybe proved by a mail): the debit is the invoice's
+    withdrawn = {r["item_id"] for r in [*marked, *proved] if r["item_id"]}
     tracked = {
         (p["payee_iban"], Decimal(p["amount"])) for p in L.payments(company=st.company) if p["item_id"] not in withdrawn
     }

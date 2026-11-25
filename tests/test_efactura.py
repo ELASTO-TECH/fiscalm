@@ -357,6 +357,7 @@ def test_a_mail_proof_is_confirmed_by_its_later_debit_once(ledger, home, sec, mo
     assert efactura.match_statement(ledger, _debit_st(plain)) == []  # fits the proved one and the open one
     assert ledger.efactura("3001")["paid_tx"] == "ef-proof:imap:proof" and ledger.ambiguous("NORD")
     assert ledger.mark_efactura_skipped("3002", "nu e de plata")
+    assert not ledger.mark_efactura_paid("3001", "statement", "0" * 20)  # a debit on no record never replaces a mail
     twins = [plain, _tx("250.00", date(2026, 10, 31), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata 2")]
     ledger.record_statement(_debit_st(*twins))
     gate, won = threading.Barrier(2), []
@@ -379,6 +380,33 @@ def test_a_mail_proof_is_confirmed_by_its_later_debit_once(ledger, home, sec, mo
     assert ledger.paid_proofs("NORD")["efactura 3001"] == paid_tx
     assert efactura.match_statement(ledger, _debit_st(*twins)) == [] and ledger.efactura("3001")["paid_tx"] == paid_tx
     assert not efactura.confirm_by_mail(ledger, "3002", "imap:proof", "mail: plata confirmata")
+
+
+@pytest.mark.parametrize("case", ["credited", "withdrawn", "unreadable twin"])
+def test_a_mail_proved_invoice_takes_its_debit_like_an_open_one(ledger, home, sec, monkeypatch, case):
+    credit = ubl(number="COR 2", total="-50.00").replace(
+        b"<cbc:DocumentCurrencyCode>",
+        b"<cbc:Note>Storno factura seria TEST nr. 0001 din data 20/10/2026</cbc:Note><cbc:DocumentCurrencyCode>",
+    )
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), **({"3002": credit} if case == "credited" else {})})
+    if case == "withdrawn":  # its payment-file row stays, skipped: the debit is still the invoice's
+        efactura.approve(ledger, "3001", origin="person")
+        assert efactura.withdraw(ledger, "3001", "user: already paid (page)") is None
+    if case == "unreadable twin":  # a mail proved an invoice fiscalm can't read: no amount, never a rival
+        ledger.db.execute(
+            "INSERT INTO efactura(message_id,company,raw_path,status,created_at,parse_error,paid_tx) "
+            "VALUES('3009','NORD','x.zip','paid','2026-10-20','synthetic','ef-proof:imap:other')"
+        )
+        ledger.db.commit()
+    efactura.judged(ledger, "3001", ["imap:proof"])
+    assert efactura.confirm_by_mail(ledger, "3001", "imap:proof", "mail: plata confirmata")
+    if case == "credited":  # a rival for its rest, netted once, never settled by a matcher (as when open)
+        t = _tx("200.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
+        assert efactura.rivals(ledger, "NORD")(t) == {("partial", "3001")}
+        return
+    t = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
+    assert efactura.match_statement(ledger, _debit_st(t)) == ["3001"]
+    assert ledger.efactura("3001")["paid_tx"] == statements.tx_key(t)
 
 
 def test_withdrawn_invoice_is_confirmed_by_its_debit(ledger, home, sec, monkeypatch):
