@@ -319,7 +319,8 @@ function LinkForm({ t, link, onDone, onCancel }: {
 function Explain({ t, link, onDone, onCancel }: { t: Transaction; link?: TxLink; onDone: () => void; onCancel?: () => void }) {
   const kept = t.proposal?.kind === "remembered" || t.proposal?.kind === "ai" ? t.proposal.as : undefined;
   const proposed = useDetail().transaction!.choices.proposed?.data ?? [];
-  const offer = link ? undefined : proposed[0];
+  // one tap confirms one invoice; several (the AI's) start the form preselected, confirmed there
+  const offer = link || proposed.length !== 1 ? undefined : proposed[0];
   // a bon only explains a debit nothing explains yet (its matcher skips the user's explanations), so not when changing one
   const debit = t.direction === "debit";
   const labels: Partial<Record<Kind, string>> = !debit ? KIND_LABEL : link ? { ...KIND_LABEL, documents: DEBIT_LABEL.documents } : DEBIT_LABEL;
@@ -329,13 +330,12 @@ function Explain({ t, link, onDone, onCancel }: { t: Transaction; link?: TxLink;
   const s = useCompany();
   const { run, busy } = useApp();
   // applied only by this tap; the sheet stays and shows the explanation, as after the forms below
-  const confirm = (ids: string) => void run(s.co, () => post("tx-link", { co: s.co, tx: t.id, invoices: ids }), undefined,
+  const confirm = (id: string) => void run(s.co, () => post("tx-link", { co: s.co, tx: t.id, invoices: id }), undefined,
     (r) => { if (r.ok) onDone(); return false; });
   return (
     <>
       {offer ? <Actions>
-        <Button type="button" className="btn" disabled={busy} onClick={() => confirm(proposed.map((r) => r.id).join(","))}>
-          {`Confirmă: ${proposed.length > 1 ? "facturile" : "factura"} ${proposed.map((r) => r.number).join(", ")}`}</Button>
+        <Button type="button" className="btn" disabled={busy} onClick={() => confirm(offer.id)}>{`Confirmă: factura ${offer.number}`}</Button>
       </Actions> : null}
       <div className={transactionFormStyle}><fieldset>
         <legend>Tip tranzacție</legend>

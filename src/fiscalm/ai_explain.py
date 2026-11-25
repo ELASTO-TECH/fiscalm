@@ -5,7 +5,8 @@ The integration reads the lines nothing proposes anything for, with the firm's o
 explanations people gave recently, and answers per line: a Fără document label, an Avans, a partner and its invoices,
 or nothing. The answer is data: every part is checked against the ledger before it is kept, and only as a proposal
 the person confirms on the transaction's sheet. Applied on its own is only a label the integration is sure of, on a
-line no open invoice or prepared payment fits by amount and no receipt can explain (links.apply_ai_label). A document
+line no open invoice or payment row fits by amount and no receipt can explain, checked under the write lock
+(links.apply_ai_label). A document
 is never linked or settled here (AGENTS.md non-negotiables 2 and 3). Bank texts are untrusted: the prompt says so,
 and nothing in an answer chooses an action, a URL or a file.
 """
@@ -13,13 +14,16 @@ and nothing in an answer chooses an action, a URL or a file.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable
 
 from fiscalm import ai, integrations, links
-from fiscalm.api import state as api, transaction_choices
+from fiscalm.api import transaction_choices
+from fiscalm.bank import statements
 from fiscalm.ledger import Ledger
 
 BATCH = 40  # lines asked about per run; the rest wait for the next one
+TURN = "ai-explain-last"  # meta: the firm whose lines were asked about last
 CONTEXT = 200  # open invoices and partners shown, newest first
 KINDS = ("label", "advance", "documents", "none")
 SCHEMA = {
@@ -56,32 +60,32 @@ SYSTEM = (
 
 def explain(L: Ledger, company: str, full: dict, ask: Callable | None = None) -> dict[str, int]:
     """Ask about up to BATCH lines (api.state's `full` for the company, read after apply_rules) not asked before,
-    keep the checked proposals and apply the sure labels. No integration, or no usable answer, does nothing."""
+    keep the checked proposals and apply the sure labels. No integration, or no usable answer, does nothing. `sent`:
+    a request was made (one per run: in_turn)."""
     if ask is None and not (integrations.default(L, "ai") is not None and ai.available(L)):
-        return {"asked": 0, "applied": 0}
+        return {"sent": 0, "asked": 0, "applied": 0}
     asked = L.ai_proposals(company)
     rows = full["transactions"]["rows"]
     lines = [r for r in rows if r["can_link"] and not (r["explanation"] or r["proposal"] or r["awaiting"])]
     lines = [r for r in lines if r["id"] not in asked][:BATCH]
     if not lines:
-        return {"asked": 0, "applied": 0}
-    full = full if "prepared_payments" in full else full | {"prepared_payments": api.prepared_payments(L, company)}
+        return {"sent": 0, "asked": 0, "applied": 0}
     try:
         got = (ask or (lambda s, p, sc: ai.ask_json(L, s, p, sc)))(SYSTEM, _prompt(full, rows, lines), SCHEMA)
         ai.check(got, SCHEMA)
     except Exception:  # no usable answer is no decision; the lines are asked again next time
-        return {"asked": 0, "applied": 0}
+        return {"sent": 1, "asked": 0, "applied": 0}
     by_id, kept, applied = {r["id"]: r for r in lines}, {}, 0
+    answered = Counter(a["tx"] for a in got["answers"])
     for a in got["answers"]:
-        tx = by_id.get(a["tx"])
-        if tx and tx["id"] not in kept:
-            kept[tx["id"]] = _checked(full, tx, a)
+        if tx := by_id.get(a["tx"]):  # two answers for one line contradict or repeat: neither is trusted
+            kept[tx["id"]] = _checked(full, tx, a) if answered[a["tx"]] == 1 else {"kind": "none", "sure": False}
     for tx in lines:  # a line the answer skipped is asked about again next time
         p = kept.get(tx["id"])
-        if p and p.pop("sure") and p["kind"] == "label" and not _fits(full, tx):
+        if p and p.pop("sure") and p["kind"] == "label":  # the amounts are checked under the lock
             applied += links.apply_ai_label(L, company, tx["id"], p["reason"], p["note"] or "")
     L.keep_ai_proposals(company, kept)
-    return {"asked": len(lines), "applied": applied}
+    return {"sent": 1, "asked": len(lines), "applied": applied}
 
 
 def _prompt(full: dict, rows: list[dict], lines: list[dict]) -> str:
@@ -101,7 +105,14 @@ def _prompt(full: dict, rows: list[dict], lines: list[dict]) -> str:
     named = {r["partner"] for r in newest}
     partners = [{"id": p["id"], "name": p["name"]} for p in full["partners"] if p["id"] in named]
     explained = [
-        line(r) | {"explained_as": {k: v for k, v in r["explanation"].items() if k in ("kind", "label", "note", "who")}}
+        line(r)
+        | {
+            "explained_as": {
+                k: statements.masked(v) if k in ("note", "who") and v else v
+                for k, v in r["explanation"].items()
+                if k in ("kind", "label", "note", "who")
+            }
+        }
         for r in rows
         if r["explanation"]
         and r["explanation"]["kind"] in ("label", "advance")
@@ -116,7 +127,7 @@ def _checked(full: dict, tx: dict, a: dict) -> dict:
     a note); an advance: who, briefly; documents: the partner's open invoices of this direction, all of them only when
     what is left of them is the line's amount to the cent (transaction_choices.exactly), else the partner alone."""
     none = {"kind": "none", "sure": False}
-    note = " ".join(a["note"].split())
+    note = " ".join(statements.masked(a["note"]).split())  # never an account or a card in full
     if a["kind"] == "label":
         ok = a["label"] in links.LABELS and len(note) <= links.NOTE_MAX and (note or a["label"] != "other")
         return {"kind": "label", "reason": a["label"], "note": note or None, "sure": a["sure"]} if ok else none
@@ -129,8 +140,12 @@ def _checked(full: dict, tx: dict, a: dict) -> dict:
     return {"kind": "documents", "partner": a["partner"], "invoices": a["invoices"] if whole else [], "sure": False}
 
 
-def _fits(full: dict, tx: dict) -> bool:
-    """An open invoice of the line's direction or a prepared payment is exactly its amount: a label would hide it."""
-    return any(transaction_choices.exactly(full, tx, [r["id"]]) for r in transaction_choices._open(full, tx)) or bool(
-        tx["direction"] == "debit" and transaction_choices.prepared(full, tx, False)
-    )
+def in_turn(L: Ledger, firms: list[str]) -> list[str]:
+    """The firms in the order their lines are asked about: after the one asked last (took_turn), round the list."""
+    last = L.get_meta(TURN) or ""
+    after = firms.index(last) + 1 if last in firms else 0
+    return firms[after:] + firms[:after]
+
+
+def took_turn(L: Ledger, company: str) -> None:
+    L.set_meta(TURN, company)

@@ -552,8 +552,16 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
 
 def apply_ai_label(L: Ledger, company: str, key: str, label: str, note: str) -> bool:
     """A Fără document label the AI integration is sure of (ai_explain), written as an explanation no person made
-    (rule 'ai'): refused as a person's label would be, and while anybody decided otherwise since (_untouched)."""
-    build = _untouched(L, company, key, None, _labelled(L, company, key, label, note))
+    (rule 'ai'): refused as a person's label would be, while anybody decided otherwise since (_untouched), and while
+    an open item is exactly the line's amount (fits_open_amount), all under the write lock."""
+    labelled = _labelled(L, company, key, label, note)
+
+    def unfit() -> dict:
+        if fits_open_amount(L, company, _transaction(L, company, key)[0]):
+            raise LinkRefused("changed")
+        return labelled()
+
+    build = _untouched(L, company, key, None, unfit)
     try:
         L.link_tx(company, key, "", build, need(L, company), None, "ai")
     except LinkRefused:
@@ -644,6 +652,32 @@ def names_open_invoice(L: Ledger, company: str, t: statements.Tx) -> bool:
         "AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)"
     )
     return any(names(r["number"] or "") for r in L.db.execute(sql, (company,)))
+
+
+def fits_open_amount(L: Ledger, company: str, t: statements.Tx) -> bool:
+    """Something the line may pay or collect is left at exactly its amount, in its currency or its card's original one
+    (signs ignored): an issued invoice for a credit; a received invoice or an unpaid payment row for a debit. A label
+    would hide it. One pass over the company's open items; read under the write lock."""
+    amounts = {(t.currency, abs(t.amount))}
+    if t.orig_amount is not None and t.orig_currency:
+        amounts.add((t.orig_currency, abs(t.orig_amount)))
+    queries = (
+        ["SELECT 'issued ' || message_id, currency FROM issued WHERE company=? AND status IN ('open','marked')"]
+        if t.direction == "credit"
+        else [
+            "SELECT 'efactura ' || message_id, currency FROM efactura WHERE company=? "
+            "AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)",
+            "SELECT 'payment ' || item_id, 'RON' FROM payments WHERE company=? AND status IN ('pending','exported')",
+        ]
+    )
+    items = [tuple(r) for q in queries for r in L.db.execute(q, (company,))]
+    done: dict[str, Decimal] = defaultdict(Decimal)
+    for r in L.db.execute(
+        "SELECT item, amount FROM tx_link_items JOIN tx_links USING(tx_key) WHERE company=?", (company,)
+    ):
+        done[r["item"]] += Decimal(r["amount"])
+    left = need(L, company)
+    return any((cur or "RON", left(item) - done[item]) in amounts for item, cur in items)
 
 
 def _decided(L: Ledger, key: str) -> bool:

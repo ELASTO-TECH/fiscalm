@@ -158,7 +158,7 @@ it("proposes the one invoice the details name at its exact amount, confirmed in 
   expect(new URLSearchParams(location.search).get("tx")).toBe(POPESCU);
 });
 
-it("starts from the AI integration's proposal: its invoices confirmed in one tap, or its label preselected", async () => {
+it("starts from the AI integration's proposal: its invoices or its label preselected, confirmed by the person", async () => {
   const full = fixture(), t = full.transactions.rows.find((r) => r.id === POPESCU)!;
   const open = full.issued.filter((r) => r.status === "open" && r.currency === "RON" && !r.rejected && r.local_id !== r.id);
   const [a, b] = open.filter((r) => r.partner === open.find((x) => open.some((y) => y !== x && y.partner === x.partner))!.partner);
@@ -169,8 +169,11 @@ it("starts from the AI integration's proposal: its invoices confirmed in one tap
     transactionChoices: (url) => json(choicesResult(full, query(url))), onPost: () => json({ ok: false, message: "Refuzat" }) });
   const s = await sheet();
   expect(s.getByText("Propunere")).toBeInTheDocument();
-  await userEvent.click(s.getByRole("button", { name: `Confirmă: facturile ${a.number}, ${b.number}` }));
-  expect(api.posts()[0].body).toEqual({ co: "NORD", tx: POPESCU, invoices: `${a.id},${b.id}` });
+  expect(s.queryByRole("button", { name: /^Confirmă/ })).toBeNull(); // several invoices: no one-tap settlement
+  expect(s.getByRole("checkbox", { name: new RegExp(`Factura ${a.number}`) })).toBeChecked();
+  expect(s.getByRole("checkbox", { name: new RegExp(`Factura ${b.number}`) })).toBeChecked();
+  await userEvent.click(s.getByRole("button", { name: "Asociază tranzacția" }));
+  expect(api.posts()[0].body).toEqual({ co: "NORD", tx: POPESCU, invoices: `${a.id},${b.id}`, payment: "", reason: "", note: "", was: "", remember: "" });
   cleanup();
   Object.assign(t, { proposal: { kind: "ai", as: { kind: "label", partner: null, reason: "other", note: "Impozit" }, invoices: [] } });
   renderApp({ state: () => json(summaryResult(full)), detail: (url) => json(detailResult(full, query(url))),

@@ -178,7 +178,7 @@ function fixtureProposed(s: State, t: Transaction): TransactionInvoiceChoice[] {
   const cur = new Set(rows.map((x) => x.currency || "RON")), one = cur.size === 1 ? [...cur][0] : "";
   const due = t.currency === one ? t.amount : t.orig?.currency === one ? t.orig.amount : null;
   const sum = rows.reduce((n, x) => n + cents(x.left), 0n);
-  return ids.length && rows.length === ids.length && due && sum === cents(due) ? rows.map(pick) : [];
+  return ids.length && rows.length === ids.length && due && sum === cents(due.replace("-", "")) ? rows.map(pick) : [];
 }
 
 const textOrder = (a: string, b: string) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0;

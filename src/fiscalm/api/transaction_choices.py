@@ -153,7 +153,7 @@ def exactly(full: dict, tx: dict, ids: list[str]) -> list[dict]:
         return []
     orig = tx.get("orig") or {}
     amount = {tx["currency"]: tx["amount"], orig.get("currency"): orig.get("amount")}.get(currencies.pop())
-    if not amount or sum(Decimal(r["left"]) for r in rows) != Decimal(amount):
+    if not amount or sum(Decimal(r["left"]) for r in rows) != abs(Decimal(amount)):
         return []
     return [pick(r, r["left"], False) | {"position": n} for n, r in enumerate(rows)]
 

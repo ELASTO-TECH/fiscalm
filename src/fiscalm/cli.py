@@ -1229,10 +1229,13 @@ def build_parser() -> argparse.ArgumentParser:
     def tx_rules(a, L: Ledger) -> int:
         # the rows as Tranzacții shows them: a rule explains only a row left with nothing else proposed; the AI
         # integration is asked about what the rules left (ai_explain)
-        out = {}
-        for co in companies.all(L):
-            ruled = len(links.apply_rules(L, co, api.state(L, co)["transactions"]["rows"]))
-            out[co] = {"rules": ruled, **ai_explain.explain(L, co, api.state(L, co))}
+        firms = list(companies.all(L))
+        out = {co: {"rules": len(links.apply_rules(L, co, api.state(L, co)["transactions"]["rows"]))} for co in firms}
+        for co in ai_explain.in_turn(L, firms):  # one request a run: a slow provider delays no rule and no firm's turn
+            out[co] |= ai_explain.explain(L, co, api.state(L, co))
+            if out[co]["sent"]:
+                ai_explain.took_turn(L, co)
+                break
         print(json.dumps(out))
         return 0
 

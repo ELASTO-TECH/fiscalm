@@ -3,6 +3,9 @@ sure label on a line nothing fits by amount is applied, and no document is ever 
 
 from __future__ import annotations
 
+from contextlib import closing
+from decimal import Decimal
+
 import pytest
 from test_links import _bill, _record, _sale, _tx
 
@@ -10,6 +13,7 @@ from fiscalm import ai_explain, links
 from fiscalm.ai import AIError
 from fiscalm.api import state as api, transaction_choices
 from fiscalm.bank import statements
+from fiscalm.ledger import Ledger
 
 
 def _answer(tx: str, kind: str, *, label: str = "", note: str = "", partner: str = "", invoices=(), sure=True) -> dict:
@@ -71,7 +75,9 @@ def test_a_sure_label_is_applied_only_where_no_open_document_fits_and_the_rest_w
             _answer("not-a-line", "label", label="bank_fee"),
         ],
     )
-    assert got == {"asked": 6, "applied": 1} and "ignore the rules" in prompts[0]  # data in the prompt, never obeyed
+    assert (
+        got == {"sent": 1, "asked": 6, "applied": 1} and "ignore the rules" in prompts[0]
+    )  # data in the prompt, never obeyed
     rows = _rows(ledger)
     assert (rows[fee]["explanation"]["note"], rows[fee]["explanation"]["link"]["rule"]) == ("Abonament cloud", "ai")
     assert rows[fits]["explanation"] is None and rows[fits]["proposal"]["as"]["reason"] == "personal"
@@ -85,16 +91,16 @@ def test_a_sure_label_is_applied_only_where_no_open_document_fits_and_the_rest_w
         ledger.issued("101")["status"] == "open"
         and ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 1
     )
-    assert _run(ledger, [])[0] == {"asked": 0, "applied": 0}  # every line asked once
+    assert _run(ledger, [])[0] == {"sent": 0, "asked": 0, "applied": 0}  # every line asked once
 
 
 @pytest.mark.parametrize("fail", [True, False])
 def test_no_usable_answer_or_no_integration_decides_nothing(ledger, live, fail):
     (key,) = _record(ledger, "NORD", _tx(7, "debit", "12.00"))
     if fail:
-        assert _run(ledger, fail=True)[0] == {"asked": 0, "applied": 0} and not ledger.ai_proposals("NORD")
+        assert _run(ledger, fail=True)[0] == {"sent": 1, "asked": 0, "applied": 0} and not ledger.ai_proposals("NORD")
     else:  # no ask and no configured integration: nothing is sent anywhere
-        assert ai_explain.explain(ledger, "NORD", api.state(ledger, "NORD")) == {"asked": 0, "applied": 0}
+        assert ai_explain.explain(ledger, "NORD", api.state(ledger, "NORD")) == {"sent": 0, "asked": 0, "applied": 0}
     assert _rows(ledger)[key]["explanation"] is None
 
 
@@ -104,3 +110,39 @@ def test_a_rule_still_explains_a_line_the_ai_only_proposed_for(ledger, live):
     assert _rows(ledger)[fee]["proposal"]["kind"] == "ai"
     assert links.apply_rules(ledger, "NORD", list(_rows(ledger).values())) == [fee]
     assert _rows(ledger)[fee]["explanation"]["label"] == "bank_fee"
+
+
+def test_a_sure_label_waits_when_an_amount_fits_by_the_write_or_answers_disagree(ledger, live):
+    """An invoice recorded while the provider answers, a card's signed original amount fitting an open invoice, or two
+    answers for one line: nothing applied. A note never keeps an account in full."""
+    late, abroad, twice = _record(
+        ledger,
+        "NORD",
+        _tx(9, "debit", "44.00"),
+        _tx(10, "debit", "49.70", orig_amount=Decimal("-10.00"), orig_currency="EUR", card_last4="0005"),
+        _tx(11, "debit", "61.00"),
+    )
+    assert ledger.assign_card("NORD", abroad, "NORD")
+    _bill(ledger, "89", "10.00", currency="EUR")
+    iban = "RO49AAAA1B31007593840000"
+
+    def answers(prompt):
+        with closing(Ledger(ledger.path)) as other:  # another connection records the invoice meanwhile
+            _bill(other, "88", "44.00")
+        return [
+            _answer(late, "label", label="other", note=f"Plata catre {iban}"),
+            _answer(abroad, "label", label="personal"),
+            _answer(twice, "documents", partner="", sure=False),
+            _answer(twice, "label", label="personal"),
+        ]
+
+    assert _run(ledger, answers)[0] == {"sent": 1, "asked": 3, "applied": 0}
+    kept = ledger.ai_proposals("NORD")
+    assert kept[late]["note"] == "Plata catre ••••0000"
+    assert kept[twice]["kind"] == "none" and ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 0
+
+
+def test_one_firm_a_run_asks_the_ai_in_turn(ledger):
+    assert ai_explain.in_turn(ledger, ["A", "B", "C"]) == ["A", "B", "C"]
+    ai_explain.took_turn(ledger, "B")
+    assert ai_explain.in_turn(ledger, ["A", "B", "C"]) == ["C", "A", "B"]
