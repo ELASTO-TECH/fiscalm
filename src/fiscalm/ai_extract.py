@@ -145,6 +145,12 @@ def _firm(name: str, tax_id: str, firms: dict[str, companies.Company], text: str
     return key if not text or printed else None
 
 
+def _card_printed(card: str, text: str) -> bool:
+    """The text prints these last four digits as a card's: masked (docs._card) or right after a card word."""
+    near = rf"\b(?:card|visa|mastercard|maestro|amex|ending(?: in)?)\b[^\d\n]{{0,20}}{card}\b"
+    return docs._card(text) == card or re.search(near, text, re.I) is not None
+
+
 def _words(text: str) -> str:
     """Text as lower-case words, dots dropped (S.R.L. is SRL): a name stands in it only whole, word for word."""
     return " ".join(re.sub(r"\W+", " ", text.casefold().replace(".", "")).split())
@@ -165,7 +171,7 @@ def check(raw: dict, firms: dict[str, companies.Company], text: str = "") -> Ext
         "issue_date": _day(s["issue_date"].strip(), text),
         "total": _total(s["total"].strip(), text),
         "currency": currency if currency in docs.CURRENCIES else "",
-        "card_last4": card if re.fullmatch(r"\d{4}", card) and (not text or docs._card(text) == card) else "",
+        "card_last4": card if re.fullmatch(r"\d{4}", card) and (not text or _card_printed(card, text)) else "",
     }
     words = _words(text)
     names = {k: s[k].strip()[:200] for k in ("buyer_name", "seller_name")}

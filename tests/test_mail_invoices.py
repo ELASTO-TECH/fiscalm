@@ -325,15 +325,11 @@ SAAS = [
 def test_a_confident_ai_reading_files_what_the_rules_could_not(ledger, home, live_mode):
     if live_mode:
         go_live(home)
-    ask = reading(seller_name="Example SaaS Inc", number="SAAS-7781", total="49.00", currency="USD")
+    ask = reading(seller_name="Example SaaS Inc", number="SAAS-7781", total="49.00", currency="USD", card_last4="4242")
     assert mi.handle(ledger, message(("pdf", text_pdf(SAAS))), ask=ask) == "filed:1"
     (doc,) = docs_of(ledger)
-    assert (doc["company"], doc["amount"], doc["currency"], doc["vendor"]) == (
-        "NORD",
-        "49.00",
-        "USD",
-        "Example SaaS Inc",
-    )
+    got = (doc["company"], doc["amount"], doc["currency"], doc["vendor"], doc["card_last4"])
+    assert got == ("NORD", "49.00", "USD", "Example SaaS Inc", "4242")
     assert mi.questions(ledger) == [] and "Charged $49.00" in ask.calls[0][0]
 
 
@@ -394,6 +390,7 @@ def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
         (invoice("Total paid 15.00 EUR"), {"total": "15.00", "buyer_tax_id": "RO44444444"}),  # an id none of ours
         (invoice("Order ABC-1984", buyer="Atelier Nord SRL", number=""), {"number": "ABC-1984"}),  # our own number
         (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {}),  # a currency the document never shows
+        (invoice("Ship to: Atelier", "Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),  # a wrapped name
         (invoice("Ship to: Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),  # only its delivery address
         (invoice("Ship to:  Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),
         (invoice(buyer="Atelier Nord SRL", total="Total 12.10 EUR MegaCloud"), {"seller_name": "Cloud"}),

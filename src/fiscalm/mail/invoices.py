@@ -295,12 +295,10 @@ def disputed(text: str, firms: list[str]) -> list[str]:
     word, whatever the layout."""
     lines = text.splitlines()
 
-    def delivered(co: companies.Company) -> bool:
-        return any(
-            (co.named_in(line) or co.tax_id_match(line))
-            and any(DELIVERY.search(x) for x in lines[max(0, i - ABOVE) : i + 1])
-            for i, line in enumerate(lines)
-        )
+    windows = [" ".join(lines[i : i + ABOVE + 1]) for i, line in enumerate(lines) if DELIVERY.search(line)]
+
+    def delivered(co: companies.Company) -> bool:  # on the label's line or below it, a name wrapped over lines too
+        return any(co.named_in(w) or co.tax_id_match(w) for w in windows)
 
     return [
         key
