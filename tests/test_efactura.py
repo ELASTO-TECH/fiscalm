@@ -1569,6 +1569,20 @@ def test_a_net_payment_whose_credit_no_longer_links_is_withdrawn_before_download
     assert ledger.payment(item)["status"] == "pending"
 
 
+def test_an_exported_net_payment_whose_credit_stops_linking_is_never_settled(ledger, home, monkeypatch):
+    (home / "state" / "LIVE").touch()
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    item = ledger.efactura("3001")["item_id"]
+    pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
+    assert ledger.payment(item)["status"] == "exported"
+    _stored(ledger, monkeypatch, **{"3003": ubl(number="TEST 1", issue="2026-10-19")})  # the credit fits two now
+    debit = _tx("200.00", date(2026, 10, 30), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN, desc="plata factura TEST 1")
+    assert recon.auto_mark_paid(ledger, _debit_st(debit)) == []  # the debit stays to explain, the 50.00 stays owed
+    assert not ledger.mark_paid(item, "user: settled by hand", None)  # no writer settles it
+    assert ledger.payment(item)["status"] == "exported" and ledger.efactura("3001")["status"] == "linked"
+
+
 @pytest.mark.parametrize(("shown", "ok"), [("200.00", True), ("250.00", False), ("200", None)])
 def test_a_credited_invoice_is_added_only_for_the_amount_the_person_saw(ledger, home, monkeypatch, shown, ok):
     _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})

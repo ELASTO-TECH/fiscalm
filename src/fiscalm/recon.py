@@ -28,7 +28,6 @@ from fiscalm.bank.intake import (
 )
 from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import Ledger, finance_home
-from fiscalm.payments import engine as pay
 from fiscalm.payments.orders import parse_payment_pdf
 from fiscalm.pdftext import pdf_text, sha256
 from fiscalm.storage import read_file
@@ -488,11 +487,8 @@ def auto_mark_paid(ledger: Ledger, st: statements.Statement) -> list[str]:
     advance = efactura.remembered_advance(ledger, st.company)  # the owner's money: never a payment row's
 
     def settle(p, t):
-        with ledger.tx():  # the net is re-read in the settling transaction: a credit changing it meanwhile wins
-            if p["kind"] == "efactura" and p["item_id"] in pay.stale_payments(ledger, st.company):
-                return  # its amount is no longer the invoice's net: a person checks it
-            if ledger.mark_paid(p["item_id"], f"statement {t.date} REF {t.ref}", statements.tx_key(t)):
-                done.append(p["item_id"])
+        if ledger.mark_paid(p["item_id"], f"statement {t.date} REF {t.ref}", statements.tx_key(t)):
+            done.append(p["item_id"])
         used.add(statements.tx_key(t))
 
     # Unambiguous debits first (one naming its invoice): once they paid theirs, a plain twin may fit a single one.

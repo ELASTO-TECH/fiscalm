@@ -121,19 +121,6 @@ def version(item_ids) -> str:
     return hashlib.sha256(",".join(sorted(item_ids)).encode()).hexdigest()[:12]
 
 
-def stale_payments(ledger: Ledger, company: str) -> set[str]:
-    """Pending invoice payments whose amount is not their invoice's total minus its linked credits now (a credit that
-    stopped linking, or arrived since): no debit settles them, so a shortfall is never hidden as paid."""
-    credits = credited(ledger, company)
-    pending = {p["item_id"]: Decimal(p["amount"]) for p in ledger.payments(company=company, status="pending")}
-    return {
-        r["item_id"]
-        for r in ledger.efactura_rows(status="linked", company=company)
-        if r["item_id"] in pending
-        and pending[r["item_id"]] != Decimal(r["total"]) - credits.get(r["message_id"], Decimal(0))
-    }
-
-
 def _without_credits(ledger: Ledger, rows: list) -> list:
     """Under pay_lock: no unimported invoice payment keeps an amount that is not its invoice's total minus its linked
     credits now (efactura.payment_item): one built before a credit, or for a credit that no longer links, is withdrawn."""

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from fiscalm import companies
 
 from fiscalm import audit, backup
+from fiscalm.efactura import credits
 from fiscalm.migrations import check_version, migrate
 from fiscalm.paths import finance_home
 
@@ -1423,7 +1424,7 @@ class Ledger:
                 ).fetchone()
             ):
                 return False
-            if not self._reserve(db, tx, f"payment {item_id}"):
+            if self._net_changed(db, item_id) or not self._reserve(db, tx, f"payment {item_id}"):
                 return False
             cur = db.execute(
                 "UPDATE payments SET status='paid', paid_at=?, paid_note=? WHERE item_id=? AND status!='paid'",
@@ -1431,6 +1432,19 @@ class Ledger:
             )
             self._release_unless(db, tx, cur.rowcount)
         return cur.rowcount > 0
+
+    def _net_changed(self, db, item_id: str) -> bool:
+        """An invoice payment built for a net (below its invoice's total) that is no longer the total minus the
+        invoice's linked credits: a debit settling it would hide the difference, so no writer settles it."""
+        row = db.execute(
+            "SELECT p.amount,p.company,e.message_id,e.total FROM payments p "
+            "JOIN efactura e ON e.item_id=p.item_id WHERE p.item_id=?",
+            (item_id,),
+        ).fetchone()
+        if not row or Decimal(row["amount"]) == Decimal(row["total"]):
+            return False
+        net = Decimal(row["total"]) - credits.credited(self, row["company"]).get(row["message_id"], Decimal(0))
+        return Decimal(row["amount"]) != net
 
     def sent_invoice_links(self, company: str, environment: str) -> dict[str, str]:
         return dict(
@@ -2502,6 +2516,8 @@ class Ledger:
                 ),
             )
         else:
+            if self._net_changed(db, ident):
+                raise LinkRefused("item_changed")
             cur = db.execute(
                 "UPDATE payments SET status='paid', paid_at=?, paid_note=? WHERE item_id=? AND company=? "
                 "AND status IN ('pending','exported') AND (source_iban IS NULL OR source_iban="
