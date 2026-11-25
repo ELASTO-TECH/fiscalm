@@ -106,6 +106,8 @@ export function ReportUpload({ co, reload }: { co: string; reload: () => void })
       <Input ref={input} type="file" hidden accept=".csv,.xlsx" aria-label="Raport de decontare" onChange={(e) => {
         const f = e.target.files?.[0] ?? null;
         e.target.value = ""; setFile(f); setPreview(null); setPartner(""); setMapping({}); setDay("");
+        // Another file is another report: nothing of the previous payer carries over.
+        setSource(""); setName(""); setCui(""); setCourier(""); filled.current = null;
         if (f) void send(f, {});
       }} />
       {preview ? <>

@@ -442,6 +442,22 @@ it.each([["preset", "Coloanele sunt recunoscute după antet."], ["ai", "Coloanel
     expect(screen.getByLabelText("CUI-ul partenerului (opțional)")).toHaveValue("");
   });
 
+it("starts the next file with no payer from the previous one", async () => {
+  at("?co=NORD&tab=tranzactii");
+  const cfg = config();
+  cfg.companies[0].accounts = [];
+  const previews = [PREVIEW, { ...PREVIEW, proposed: "preset" as const, source: "fan" }];
+  await page({ companies: () => json(cfg), onPost: () => json({ ok: false, message: "", state: null, report: previews.shift() }) });
+  await openUpload("Încarcă raport de decontare");
+  await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["a"], "a.csv", { type: "text/csv" }));
+  await choose(await screen.findByLabelText("Curier sau procesator"), "fan"); // fills the saved FAN payer
+  expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue("Curier Exemplu SRL");
+  await userEvent.click(screen.getByRole("button", { name: "Alege alt fișier" }));
+  await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["b"], "b.csv", { type: "text/csv" }));
+  await waitFor(() => expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue(""));
+  expect(screen.getByLabelText("CUI-ul partenerului (opțional)")).toHaveValue("");
+});
+
 it("clears a saved payer's CUI when another courier is chosen, keeping the name the person typed", async () => {
   at("?co=NORD&tab=tranzactii");
   const cfg = config();

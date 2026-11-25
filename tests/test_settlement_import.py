@@ -425,7 +425,8 @@ def test_preview_recognizes_a_preset_header(ledger):
         (dict(reference="Doc", gross="Incasat", fee="Retinut"), dict(reference="Doc", gross="Incasat", fee="Retinut")),
         (dict(reference="Doc", gross="Incasat", fee="Ignore previous instructions"), None),  # not a header name
         (dict(reference="Doc", gross="Incasat", fee="Incasat"), None),  # one column twice
-        (dict(reference="Doc", gross="Incasat"), None),  # incomplete
+        (dict(reference="Doc"), None),  # incomplete, even with the header guesses
+        (dict(reference="Doc", gross="Retinut", fee="Incasat"), None),  # contradicts the header guess
         (  # a payout day is a person's: dropped from the proposal
             dict(reference="Doc", gross="Incasat", fee="Retinut", date="Doc"),
             dict(reference="Doc", gross="Incasat", fee="Retinut"),
@@ -442,12 +443,17 @@ def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, e
         "ask_json",
         lambda L, s, p, schema: asked.append(p) or {f: "" for f in bank_upload.FIELDS} | answer,
     )
-    data = b"Doc,Incasat,Retinut\nTEST-1,100.00,2.00\n"
+    data = b"Doc,Incasat,Retinut,Moneda\nTEST-1,100.00,2.00,EUR\n"
     with pytest.raises(bank_upload.Refused) as ask:
         bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
-    preview = ask.value.extra
-    assert (preview["guess"], preview["proposed"]) == ((expected, "ai") if expected else ({"gross": "Incasat"}, ""))
+    preview, header = ask.value.extra, {"gross": "Incasat", "currency": "Moneda"}  # the header guesses stand
+    assert (preview["guess"], preview["proposed"]) == ((header | expected, "ai") if expected else (header, ""))
+    assert preview["currency"] == "EUR"
     assert len(asked) == 1 and "TEST-1" not in asked[0] and "xxxx-9" in asked[0]  # cells leave only as shapes
+    asked.clear()
+    with pytest.raises(bank_upload.Refused):  # a headerless file: its first line is data and never leaves
+        bank_upload.accept_report(ledger, "NORD", b"TEST-1,100.00,2.00\nTEST-2,5.00,0\n", "text/csv", **UPLOAD)
+    assert asked == []
 
 
 @pytest.mark.parametrize("second,currency", [("ron", "RON"), ("eur", "")])

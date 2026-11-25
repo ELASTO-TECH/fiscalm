@@ -287,10 +287,15 @@ def _complete(mapping: dict[str, str]) -> bool:
     return {"gross", "fee"} <= mapping.keys() and bool({"reference", "order", "awb"} & mapping.keys())
 
 
-def _ai_columns(L: Ledger, rows: list[list[str]], orders: bool) -> dict[str, str]:
+def _labels(header: list[str]) -> bool:
+    """A header of column names, not a first line of data: words, no long digit runs, no addresses."""
+    return all(re.fullmatch(r"[^\W\d_][^@]{0,79}", c) and not re.search(r"\d{3,}", c) for c in header)
+
+
+def _ai_columns(L: Ledger, rows: list[list[str]], orders: bool, known: dict[str, str]) -> dict[str, str]:
     """The configured AI's column proposal for an unknown header, checked here: only header names, each once, and
     a complete mapping, else nothing. It only pre-fills the form; a person still submits it (and names the payer)."""
-    if not ai.available(L):
+    if not ai.available(L) or not _labels(rows[0]):  # a headerless file's first line is data: it stays here
         return {}
     fields = [f for f in FIELDS if f != "date"]  # a payout day changes matching: only a person maps it
     schema = {"type": "object", "properties": {f: {"type": "string"} for f in fields}, "required": fields}
@@ -302,6 +307,10 @@ def _ai_columns(L: Ledger, rows: list[list[str]], orders: bool) -> dict[str, str
     except (ai.AIError, ValueError):
         return {}
     mapping = {f: c for f, c in answer.items() if f in fields and c and (orders or f not in ("awb", "order"))}
+    # The AI only fills gaps: the header guesses stand, and an answer that contradicts one is dropped whole.
+    if any(f in known and known[f] != c for f, c in mapping.items()):
+        return {}
+    mapping = known | mapping  # a column both use for two fields fails the one-field-per-column check below
     if not set(mapping.values()) <= set(rows[0]) or len(set(mapping.values())) != len(mapping):
         return {}
     return mapping if _complete(mapping) else {}
@@ -317,7 +326,7 @@ def _preview(L: Ledger, rows: list[list[str]], known: list[dict], context: tuple
     if preset:  # the preset's columns, plus the header guesses that use none of them (a currency column)
         preset = {f: c for f, c in preset.items() if orders or f not in ("awb", "order")}
         guess = {f: c for f, c in guess.items() if f not in preset and c not in preset.values()} | preset
-    elif guess != STRIPE and not known and not _complete(guess) and (ai_guess := _ai_columns(L, rows, orders)):
+    elif guess != STRIPE and not known and not _complete(guess) and (ai_guess := _ai_columns(L, rows, orders, guess)):
         guess, proposed = ai_guess, "ai"
     return {
         "proposed": proposed,
