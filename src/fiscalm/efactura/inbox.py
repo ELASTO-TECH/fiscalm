@@ -920,7 +920,8 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
     Debits left fitting several candidates are recorded for the user to pick from (note_ambiguous). The statement's
     transactions are put on record first (Ledger.record_statement): the evidence behind every debit it settles."""
     L.record_statement(st)
-    done = _settle_debits(L, st)
+    with L.tx():  # one view of every candidate: a write between two of its reads could hide a rival
+        done = _settle_debits(L, st)
     note_ambiguous(L, st)
     return done
 

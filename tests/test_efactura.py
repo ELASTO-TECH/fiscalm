@@ -2,6 +2,7 @@
 
 import io
 import json
+import sys
 import zipfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -382,6 +383,33 @@ def test_a_mail_proof_is_confirmed_by_its_later_debit_once(ledger, home, sec, mo
     assert not efactura.confirm_by_mail(ledger, "3002", "imap:proof", "mail: plata confirmata")
 
 
+def test_a_reopen_during_matching_never_hides_a_rival(ledger, home, sec, monkeypatch):
+    """The matcher read open invoices, another connection reopened marked B, then the matcher read marked ones: B was in
+    neither and the debit settled mail-proved A alone. It reads every candidate under the write lock now."""
+    import threading
+
+    from fiscalm.ledger import Ledger
+
+    _stored(ledger, monkeypatch, **{"3001": ubl(), "3002": ubl(number="RMBU 2222603", issue="2026-10-21")})
+    efactura.judged(ledger, "3001", ["imap:proof"])
+    assert efactura.confirm_by_mail(ledger, "3001", "imap:proof", "mail: plata confirmata")
+    assert ledger.mark_efactura_paid("3002", "user: already paid (page)")
+    other = threading.Thread(target=lambda: efactura.reopen(Ledger(), "3002"))
+    marked = efactura._marked
+
+    def reopen_then_read(L, company=None):  # between rivals' read of the open rows and of the marked ones
+        if sys._getframe(1).f_code.co_name == "_open_invoices" and not other.ident:
+            other.start()
+            other.join(timeout=1)  # blocked by the matcher's lock: it stops waiting and the matcher goes on
+        return marked(L, company)
+
+    monkeypatch.setattr(efactura, "_marked", reopen_then_read)
+    t = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
+    assert efactura.match_statement(ledger, _debit_st(t)) == []
+    other.join()
+    assert ledger.efactura("3002")["status"] == "open" and statements.tx_key(t) not in ledger.used_txs()
+
+
 @pytest.mark.parametrize("case", ["credited", "withdrawn", "unreadable twin"])
 def test_a_mail_proved_invoice_takes_its_debit_like_an_open_one(ledger, home, sec, monkeypatch, case):
     credit = ubl(number="COR 2", total="-50.00").replace(
@@ -397,7 +425,9 @@ def test_a_mail_proved_invoice_takes_its_debit_like_an_open_one(ledger, home, se
             "INSERT INTO efactura(message_id,company,raw_path,status,created_at,parse_error,paid_tx) "
             "VALUES('3009','NORD','x.zip','paid','2026-10-20','synthetic','ef-proof:imap:other')"
         )
+        ledger.db.execute("INSERT INTO settled_tx VALUES('ef-proof:imap:other','efactura 3009','2026-10-21')")
         ledger.db.commit()
+        efactura.judged(ledger, "3009", ["imap:other"])  # a proof as valid as any: only unreadable
     proved = "3001"
     if case == "credited":  # 3001's rest (200, netted once) is a rival of a mail-proved 200 invoice, marked or not
         _stored(ledger, monkeypatch, **{"3003": ubl(number="TEST 3", total="200.00")})
