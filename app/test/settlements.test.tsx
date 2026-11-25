@@ -67,7 +67,10 @@ it("confirms exactly the displayed credit from the task card, the sheet one link
 
 it("lets a person confirm or withdraw a report that came by mail", async () => {
   const s = fixture(); s.settlements = [{ ...settlement(), error: "mail_confirmation_required" }];
-  const onPost = vi.fn(({ body }: { body: unknown }) => body && json({ ok: true, message: "Raportul a fost șters.", next: null, done: null, state: s }));
+  const onPost = vi.fn(({ body }: { body: unknown }) => {
+    expect(body).toEqual({ co: "NORD", id });
+    return json({ ok: true, message: "Raportul a fost șters.", next: null, done: null, state: s });
+  });
   at(`?co=NORD&tab=sarcini&set=${id}`); renderApp({ state: () => json(s), onPost });
   const dialog = await screen.findByRole("dialog", { busy: false });
   expect(dialog).toHaveTextContent("Raportul a venit pe mail: verifică-l. Așteaptă confirmarea ta");
@@ -75,7 +78,6 @@ it("lets a person confirm or withdraw a report that came by mail", async () => {
   await userEvent.click(within(dialog).getByRole("button", { name: "Șterge raportul" }));
   await userEvent.click(within(await screen.findByRole("dialog", { name: "Ștergi raportul greșit? Facturile rămân neîncasate." })).getByRole("button", { name: "Șterge raportul" }));
   await waitFor(() => expect(onPost).toHaveBeenCalledTimes(1));
-  expect(onPost.mock.calls[0]?.[0].body).toEqual({ co: "NORD", id });
 });
 
 it("allows verified local confirmation in shadow mode", async () => {
