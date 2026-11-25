@@ -15,7 +15,6 @@ The user approves the invoice (`approve`).
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import io
 import json
@@ -784,15 +783,15 @@ def rivals(L: Ledger, company: str):
     ]
     items = L.payments(status=("pending", "exported"), company=company)
     known, refs = _known_numbers(L, company, old)
-    cands = [(("efactura", r["message_id"]), _ids(r["number"]), lambda t, r=r: _fits(r, t)) for r in invoices]
-    cands += [(("payment", p["item_id"]), _ids(p["doc_ref"], p), lambda t, p=p: payment_fits(p, t)) for p in items]
+    cands = [(("efactura", r["message_id"]), number_of(r["number"]), lambda t, r=r: _fits(r, t)) for r in invoices]
+    cands += [(("payment", p["item_id"]), payment_number(p), lambda t, p=p: payment_fits(p, t)) for p in items]
     bons = bon_paid(L, company)
     cands += [  # paid at the till: only its card payment
-        (("efactura", r["message_id"]), _ids(r["number"]), lambda t, r=r: _card_payment(t) and _fits(r, t))
+        (("efactura", r["message_id"]), number_of(r["number"]), lambda t, r=r: _card_payment(t) and _fits(r, t))
         for r in bons
     ]
-    cands += [(("history", r["message_id"]), _ids(r["number"]), lambda t, r=r: _fits(r, t)) for r in old]
-    cands += [(("partial", r["message_id"]), _ids(r["number"]), lambda t, r=r: _fits(r, t)) for r in partial]
+    cands += [(("history", r["message_id"]), number_of(r["number"]), lambda t, r=r: _fits(r, t)) for r in old]
+    cands += [(("partial", r["message_id"]), number_of(r["number"]), lambda t, r=r: _fits(r, t)) for r in partial]
     # every candidate as an amount, a date and the accounts it may be paid to (None: a card only), for `candidates`
     # (payment rows are paid on or after their date, invoices from 5 days before)
     pool = [(("efactura", r["message_id"]), r, r["total"], r["currency"], _ibans(r), -5) for r in invoices]
@@ -804,10 +803,10 @@ def rivals(L: Ledger, company: str):
     def of(t: statements.Tx) -> set[tuple[str, str]]:
         if not L.card_allows(company, t.card_last4):
             return set()
-        names = _naming(t, known, refs)
-        return {key for key, no, fits in cands if _allowed(no, names) and fits(t)}
+        names = _named(known, t)
+        return {key for key, no, fits in cands if (not names or no in names) and fits(t)}
 
-    of.naming, of.pool = (lambda t: _naming(t, known, refs)), pool  # what `candidates` reads, the same lists
+    of.mentions, of.pool = (lambda t: _mentions(t, known, refs)), pool  # what `candidates` reads, the same lists
     return of
 
 
@@ -832,7 +831,7 @@ def _known_numbers(L: Ledger, company: str, old: list) -> tuple[set[str], set[st
     known = {n for r in rows if (n := number_of(r["number"]))} | {n for p in pays if (n := payment_number(p))}
     known |= {n for r in old if (n := number_of(r["number"]))}
     numbers = [*(r["number"] for r in rows), *(p["doc_ref"] for p in pays), *(r["number"] for r in old)]
-    return known, {ref: pattern for n in numbers if (pattern := _pattern(n)) and (ref := _reference(n))}
+    return known, [pattern for n in numbers if (pattern := _pattern(n))]
 
 
 def _pattern(number: str | None) -> re.Pattern | None:
@@ -848,26 +847,11 @@ def _pattern(number: str | None) -> re.Pattern | None:
     return re.compile(rf"(?<![A-Z0-9]){body}(?![A-Z0-9])", re.I)
 
 
-def _ids(number: str | None, payment=None) -> tuple[str, str]:
-    """A candidate's number as digits (payment_number for a payment row) and as a whole reference."""
-    return (payment_number(payment) if payment is not None else number_of(number)), _reference(number)
-
-
-def _naming(t: statements.Tx, known: set[str], refs: dict) -> tuple[set[str], set[str]]:
-    """What a debit's text names: whole references it writes ('ALFA-1234' never names 'BETA-1234' nor 'ALFA-12345'),
-    and, in the rest of the text, known numbers as digits ('ALFA-1234 si 5678' names both)."""
-    text, whole = t.description, set()
-    for ref, pattern in refs.items():
-        if pattern.search(text):
-            whole.add(ref)
-            text = pattern.sub(" ", text)
-    return whole, _named(known, dataclasses.replace(t, description=text))
-
-
-def _allowed(ids: tuple[str, str], naming: tuple[set[str], set[str]]) -> bool:
-    """A candidate the debit's text allows: any when it names none, else one it names."""
-    whole, digits = naming
-    return not (whole or digits) or ids[1] in whole or ids[0] in digits
+def _mentions(t: statements.Tx, known: set[str], refs: list[re.Pattern]) -> bool:
+    """A debit's text names some known invoice: its number as digits (the matchers' rule) or a whole reference as
+    written ('ALFA-1234', '123-456'). Such a debit is for that invoice: it never settles anything by its amount
+    alone (it settles the invoice it names by its account or name: rivals)."""
+    return bool(_named(known, t)) or any(pattern.search(t.description) for pattern in refs)
 
 
 def _named(known: set[str], t: statements.Tx) -> set[str]:
@@ -929,12 +913,10 @@ def candidates(L: Ledger, company: str, fit=None) -> Callable[[statements.Tx], s
         advance, tracked, own = known()
         if advance(t) or t.counterparty_iban in own or (t.counterparty_iban, t.amount) in tracked:
             return set()
-        names = fit.naming(t)  # a debit naming invoices fits only those
+        if fit.mentions(t):  # for the invoice it names: never another by its amount
+            return set()
         return {
-            key
-            for key, row, total, currency, ibans, early in fit.pool
-            if _allowed(_ids(row["doc_ref"], row) if key[0] == "payment" else _ids(row["number"]), names)
-            and fits(t, row, total, currency, ibans, early)
+            key for key, row, total, currency, ibans, early in fit.pool if fits(t, row, total, currency, ibans, early)
         }
 
     return lambda t: fit(t) or alone(t)
@@ -1000,27 +982,29 @@ def _settle_debits(L: Ledger, st: statements.Statement) -> list[str]:
             for t in debits
             if tx_key(t) not in used
             and len(left := fits_of[tx_key(t)] - settled) == 1
-            and (k := next(iter(left)))[0] in ("efactura", "payment")
+            and ((k := next(iter(left)))[0] == "payment" or k[1] in rows or k[1] in bons)
         ),
         None,
     ):
         t, key = settle
-        used.add(tx_key(t))
-        settled.add(key)  # tried once: a write the ledger refuses is not tried again
+        used.add(tx_key(t))  # tried once; its candidate is taken only when the ledger's write succeeds
         if key[0] == "payment":  # the one left once the invoices before it settled (recon.auto_mark_paid ran first)
-            L.mark_paid(key[1], f"statement {t.date} REF {t.ref}", tx_key(t))
+            ok = L.mark_paid(key[1], f"statement {t.date} REF {t.ref}", tx_key(t))
         elif key[1] in bons:
-            if L.settle_bon_card(key[1], tx_key(t)):  # the purchase is the bon's: counted once, not reported as paid
+            if ok := L.settle_bon_card(key[1], tx_key(t)):  # the purchase is the bon's: counted once, not as paid
                 bons.discard(key[1])
                 cands = candidates(L, st.company)
                 fits_of = {tx_key(d): cands(d) for d in debits}
-        elif key[1] in rows:
+        else:
             r = rows[key[1]]
             how = _fits(r, t) or "amount"
-            if L.mark_efactura_paid(
+            ok = L.mark_efactura_paid(
                 r["message_id"], f"statement {t.date} {how} REF {t.ref}", tx_key(t), to_iban=t.counterparty_iban
-            ):
+            )
+            if ok:
                 done.append(r["message_id"])
+        if ok:
+            settled.add(key)
     return done
 
 

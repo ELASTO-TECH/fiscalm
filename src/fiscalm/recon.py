@@ -483,23 +483,35 @@ def auto_mark_paid(ledger: Ledger, st: statements.Statement) -> list[str]:
     """
     ledger.record_statement(st)  # the evidence behind every debit it settles (Ledger.paid_proofs)
     done = []
-    open_items = ledger.payments(status=("pending", "exported"), company=st.company)
     used = ledger.used_txs()
     rivals = efactura.candidates(ledger, st.company)
     advance = efactura.remembered_advance(ledger, st.company)  # the owner's money: never a payment row's
 
-    def settle(p, t):
-        if ledger.mark_paid(p["item_id"], f"statement {t.date} REF {t.ref}", statements.tx_key(t)):
-            done.append(p["item_id"])
+    fits = {}  # each debit's candidates, read once
+    for t in st.settlement_txs:
+        if (
+            t.direction == "debit"
+            and not statements.pays_nothing(t)
+            and statements.tx_key(t) not in used
+            and not advance(t)
+        ):
+            fits[statements.tx_key(t)] = (t, rivals(t))
+    taken: set[tuple[str, str]] = set()
+    # Pass after pass while one settles: a debit left with one payment row once another settled settles it too,
+    # whatever the order of the statement's lines. A row is taken only when the ledger's write succeeds.
+    while pick := next(
+        (
+            (t, k)
+            for key, (t, left) in fits.items()
+            if key not in used and len(rest := left - taken) == 1 and (k := next(iter(rest)))[0] == "payment"
+        ),
+        None,
+    ):
+        t, k = pick
         used.add(statements.tx_key(t))
-
-    # Unambiguous debits first (one naming its invoice): once they paid theirs, a plain twin may fit a single one.
-    for t in sorted(st.settlement_txs, key=lambda t: len(rivals(t)) != 1):
-        if t.direction != "debit" or statements.pays_nothing(t) or statements.tx_key(t) in used or advance(t):
-            continue
-        left = rivals(t) - {("payment", i) for i in done}
-        if len(left) == 1 and (key := left.pop())[0] == "payment":
-            settle(next(p for p in open_items if p["item_id"] == key[1]), t)
+        if ledger.mark_paid(k[1], f"statement {t.date} REF {t.ref}", statements.tx_key(t)):
+            done.append(k[1])
+            taken.add(k)
     return done
 
 

@@ -685,20 +685,50 @@ def test_exact_amount_settling_keeps_every_other_guard(ledger, home, sec, monkey
     [  # a debit naming INV-12345 (paid) never settles INV-1234
         ({"3001": "INV-12345", "3002": "INV-1234"}, ["3001"], ["Plata INV-12345"], []),
         ({"3001": "ALFA-1234", "3002": "5678"}, [], ["Plata facturi ALFA-1234 si 5678"], []),  # names both: neither
-        ({"3001": "N7001", "3002": "N7002"}, [], ["Plata la POS SHOPX7K2", "Factura N7001"], ["3001", "3002"]),  # order
+        ({"3001": "INV-1234", "3002": "INV-1234-56"}, ["3002"], ["Plata INV-1234-56"], []),  # names one: no amount
     ],
 )
 def test_a_debit_naming_invoices_fits_only_those_whatever_the_order(
     ledger, home, sec, monkeypatch, numbers, paid, debits, settled
 ):
-    """Review of #40, round 2: whole references are read exactly as written, digits that belong to one name nothing
-    else, and a debit left with one candidate once another settled is settled too, whatever the statement's order."""
+    """Review of #40: a debit whose text names an invoice (its digits or its whole reference as written) never
+    settles any invoice by its amount alone."""
     _stored(ledger, monkeypatch, **{m: ubl(total="40.00", number=n, iban="") for m, n in numbers.items()})
     for m in paid:
         ledger.db.execute("UPDATE efactura SET status='paid', paid_tx='x' WHERE message_id=?", (m,))
     ledger.db.commit()
     txs = [_tx("40.00", date(2026, 10, 21 + n), desc=d) for n, d in enumerate(debits)]
     assert sorted(efactura.match_statement(ledger, _debit_st(*txs))) == settled
+
+
+@pytest.mark.parametrize("refused", [False, True])
+def test_settling_does_not_depend_on_the_statements_order_nor_survive_a_refused_write(
+    ledger, home, sec, monkeypatch, refused
+):
+    """An anonymous debit fits two invoices by amount; a later one pays the first by its account: the anonymous one
+    then settles the other. When the ledger refuses the first write, the anonymous debit settles nothing."""
+    _stored(
+        ledger,
+        monkeypatch,
+        **{"3001": ubl(number="N7001", total="40.00"), "3002": ubl(number="N7002", total="40.00", iban="")},
+    )
+    mark = ledger.mark_efactura_paid
+    if refused:
+        monkeypatch.setattr(ledger, "mark_efactura_paid", lambda mid, *a, **kw: mid != "3001" and mark(mid, *a, **kw))
+    anonymous = _tx("40.00", date(2026, 10, 21), desc="Plata la POS SHOPX7K2")
+    by_iban = _tx("40.00", date(2026, 10, 22), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata")
+    assert sorted(efactura.match_statement(ledger, _debit_st(anonymous, by_iban))) == (
+        [] if refused else ["3001", "3002"]
+    )
+
+
+def test_payment_rows_settle_whatever_the_order_of_debits_naming_them(ledger, home, sec, monkeypatch):
+    rows = [_payment(ledger, "60.00", f"AA 555{n}") for n in (1, 2, 3)]
+    debits = [
+        _tx("60.00", date(2026, 10, 21 + n), "ACCOUNTANT SRL", OTHER_IBAN, desc=d)
+        for n, d in enumerate(["AA 5551 AA 5552", "AA 5552 AA 5553", "AA 5553"])
+    ]
+    assert sorted(recon.auto_mark_paid(ledger, _debit_st(*debits))) == sorted(rows)
 
 
 def test_a_direct_debit_with_the_shops_name_is_not_a_till_receipts_card_payment(ledger, home, sec, monkeypatch):
