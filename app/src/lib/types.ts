@@ -562,7 +562,7 @@ export type State = {
   /** Evidence-checked reminder text for a human to copy and send. */
   reminder_tasks: ReminderTask[];
   orders?: CommerceOrder[];
-  order_tasks?: {kind: "order_refused"; id: string; company: Co; order_id: string; sheet: "ord"; reason: {code: string; message: string}; label: string; action: "order-discard"}[];
+  order_tasks?: {kind: "order_refused" | "order_vat_review"; id: string; company: Co; order_id: string; draft_id: string | null; sheet: "ord"; reason: {code: string; message: string}; label: string; action: "order-discard" | null}[];
   sales_origins?: SalesOrigin[];
   cod_receivable?: {total: string; other: {currency: string; total: string}[]; count: number};
   /** Cache-only partner warnings: an inactive supplier with invoices to pay, an inactive or removed client with invoices

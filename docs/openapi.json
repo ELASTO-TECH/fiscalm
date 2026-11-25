@@ -21531,7 +21531,10 @@
         "type": "object",
         "properties": {
           "kind": {
-            "const": "order_refused"
+            "enum": [
+              "order_refused",
+              "order_vat_review"
+            ]
           },
           "id": {
             "type": "string"
@@ -21541,6 +21544,12 @@
           },
           "order_id": {
             "type": "string"
+          },
+          "draft_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "sheet": {
             "const": "ord"
@@ -21565,7 +21574,10 @@
             "type": "string"
           },
           "action": {
-            "const": "order-discard"
+            "enum": [
+              "order-discard",
+              null
+            ]
           }
         },
         "required": [
@@ -21573,6 +21585,7 @@
           "id",
           "company",
           "order_id",
+          "draft_id",
           "sheet",
           "reason",
           "label",

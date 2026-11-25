@@ -109,14 +109,15 @@ def schemas() -> dict:
     )
     task = obj(
         dict(
-            kind={"const": "order_refused"},
+            kind={"enum": ["order_refused", "order_vat_review"]},
             id=S,
             company=S,
             order_id=S,
+            draft_id=nullable,
             sheet={"const": "ord"},
             reason=obj(dict(code=S, message=S)),
             label=S,
-            action={"const": "order-discard"},
+            action={"enum": ["order-discard", None]},
         )
     )
     return dict(

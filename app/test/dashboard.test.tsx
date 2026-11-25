@@ -569,3 +569,14 @@ describe("Configurează", () => {
     expect(screen.queryByRole("region", { name: "Configurează" })).toBeNull();
   });
 });
+
+it("shows a shop order whose 0% lines wait for a VAT choice and opens its draft", async () => {
+  localStorage.clear();
+  at("?co=NORD&tab=sarcini");
+  const s = fixture();
+  s.order_tasks = [{ kind: "order_vat_review", id: "NORD:order-synthetic", company: "NORD", order_id: "order-synthetic", draft_id: "draft-synthetic", sheet: "ord", reason: { code: "vat_review", message: "" }, label: "", action: null }];
+  const api = renderApp({ state: () => json(s) });
+  const link = await screen.findByRole("link", { name: "Vezi ciorna" });
+  expect(link.getAttribute("href")).toContain("new=draft-synthetic");
+  expect(api.posts()).toEqual([]);
+});
