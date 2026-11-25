@@ -79,6 +79,7 @@ WHY = (
     ("Formula", "are formule; exportă valorile"),
     ("Exactly one table", "are mai multe foi cu linii; păstrează într-un fișier o singură foaie cu liniile"),
     ("Too many payouts", "are prea multe plăți pentru un singur fișier; împarte-l"),
+    ("already stored with other payouts", "a fost deja încărcat, cu alte plăți; nu se încarcă din nou"),
     ("Invalid report dimensions", "este gol sau are prea multe linii sau coloane"),
 )
 

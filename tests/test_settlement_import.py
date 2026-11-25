@@ -68,6 +68,8 @@ def test_stripe():
     assert parse(data.replace(b"charge", b"refund"), "csv", "stripe")[0]["adjustment"] == "1"  # kept, flagged
     fee_only = data.replace(b"100.00,2.00,98.00", b"0.00,2.00,-2.00").replace(b"charge", b"fee")
     assert parse(fee_only, "csv", "stripe")[0]["fee"] == "2.00"  # a fee adjustment, flagged, not a refused file
+    fee_back = data.replace(b"100.00,2.00,98.00", b"-100.00,2.00,-98.00").replace(b"charge", b"refund")
+    assert parse(fee_back, "csv", "stripe")[0]["fee"] == "-2.00"  # the refund returned its fee: net says so
     for bad in (data.replace(b"98.00", b"98.01"), data.replace(b"100.00", b"NaN")):
         with pytest.raises(ReportError):
             parse(bad, "csv", "stripe")
@@ -81,15 +83,14 @@ def test_xlsx_sparse_and_formula():
 
 
 def test_xlsx_sheets_with_one_header_read_as_one_table():
-    """Monthly workbooks split lines over sheets beside a summary sheet: the lines are the table, a tie refuses."""
-    summary, header = cells(["Total", "Lines"], ["200.00", "2"]), ["Ref", "Gross", "Fee"]
-    data = workbook(summary, cells(header, ["TEST-1", "100.00", "2.00"]), cells(header, ["TEST-2", "100.00", "2.00"]))
+    """Monthly workbooks split lines over sheets with one header: one table. Any other sheet (a summary, a title row,
+    another layout) refuses: no sheet is left unread."""
+    header = ["Ref", "Gross", "Fee"]
+    data = workbook(cells(header, ["TEST-1", "100.00", "2.00"]), cells(header, ["TEST-2", "100.00", "2.00"]))
     assert table(data, "xlsx") == [header, ["TEST-1", "100.00", "2.00"], ["TEST-2", "100.00", "2.00"]]
-    with pytest.raises(ReportError):
-        table(workbook(summary, cells(header, ["TEST-1", "100.00", "2.00"])), "xlsx")
-    reordered = cells(["Gross", "Ref", "Fee"], ["100.00", "TEST-3", "2.00"])  # lines another way round
-    with pytest.raises(ReportError):
-        table(workbook(summary, cells(header, ["TEST-1", "1", "0"], ["TEST-2", "1", "0"]), reordered), "xlsx")
+    for other in (["Total", "Lines"], ["REF", "GROSS", "FEE"], ["Gross", "Ref", "Fee"]):
+        with pytest.raises(ReportError):
+            table(workbook(cells(header, ["TEST-1", "1", "0"], ["TEST-2", "1", "0"]), cells(other, ["1", "2"])), "xlsx")
 
 
 @pytest.mark.parametrize("data", [b"a,a\n1,2", b"a,b\n1", b"a,b\n1,2,3"])
@@ -155,6 +156,7 @@ def test_bad_delimiter_and_negative_string_index():
         ("1e3", "0", "", None),
         ("100 RON", "2 EUR", "", None),
         ("-100,00", "0", "", ("-100.00", "0.00", "")),
+        ("-100,00", "2,00", "", None),  # a refund's fee: kept or returned? Only a mapped net says.
         (
             "0",
             "2,00",
@@ -206,8 +208,18 @@ def test_multi_payout_file_becomes_one_report_per_payout(ledger):
             bank_upload.accept_report(ledger, "NORD", bad, "text/csv", partner=partner, **UPLOAD)
     assert len(settlements.state(ledger, "NORD")) == 2  # nothing of a refused file is stored
     once = described | {"mapping": {k: v for k, v in mapping.items() if k not in ("batch", "date")}}
-    again = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=once, **UPLOAD)
-    assert again["status"] == "duplicate"  # the same bytes mapped another way are still the same file
+    with pytest.raises(bank_upload.Refused):  # the same bytes mapped another way are still the same file
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=once, **UPLOAD)
+    assert len(settlements.state(ledger, "NORD")) == 2
+    b2 = next(r["id"] for r in settlements.state(ledger, "NORD") if r["report_key"] == "B-2")
+    assert ledger.withdraw_report(b2, "NORD")  # withdrawn to correct it: the file brings back only that payout
+    back = bank_upload.accept_report(ledger, "NORD", data, "text/csv", partner=partner, **UPLOAD)
+    assert len(back["ids"]) == 1 and sorted(r["report_key"] for r in settlements.state(ledger, "NORD")) == [
+        "B-1",
+        "B-2",
+    ]
+    with pytest.raises(bank_upload.Refused):  # B-1 stays as stored: another reading of the file refuses
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=once, **UPLOAD)
 
 
 def test_uploaded_format_belongs_to_partner_and_is_reused(ledger):

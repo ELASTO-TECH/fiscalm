@@ -138,20 +138,15 @@ def _sheet_number(name: str) -> int:
 
 
 def _one_table(sheets: list[list[list[str]]]) -> list[list[str]]:
-    """A workbook's table: its sheets with the same header row read as one, the header once. Beside it, only sheets
-    sharing no column name (a summary) are left out; one that shares a column, or a tie, refuses."""
+    """A workbook's table: every non-empty sheet, all with the same header row, read as one with the header once.
+    Any other sheet (a summary, a title row, another layout) refuses the file: no sheet is left out unread."""
     tables: dict[tuple[str, ...], list[list[str]]] = {}
     for rows in sheets:
         if rows:
             tables.setdefault(tuple(rows[0]), [list(rows[0])]).extend(rows[1:])
-    ranked = sorted((len(t) for t in tables.values()), reverse=True)
-    if not ranked or (len(ranked) > 1 and ranked[0] == ranked[1]):
+    if len(tables) != 1:  # a summary or a sheet laid out another way could hold lines: never guessed
         raise ReportError("Exactly one table required")
-    best = max(tables.values(), key=len)
-    # Another sheet may only be something else (a summary): one sharing a column could hold lines of this table.
-    if any(set(h) & set(best[0]) - {""} for h in tables if list(h) != best[0]):
-        raise ReportError("Exactly one table required")
-    return best
+    return next(iter(tables.values()))
 
 
 def _sheet(xml: bytes, strings: list[str]) -> list[list[str]]:
@@ -198,6 +193,11 @@ def _money_line(n: int, line: dict[str, str]) -> dict[str, str]:
     # A refund, dispute or adjustment (negative amount or a category other than a charge) is kept as written and
     # flagged: its batch never settles on its own, and the Sarcină names this line.
     adjustment = total < 0 or line.get("category", "charge") != "charge"
+    if adjustment and charge:
+        # A returned fee or a fee kept: only a mapped net says which; without one the line can't be counted.
+        if net is None or abs(total - net[0]) != charge:
+            raise ReportError(f"Line {n}: invalid gross/fee/net")
+        charge = total - net[0]
     if (
         not (total or (adjustment and charge))
         or (not adjustment and (total <= 0 or charge > total))
@@ -206,6 +206,7 @@ def _money_line(n: int, line: dict[str, str]) -> dict[str, str]:
         raise ReportError(f"Line {n}: invalid gross/fee/net")
     if not adjustment and not any(line.get(k) for k in ("reference", "awb", "order")):
         raise ReportError(f"Line {n}: missing reference or control character")
+    # An adjustment's fee keeps its direction (negative: a fee returned); a charge's fee is always kept, positive.
     out = line | {"gross": f"{total:.2f}", "fee": f"{charge:.2f}"} | ({"adjustment": "1"} if adjustment else {})
     if net is not None:
         out["net"] = f"{total - charge:.2f}"  # equal to the mapped net, written as stored money

@@ -50,12 +50,14 @@ A fee written as a deduction (`-12,50`) is the same fee; an empty fee or a `-` p
 Cells starting with `=`, `+`, `-` or `@` are data (phone numbers, signed fees); only XLSX formula nodes refuse, and
 exports that a spreadsheet opens escape such cells (`rezumat.csv`). Blank CSV lines refuse. XLSX row
 positions/visibility do not select evidence: all stored rows are included. Worksheets with the same header row are
-read as one table; beside other sheets (a summary), the header with the most lines is the table, and a tie refuses.
+read as one table; any other non-empty sheet (a summary, a title row, another layout) refuses the file.
 
 A file covering several payouts (a mapped `batch` column with several ids) is stored as one report per payout, all
 or none, each keyed by its payout id; with a mapped `date` column every line of a payout names its one payment day,
 which dates that report. A payout's lines with different days refuse the file. The file's bytes are each report's
-evidence; uploading it again is a duplicate.
+evidence; uploading it again is a duplicate. After one payout is withdrawn, the same file brings back only that one;
+its other payouts must read exactly as stored, or the upload refuses.
+A refund's fee keeps its direction only through a mapped net (a fee returned or kept); without one it refuses.
 
 Every source needs an explicit column mapping, submitted by a person. The upload preview pre-fills it from header names
 (`guess`, compared without case or diacritics; AWB and order only for a firm with shop orders), the payment day from
