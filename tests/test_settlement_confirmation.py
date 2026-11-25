@@ -1,4 +1,4 @@
-"""The first-three confirmation gate: stored bank evidence, a person's explicit confirmation, web and v1 access."""
+"""Verified batches settle on their own; a person confirms only legacy statement copies. Web and v1 access."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import sqlite3
 from contextlib import closing
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pikepdf
 import pytest
@@ -136,44 +137,26 @@ def stored_pdf(L, home, where, closing="98.00", pin=True, payer="Synthetic Couri
         L.set_meta("statement_stored_sha:" + digest, digest)
 
 
-@pytest.mark.parametrize("identity", [{"cui": "12345678"}, {"iban": SUPPLIER_IBAN}], ids=["cui", "iban"])
-def test_first_three_need_confirmation_fourth_auto(ledger, home, identity):
+@pytest.mark.parametrize("identity", [{"cui": "12345678"}, {"iban": SUPPLIER_IBAN}, {}], ids=["cui", "iban", "name"])
+def test_first_verified_batch_settles_without_confirmation(ledger, home, identity):
+    """Maintainer decision 2026-11-25: no count of earlier confirmations; every check still applies."""
     go_live(home)
-    for n in range(1, 5):
-        rid, st, body = batch(ledger, n, multiplier=n, **identity)
+    for n in (1, 2):
+        rid, st, _ = batch(ledger, n, multiplier=n, **identity)
         st, _ = store_bank(ledger, st)
-        body["tx"] = statements.tx_key(st.txs[0])
-        result = settlements.match_statement(ledger, st)
-        if n <= 3:
-            assert result == [] and count(ledger) == n - 1
-            r = report(ledger, rid)
-            assert r["error"] == "confirmation_required" and r["can_confirm"] and r["auto_after"] == 3
-            assert r["credit"]["amount"] == f"{98 * n}.00" and r["invoice_count"] == 1
-            assert confirm.perform(ledger, "NORD", body, "user synthetic")["ok"]
-            assert count(ledger) == n
-            assert not confirm.perform(ledger, "NORD", body, "user synthetic")["ok"]
-        else:
-            assert result == ["NORD-batch-4"] and count(ledger) == 3
-    other, st, _ = batch(ledger, 5, "STUDIO9", **identity)
-    store_bank(ledger, st)
-    assert settlements.match_statement(ledger, st) == []
-    other, st, _ = batch(ledger, 6, payer="Another Synthetic Courier SRL", cui="23456789")
-    store_bank(ledger, st)
-    assert settlements.match_statement(ledger, st) == []
-
-
-def test_payer_known_only_by_name_always_waits(ledger, home):
-    """Trust is earned by a CUI or IBAN only: a name can be shared or reused, so no count of confirmations settles alone."""
-    go_live(home)
-    for n in range(1, 6):
-        rid, st, body = batch(ledger, n, multiplier=n)
-        st, _ = store_bank(ledger, st)
-        body["tx"] = statements.tx_key(st.txs[0])
-        assert settlements.match_statement(ledger, st) == []
+        assert settlements.match_statement(ledger, st) == [f"NORD-batch-{n}"]
         r = report(ledger, rid)
-        assert (r["error"], r["can_confirm"], r["auto_after"]) == ("confirmation_required", True, None)
-        assert confirm.perform(ledger, "NORD", body, "user synthetic")["ok"]
-    assert count(ledger) == 5
+        assert (r["status"], r["error"], r["can_confirm"], r["human_confirmed"]) == ("collected", None, False, False)
+    assert count(ledger) == 0
+
+
+def legacy_pdf(L, home):
+    """The batch-1 credit read from a PDF copy whose stored checksum was never recorded."""
+    recon.ingest_statement(L, pdf_statement(home), home, password_lookup=lambda co: "synthetic")
+    doc = L.documents(company="NORD", kind="statement")[0]
+    with L.tx() as db:
+        db.execute("DELETE FROM meta WHERE key=?", ("statement_stored_sha:" + doc["sha"],))
+    return doc, confirm.bank_evidence(L, "NORD")
 
 
 @pytest.mark.parametrize(
@@ -227,8 +210,6 @@ def test_confirmation_reads_immutable_company_bank_evidence(ledger, home):
     st = confirm.bank_evidence(ledger, "NORD")
     body["tx"] = statements.tx_key(st.txs[0])
     go_live(home)
-    assert settlements.match_statement(ledger, st) == []
-    assert report(ledger, rid)["credit"]["id"] == body["tx"]
     assert confirm.perform(ledger, "NORD", body, "user synthetic")["ok"] and count(ledger) == 1
     _, _, body = batch(ledger, 2)
     path.write_bytes(data + b" ")
@@ -264,8 +245,8 @@ def test_crash_rolls_back_confirmation_and_collection(ledger, home):
 
 
 @pytest.mark.parametrize("closing", ["98.00", "99.00"])
-def test_pdf_ingest_hashes_stored_copy_and_confirms(ledger, home, closing):
-    rid, _, body = batch(ledger, 1)
+def test_pdf_ingest_hashes_stored_copy_and_settles(ledger, home, closing):
+    batch(ledger, 1)
     result = recon.ingest_statement(ledger, pdf_statement(home, closing), home, password_lookup=lambda co: "synthetic")
     assert result["status"] == "added" and result["balanced"]
     st = confirm.bank_evidence(ledger, "NORD")
@@ -273,25 +254,19 @@ def test_pdf_ingest_hashes_stored_copy_and_confirms(ledger, home, closing):
         assert not st.txs
         return
     assert len(st.txs) == 1 and st.txs[0].amount == Decimal("98.00") and st.txs[0].direction == "credit"
-    body["tx"] = statements.tx_key(st.txs[0])
     go_live(home)
-    assert settlements.match_statement(ledger, st) == []
-    assert confirm.perform(ledger, "NORD", body, "user synthetic")["ok"]
-    assert count(ledger) == 1
+    assert settlements.match_statement(ledger, st) == ["NORD-batch-1"]
+    assert count(ledger) == 0
 
 
 def test_legacy_pdf_requires_person_to_pin_copy(ledger, home):
     rid, _, body = batch(ledger, 1)
-    recon.ingest_statement(ledger, pdf_statement(home), home, password_lookup=lambda co: "synthetic")
-    doc = ledger.documents(company="NORD", kind="statement")[0]
-    with ledger.tx() as db:
-        db.execute("DELETE FROM meta WHERE key=?", ("statement_stored_sha:" + doc["sha"],))
-    st = confirm.bank_evidence(ledger, "NORD")
+    doc, st = legacy_pdf(ledger, home)
     body["tx"] = statements.tx_key(st.txs[0])
     assert st.legacy_proofs
     go_live(home)
     assert settlements.match_statement(ledger, st) == []
-    assert report(ledger, rid)["error"] == "confirmation_required"
+    assert report(ledger, rid)["error"] == "statement_confirmation_required"
     assert confirm.perform(ledger, "NORD", body, "user synthetic")["ok"]
     assert ledger.get_meta("statement_stored_sha:" + doc["sha"])
     assert not confirm.bank_evidence(ledger, "NORD", months={"2026-10"}).legacy_proofs
@@ -301,17 +276,16 @@ def test_unrelated_old_bad_statement_does_not_block_batch(ledger, home):
     rid, st, body = batch(ledger, 1)
     store_bank(ledger, st)
     ledger.add_document("old-missing", "NORD", "2024-01", "statement", str(home / "NORD" / "missing.pdf"))
-    assert settlements.match_statement(ledger, st) == []
-    assert report(ledger, rid)["error"] == "confirmation_required"
+    assert settlements.match_statement(ledger, st) == ["NORD-batch-1"]
 
 
 def test_stale_preview_is_removed(ledger, home):
-    rid, st, body = batch(ledger, 1)
+    rid, _, _ = batch(ledger, 1)
     go_live(home)
-    _, path = store_bank(ledger, st)
+    doc, st = legacy_pdf(ledger, home)
     settlements.match_statement(ledger, st)
     assert report(ledger, rid)["can_confirm"]
-    path.unlink()
+    Path(doc["path"]).unlink()
     settlements.match_statement(ledger, st)
     r = report(ledger, rid)
     assert r["error"] == "statement_unavailable" and r["credit"] is None and not r["can_confirm"]
@@ -347,15 +321,8 @@ def test_bank_snapshot_changed_before_commit_refuses(ledger, home):
         ("missing", "credit_missing_or_ambiguous"),
     ],
 )
-def test_trained_payer_never_uses_unverified_current_statement(ledger, home, failure, reason):
+def test_batch_never_uses_unverified_current_statement(ledger, home, failure, reason):
     go_live(home)
-    for n in range(1, 4):
-        _, st, body = batch(
-            ledger, n, multiplier=n + 1, cui="12345678"
-        )  # trained: identified, so only the statement guards refuse
-        st, _ = store_bank(ledger, st)
-        body["tx"] = statements.tx_key(st.txs[0])
-        assert confirm.perform(ledger, "NORD", body, "synthetic user")["ok"]
     rid, current, _ = batch(ledger, 4, cui="12345678")  # 98.00, the PDF statement's credit
     if failure == "outside_company_dir":  # balanced and pinned: only its place outside NORD's directory refuses it
         stored_pdf(ledger, home, "outside.pdf", payer=PAYER_CUI)
@@ -372,14 +339,14 @@ def test_trained_payer_never_uses_unverified_current_statement(ledger, home, fai
         _, path = store_bank(ledger, current)
         path.write_bytes(path.read_bytes() + b" ")
     assert settlements.match_statement(ledger, current) == []
-    assert ledger.issued("NORD-batch-4")["status"] == "open" and count(ledger) == 3
+    assert ledger.issued("NORD-batch-4")["status"] == "open" and count(ledger) == 0
     assert report(ledger, rid)["error"] == reason
 
 
 def test_stale_request_does_not_discard_verified_preview(ledger, home):
     go_live(home)
-    rid, st, body = batch(ledger, 1)
-    st, _ = store_bank(ledger, st)
+    rid, _, body = batch(ledger, 1)
+    _, st = legacy_pdf(ledger, home)
     settlements.match_statement(ledger, st)
     assert not confirm.perform(ledger, "NORD", body | {"tx": "0" * 20}, "synthetic user")["ok"]
     r = report(ledger, rid)

@@ -2164,10 +2164,6 @@ class Ledger:
                 raise settlements.SettlementError("credit_unavailable")
             data = json.loads(report["data"])
             payer_id = data["payer_id"]
-            count = db.execute(
-                "SELECT count(*) FROM settlement_confirmations WHERE company=? AND payer_id=?",
-                (report["company"], payer_id),
-            ).fetchone()[0]
             legacy = getattr(statement, "legacy_proofs", {}).get(key)
             if legacy and self.get_meta("statement_stored_sha:" + legacy[0]) not in (None, legacy[1]):
                 raise settlements.SettlementError("statement_changed")
@@ -2176,7 +2172,7 @@ class Ledger:
 
                 if _confirmation is not _HUMAN_CONFIRMATION or not confirmed_by.strip() or expected_tx != key:
                     raise settlements.SettlementError("confirmation_refused")
-            elif count < settlements.TRUSTED_AFTER or legacy or not settlements.payer_identified(data):
+            elif legacy:  # an unpinned legacy PDF copy needs a person; every other verified batch settles on its own
                 preview = json.dumps(
                     {
                         "id": key,
@@ -2190,11 +2186,7 @@ class Ledger:
                     "credit=excluded.credit,invoice_count=excluded.invoice_count WHERE credit!=excluded.credit OR invoice_count!=excluded.invoice_count",
                     (report_id, preview, len(invoices)),
                 )
-                reason = (
-                    "statement_confirmation_required"
-                    if legacy and count >= settlements.TRUSTED_AFTER
-                    else "confirmation_required"
-                )
+                reason = "statement_confirmation_required"
                 db.execute(
                     "UPDATE settlement_reports SET error=? WHERE id=? AND status='pending' AND error IS NOT ?",
                     (reason, report_id, reason),

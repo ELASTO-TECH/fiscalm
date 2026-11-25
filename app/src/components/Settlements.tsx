@@ -9,8 +9,8 @@ import { Act, L, Task } from "./ui";
 
 export function SettlementTasks({ s, co }: { s: State; co?: string }) {
   return (s.settlements ?? []).filter((r) => r.status === "pending").map((r) => (
-    <Task key={`${s.co}set${r.id}`} co={co} icon="bank" title={["confirmation_required", "statement_confirmation_required"].includes(r.error || "") ? "Decontare de confirmat" : "Decontare de verificat"}
-      body={[`${nOf(r.invoice_count, "O factură", "facturi")}, net ${lei(r.net)} ${curOf(r.currency)}, de la ${r.payer.name}.`, details(r, s.today), progress(r)].filter(Boolean).join(" ")}>
+    <Task key={`${s.co}set${r.id}`} co={co} icon="bank" title={r.error === "statement_confirmation_required" ? "Decontare de confirmat" : "Decontare de verificat"}
+      body={[`${nOf(r.invoice_count, "O factură", "facturi")}, net ${lei(r.net)} ${curOf(r.currency)}, de la ${r.payer.name}.`, details(r, s.today)].filter(Boolean).join(" ")}>
       {r.can_confirm && r.credit ? <Confirm r={r} /> : null}
       <L to={{ co: s.co, set: r.id }} className="btn g">Vezi decontarea</L>
     </Task>
@@ -32,12 +32,6 @@ export function CodTasks({ s, co }: { s: State; co?: string }) {
 /** The person's answer to a waiting batch, on its card and its sheet alike: the engine re-checks the credit it names. */
 function Confirm({ r }: { r: Settlement }) {
   return <Act action="settlement-confirm" body={{ id: r.id, tx: r.credit!.id, confirmed: "yes" }} label="Confirmă decontarea" />;
-}
-
-/** How many confirmations are left before this payer's batches close on their own; nothing for a payer known only by name. */
-function progress(r: Settlement) {
-  const left = r.can_confirm && r.auto_after !== null ? r.auto_after - r.confirmed_count : 0;
-  return left > 0 ? `După încă ${nOf(left, "o confirmare", "confirmări")}, următoarele decontări care trec verificările se confirmă automat.` : "";
 }
 
 function details(r: Settlement, today: string) {
@@ -98,7 +92,6 @@ function SettlementBody({ id, onClose }: { id: string; onClose: () => void }) {
       </dl>
       <p className="mt-4 mb-0 text-sm leading-relaxed">{details(r, s.today)}</p>
     </Panel>
-    {progress(r) ? <p className="text-sm text-muted">{progress(r)}</p> : null}
     <div className={sectionHeadingStyle}><h3 className="m-0 text-base font-semibold">Facturile din raport</h3></div>
     <Panel padded={false}>
       <DetailPages />

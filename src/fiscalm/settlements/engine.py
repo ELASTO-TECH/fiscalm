@@ -32,16 +32,6 @@ class SettlementError(ValueError):
     pass
 
 
-# A payer's batches settle on their own once a person confirmed this many of them for the firm (AGENTS.md rule 3).
-TRUSTED_AFTER = 3
-
-
-def payer_identified(data: dict) -> bool:
-    """The report names its payer by CUI or IBAN. A name alone can be shared or reused, so a payer known only by name
-    never earns automatic settlement: each of its batches waits for a person."""
-    return any(isinstance(data.get(k), str) and data[k] for k in ("payer_cui", "payer_iban"))
-
-
 def import_report(L: Ledger, company: str, data: bytes, spec: dict) -> str:
     """Operator-supplied spec establishes payer and report identity; attachment content never chooses either."""
     companies.get(company, L=L)
@@ -295,7 +285,7 @@ def recheck_pending(L: Ledger, company: str) -> list[str]:
                 )
                 db.execute(
                     "UPDATE settlement_reports SET error=? WHERE id=? AND status='pending' "
-                    "AND error IS NOT ? AND (? != 'credit_missing_or_ambiguous' OR error IS NULL OR error IN ('confirmation_required','statement_confirmation_required','competing_reports'))",
+                    "AND error IS NOT ? AND (? != 'credit_missing_or_ambiguous' OR error IS NULL OR error IN ('statement_confirmation_required','competing_reports'))",
                     (reason, r["id"], reason, reason),
                 )
     return done
@@ -350,8 +340,7 @@ def snapshot(L: Ledger, company: str) -> tuple[list[dict], list[dict]]:
         "(SELECT json_group_array(json_object('position',l.position,'invoice',l.invoice_id)) "
         "FROM settlement_lines l JOIN issued i ON i.message_id=l.invoice_id AND i.company=r.company "
         "WHERE l.report_id=r.id) AS proof, "
-        "p.credit,p.invoice_count,EXISTS(SELECT 1 FROM settlement_confirmations h WHERE h.report_id=r.id) AS human_confirmed,(SELECT count(*) FROM settlement_confirmations c WHERE c.company=r.company "
-        "AND c.payer_id=json_extract(r.data,'$.payer_id')) AS confirmed_count "
+        "p.credit,p.invoice_count,EXISTS(SELECT 1 FROM settlement_confirmations h WHERE h.report_id=r.id) AS human_confirmed "
         "FROM settlement_reports r LEFT JOIN settlement_credits p ON p.report_id=r.id LEFT JOIN settlement_fees f ON f.report_id=r.id "
         "WHERE r.company=? AND r.status!='withdrawn' ORDER BY r.id",
         (company,),
@@ -404,10 +393,8 @@ def snapshot(L: Ledger, company: str) -> tuple[list[dict], list[dict]]:
                 "credit": json.loads(r["credit"]) if r["credit"] else None,
                 "invoice_count": r["invoice_count"] if r["credit"] else len(lines),
                 "human_confirmed": bool(r["human_confirmed"]),
-                "confirmed_count": r["confirmed_count"],
-                "auto_after": TRUSTED_AFTER if payer_identified(data) else None,
                 "can_confirm": r["status"] == "pending"
-                and error in ("confirmation_required", "statement_confirmation_required")
+                and error == "statement_confirmation_required"
                 and bool(r["credit"]),
                 "failed_line": int(failed[1]) if failed else None,
                 "sheet": {"co": company, "set": r["id"]},

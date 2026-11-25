@@ -411,9 +411,7 @@ def test_stored_mt940_exact_credit_and_missing_next_month(ledger, amount):
         assert not ledger.used_txs()
         assert all(r["status"] == "open" for r in ledger.issued_rows())
     else:
-        settlements.match_statement(ledger, proof)
-        assert settlements.state(ledger, "NORD")[0]["error"] == "confirmation_required"
-        assert collect(ledger, rid, proof) == ["settlement-1", "settlement-2"]
+        assert settlements.match_statement(ledger, proof) == ["settlement-1", "settlement-2"]
         with pytest.raises(settlements.SettlementError, match="report_unavailable"):
             collect(ledger, rid, proof)
         assert len(ledger.used_txs()) == 1
@@ -511,32 +509,19 @@ def test_withdraw_report_action_preserves_reserved_credit(ledger, status):
 
 
 @pytest.mark.parametrize(
-    "identified,prior,problem,expected",
+    "identified,problem,expected",
     [
-        (False, 3, "", "confirmation_required"),
-        (True, 2, "", "confirmation_required"),
-        (True, 3, "", None),
-        (True, 3, "amount", "line_2_invoice_not_open_or_amount_differs"),
-        (True, 3, "missing_credit", "credit_missing_or_ambiguous"),
+        (False, "", None),  # a first report from a payer known only by name settles once every check passes
+        (True, "", None),
+        (True, "amount", "line_2_invoice_not_open_or_amount_differs"),
+        (True, "missing_credit", "credit_missing_or_ambiguous"),
     ],
 )
-def test_withdraw_rechecks_survivor(ledger, identified, prior, problem, expected):
+def test_withdraw_rechecks_survivor(ledger, identified, problem, expected):
     survivor = setup(ledger)
     payer = "Synthetic Courier SRL CUI 12345678" if identified else SPEC["payer_name"]
     if identified:
         edit_report(ledger, payer_cui="12345678")
-    data = json.loads(ledger.db.execute("SELECT data FROM settlement_reports").fetchone()[0])
-    # Synthetic prior human confirmations isolate the trust boundary from the matching checks below.
-    with ledger.tx() as db:
-        for n in range(prior):
-            history = settlements.import_report(
-                ledger, "NORD", REPORT.replace(b"TEST", f"HISTORY-{n}".encode()), SPEC | {"report_key": f"history-{n}"}
-            )
-            db.execute("UPDATE settlement_reports SET status='collected' WHERE id=?", (history,))
-            db.execute(
-                "INSERT INTO settlement_confirmations VALUES(?,?,?,?,?)",
-                (history, "NORD", data["payer_id"], "synthetic-person", "2026-10-01"),
-            )
     competitor = settlements.import_report(
         ledger,
         "NORD",
@@ -555,7 +540,7 @@ def test_withdraw_rechecks_survivor(ledger, identified, prior, problem, expected
     assert actions.act("settlement-withdraw", "NORD", {"id": competitor})["ok"]
     row = next(r for r in settlements.state(ledger, "NORD") if r["id"] == survivor)
     assert row["error"] == expected
-    assert row["can_confirm"] == (expected == "confirmation_required")
+    assert not row["can_confirm"] and confirmations(ledger) == 0
     assert row["status"] == ("collected" if expected is None else "pending")
     assert len(ledger.used_txs()) == (1 if expected is None else 0)
     assert not actions.act("settlement-withdraw", "NORD", {"id": competitor})["ok"]

@@ -52,11 +52,9 @@ fallbacks and workflows when replacing them; do not preserve installation-specif
    transaction, or settle nothing and raise a Sarcină opening `set`, identifying the failed line or reason.
    A report without a matching credit is also a Sarcină opening `set`; its settled credit links back
    to the Decontare from `tx`.
-   Until a firm has three settlements from a payer confirmed by a person, every new batch from that payer
-   waits as a Sarcină showing the credit, the invoice count and the net total, and settles only when a user
-   confirms it; after that, batches that pass every check above settle on their own (maintainer decision,
-   2026-11-02). Only a payer the report names by CUI or IBAN earns that; one known only by name always
-   waits for a person (2026-11-08).
+   A batch that passes every check above settles on its own, from the first report of any payer; no count of
+   earlier confirmations is required (maintainer decision, 2026-11-25). A person confirms only a credit read
+   from a legacy statement copy without a stored checksum.
    Every writer goes through guarded `Ledger` methods whose `WHERE` clauses re-check the state read.
    Two connections racing must not double-settle; write a test that proves it.
 4. **Crash-safe file moves.** Moving payment files is journalled in the ledger first and finished on

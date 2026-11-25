@@ -180,7 +180,7 @@ describe("Tranzacții", () => {
     waits.proposal = { kind: "settlement", settlement: "NORD:set2" };
     s.settlements = [{ id: "NORD:set1", kind: "settlement", company: "NORD", source: "csv", report_key: "R1", reference: "R1", candidate: null,
       payer: { id: "fan", name: "Curier Exemplu" }, date: "2026-09-14", currency: "RON", gross: "3010.00", fee: "10.00",
-      net: "3000.00", credit: null, invoice_count: 2, confirmed_count: 3, auto_after: 3, can_confirm: false, human_confirmed: true,
+      net: "3000.00", credit: null, invoice_count: 2, can_confirm: false, human_confirmed: true,
       status: "collected", error: null, failed_line: null, tx_key: paid.id, sheet: { co: "NORD", set: "NORD:set1" },
       links: { transaction: paid.id, issued: ["5004", "5002"] }, lines: [] }];
     at("?co=NORD&tab=tranzactii&f=in");
