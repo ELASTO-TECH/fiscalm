@@ -166,7 +166,7 @@ def learn_accounts(L: Ledger, doc) -> list[str]:
     except (OSError, RuntimeError, ValueError):
         return []
     found = statement_ibans(st)
-    if st.company != doc["company"] or not all(_section_of(st, a, doc["month"]) for a in st.accounts):
+    if st.company != doc["company"] or not all(_section_of(L, st, a, doc["month"]) for a in st.accounts):
         return []
     if found:
         with L.tx() as db:
@@ -176,9 +176,9 @@ def learn_accounts(L: Ledger, doc) -> list[str]:
     return found
 
 
-def _section_of(st: statements.Statement, a: statements.Account, month: str) -> bool:
+def _section_of(L: Ledger, st: statements.Statement, a: statements.Account, month: str) -> bool:
     """A statement section is the firm's account, in the currency the firm keeps it in, for days of `month` only."""
-    own = companies.get(st.company).account(a.iban)
+    own = companies.get(st.company, L=L).account(a.iban)
     lo, hi = a.period or (st.period_start, st.period_end)
     return bool(
         own and own.currency == a.currency and lo and hi and lo.strftime("%Y-%m") == hi.strftime("%Y-%m") == month
