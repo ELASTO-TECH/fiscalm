@@ -284,8 +284,7 @@ def test_transfer_to_supplier_iban_marks_paid_once(ledger, home, sec, monkeypatc
 def test_contradictory_iban_never_matches_even_with_a_name_word(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"3001": ubl()})
     t = _tx("250.00", date(2026, 10, 30), "MEDICAL OTHER SRL", OTHER_IBAN, desc="MEDICAL EXEMPLU plata")
-    card = _tx("250.00", date(2026, 10, 30), desc="Plata la POS MEDICAL OTHER")  # one shared word is not enough
-    st = _debit_st(t, card)
+    st = _debit_st(t)
     assert efactura.match_statement(ledger, st) == []
     exact = _tx("250.00", date(2026, 10, 30), "S.C. CENTRUL MEDICAL EXEMPLU S.R.L.", OTHER_IBAN, desc="plata")
     st.accounts[0].txs.append(exact)  # another account, but the transfer names exactly this firm
@@ -611,112 +610,141 @@ def test_two_approved_twins_are_not_paid_by_one_debit_even_on_reprocessing(ledge
     assert ledger.payment(ids[1])["paid_note"].startswith("statement 2026-10-31")
 
 
-def _known_name(ledger, t, mid: str) -> None:
-    """The user answered once that this statement name is the invoice's supplier (efactura.resolve_debit remembers it)."""
-    name = efactura.line_keys(t, companies.get("NORD").own_ibans)["name"]
-    partner = efactura.supplier_partner("NORD", ledger.efactura(mid))
-    ledger.remember("NORD", "name", name, {"kind": "documents", "partner": partner, "reason": None, "note": None}, None)
+D = date(2026, 10, 20)  # the invoices' date
 
 
-def test_card_payment_found_by_name_settles_only_once_its_name_is_remembered(ledger, home, sec, monkeypatch):
+@pytest.mark.parametrize(
+    "totals, day, desc, settled, waits",
+    [
+        (["56.27"], D, "Plata la POS EPOS MID 600000000001RON SHOPX7K2", True, False),
+        (["11.22"], date(2026, 11, 4), "Plata clienti speciali CONTRACT VDF123456", True, False),
+        (["99.90"], date(2026, 10, 16), "Plata la POS non-BT CENTRUL MEDICAL LODZ", True, False),  # name, before
+        (["11.22", "11.22"], D, "Plata clienti speciali CONTRACT VDF123456", False, True),
+        (["11.22", "11.22"], D, "Plata clienti speciali CONTRACT VDF100", True, False),  # names its invoice
+        (["11.22", "11.22"], D, "Plata la POS TID:100 MID 200 REF: 100 SHOPX7K2", False, True),  # the bank's fields
+        (["11.22", "11.22"], D, "Plata la POS TID : 100 MAGAZIN", False, True),
+        (["56.27"], date(2026, 10, 14), "Plata la POS EPOS SHOPX7K2", False, False),  # long before the invoice
+        (["17.42"], D, "Retragere numerar ATM BT CLUJ", False, False),  # cash, not a payment
+        (["11.22"], D, "Plata BUGETUL DE STAT", False, False),  # a tax: never
+    ],
+)
+def test_a_debit_without_an_iban_settles_the_one_invoice_of_its_exact_amount(
+    ledger, home, sec, monkeypatch, totals, day, desc, settled, waits
+):
+    _stored(ledger, monkeypatch, **{f"300{i}": ubl(total=x, number=f"X{i}00") for i, x in enumerate(totals, 1)})
+    t = _tx(totals[0], day, desc=desc)
+    assert efactura.match_statement(ledger, _debit_st(t)) == (["3001"] if settled else [])
+    assert [(a["tx_key"], len(json.loads(a["candidates"]))) for a in ledger.ambiguous("NORD")] == (
+        [(efactura.tx_key(t), 2)] if waits else []
+    )
+
+
+@pytest.mark.parametrize(
+    "numbers, paid, desc, settled, waits",
+    [
+        ({"3001": "12345", "3002": "67890"}, [], "Order 9123456", [], True),  # part of a longer code: names nothing
+        ({"3001": "X12345678", "3002": "X87654321"}, [], "POS TID: 1 GAMMA ROM 12345678 valoare", [], True),  # card
+        ({"3001": "BILL-12", "3002": "N55555"}, ["3001"], "Plata factura BILL-12", [], False),  # names a paid one
+        ({"3001": "INV-2026-0042", "3002": "ALT-2026-0042"}, ["3001"], "Plata factura INV-2026-0042", [], False),
+        ({"3001": "INV-2026-0042", "3002": "ALT-2026-0042"}, [], "Plata factura ALT 2026 0042", ["3002"], False),
+    ],
+)
+def test_a_debit_settles_only_the_invoice_its_whole_reference_names(
+    ledger, home, sec, monkeypatch, numbers, paid, desc, settled, waits
+):
+    _stored(ledger, monkeypatch, **{m: ubl(total="11.22", number=n) for m, n in numbers.items()})
+    for m in paid:
+        ledger.db.execute("UPDATE efactura SET status='paid' WHERE message_id=?", (m,))
+    ledger.db.commit()
+    t = _tx("11.22", D, desc=desc)
+    assert efactura.match_statement(ledger, _debit_st(t)) == settled
+    assert len(ledger.ambiguous("NORD")) == int(waits)
+
+
+def test_a_pick_between_invoices_of_the_same_amount_teaches_no_name(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(total="11.22"), "3002": ubl(total="11.22", number="X2")})
+    card = _tx("11.22", D, "PAYPROC*XYZ", desc="Plata la POS PAYPROC*XYZ")  # a processor, not the supplier
+    assert efactura.match_statement(ledger, _debit_st(card)) == []
+    assert efactura.resolve_debit(ledger, "NORD", efactura.tx_key(card), "3001") == ("efactura", "3001")
+    assert ledger.memories("NORD") == []
+
+
+def test_a_cash_withdrawal_by_its_bank_code_settles_nothing(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(total="17.42")})
+    t = _tx("17.42", D)
+    t.category = statements.iso_category("PMNT", "CWDL")
+    assert efactura.match_statement(ledger, _debit_st(t)) == [] and not ledger.ambiguous("NORD")
+
+
+@pytest.mark.parametrize("desc", ["Plata BUGETUL DE STAT", "AVANS TREZORERIE"])
+def test_a_tax_or_an_advance_is_never_a_suppliers_payment_even_by_choice(ledger, home, sec, monkeypatch, desc):
+    _stored(ledger, monkeypatch, **{"3001": ubl(total="17.42"), "3002": ubl(total="17.42", number="X2")})
+    t = _tx("17.42", D, desc=desc)
+    assert efactura.match_statement(ledger, _debit_st(t)) == [] and not ledger.ambiguous("NORD")
+    ledger.set_ambiguous(efactura.tx_key(t), "NORD", t.to_dict(), [["efactura", "3001"], ["efactura", "3002"]])
+    with pytest.raises(efactura.ResolveError):
+        efactura.resolve_debit(ledger, "NORD", efactura.tx_key(t), "3001")
+
+
+def test_a_payment_row_of_the_same_amount_keeps_a_debit_without_an_iban_from_settling(ledger, home, sec, monkeypatch):
+    eur = ubl(number="E1", currency="EUR")
+    _stored(ledger, monkeypatch, **{"3001": ubl(), "3002": ubl(number="RMBU 2222603"), "3003": eur})
+    item_id = efactura.approve(ledger, "3001", origin="person")["item_id"]
+    t = _tx("250.00", date(2026, 10, 30), desc="Plata clienti speciali CONTRACT VDF123456")
+    euros = _tx("250.00", date(2026, 10, 30), desc="Plata clienti speciali CONTRACT VDF7", currency="EUR")
+    assert efactura.match_statement(ledger, _debit_st(t, euros)) == ["3003"]  # a payment file pays lei only
+    assert recon.auto_mark_paid(ledger, _debit_st(t)) == []
+    assert ledger.payment(item_id)["status"] == "pending" and len(ledger.ambiguous("NORD")) == 1
+
+
+def test_the_users_pick_remembers_the_debits_name_for_the_supplier(ledger, home, sec, monkeypatch):
     _stored(
         ledger,
         monkeypatch,
         **{
             "3001": ubl(supplier="ZEP ELECTRONIC COMPONENTS SRL", total="99.90"),
-            "3002": ubl(supplier="ZEP ELECTRONIC COMPONENTS SRL", total="45.00", number="Z2"),
+            "3002": ubl(supplier="ZEP ELECTRONIC COMPONENTS SRL", total="99.90", number="Z2"),
         },
     )
-    other = _tx("99.91", date(2026, 10, 21), desc="Plata la POS ZEP ELECTRONIC LODZ")
-    far = _tx("99.90", date(2026, 9, 1), desc="Plata la POS ZEP ELECTRONIC LODZ")  # long before the invoice
-    st = _debit_st(other, far)
-    assert efactura.match_statement(ledger, st) == []
-    card = _tx(
-        "99.90",
-        date(2026, 10, 18),
-        counterparty="ZEP ELECTRONIC LODZ",
-        desc="Plata la POS non-BT ZEP ELECTRONIC LODZ POL 12345678 valoare",
-    )
-    st.accounts[0].txs.append(card)
-    assert efactura.match_statement(ledger, st) == []  # a name alone proves nothing yet: it waits for the user
-    assert [a["tx_key"] for a in ledger.ambiguous("NORD")] == [efactura.tx_key(card)]
+    card = _tx("99.90", date(2026, 10, 18), "ZEP ELECTRONIC LODZ", desc="Plata la POS non-BT ZEP ELECTRONIC LODZ")
+    assert efactura.match_statement(ledger, _debit_st(card)) == []  # two invoices fit: the user picks
     (home / "state").mkdir(exist_ok=True)
     (home / "state" / "LIVE").touch()
     assert efactura.resolve_debit(ledger, "NORD", efactura.tx_key(card), "3001") == ("efactura", "3001")
     assert [m["key_kind"] for m in ledger.memories("NORD")] == ["name"]  # the answer is remembered
-    st.accounts[0].txs.append(
-        _tx(
-            "45.00",
-            date(2026, 10, 19),
-            counterparty="ZEP ELECTRONIC LODZ",
-            desc="Plata la POS non-BT ZEP ELECTRONIC LODZ",
-        )
-    )
-    assert efactura.match_statement(ledger, st) == ["3002"]
-    assert "name" in ledger.efactura("3002")["paid_note"]
     abroad = _tx("12.00", date(2026, 10, 25), counterparty="ZEP ELECTRONIC LODZ", desc="Plata la POS non-BT ZEP")
     recon.classify(ledger, "NORD", [abroad])
     assert abroad.category == statements.DOMESTIC  # Factura vine prin e-Factura: no receipt is asked for
 
 
-def test_a_card_debit_never_counts_for_a_bon_paid_invoice_by_a_name_alone(ledger, home, sec, monkeypatch):
+def test_only_a_card_debit_near_a_bon_paid_invoice_is_its_card_payment(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"3001": ubl(supplier="ALPHA ELECTRONIC SRL", total="99.90")})
     ledger.db.execute("UPDATE efactura SET status='paid', paid_tx='bon:sha-bon' WHERE message_id='3001'")
     ledger.db.commit()
-    card = _tx("99.90", date(2026, 10, 21), counterparty="BETA ELECTRONIC", desc="Plata la POS BETA ELECTRONIC")
-    efactura.match_statement(ledger, _debit_st(card))
-    assert efactura.tx_key(card) not in ledger.used_txs()  # left free for its own invoice, and asked about
-
-
-def test_short_card_descriptors_match_but_only_near_the_invoice_date(ledger, home, sec, monkeypatch):
-    _stored(
-        ledger,
-        monkeypatch,
-        **{
-            "3001": ubl(supplier="LUMEN AMBIENT SRL", total="486.00", issue="2026-09-04"),
-            "3002": ubl(
-                supplier="VALEA STORE S.R.L.",
-                total="931.90",
-                issue="2026-09-08",
-                number="MN1",
-                supplier_cui="RO77777777",
-            ),
-        },
-    )
-    late = _tx("931.90", date(2026, 9, 25), desc="Plata la POS non-BT cu card VISA EPOS PayU*valea.example BUCURESTI")
-    st = _debit_st(late)
-    assert efactura.match_statement(ledger, st) == []  # 17 days later: not proof enough without an IBAN
-    st.accounts[0].txs += [
-        _tx("486.00", date(2026, 9, 4), desc="Plata la POS EPOS MID 600000000001RON NTP*lumen RO"),
-        _tx("931.90", date(2026, 9, 9), desc="Plata la POS non-BT cu card VISA EPOS PayU*valea.example"),
-    ]
-    assert efactura.match_statement(ledger, st) == []  # each fits by its short descriptor: both wait for the user
-    assert len(ledger.ambiguous("NORD")) == 3  # and the late one too, by its amount alone
+    far = _tx("99.90", date(2026, 11, 20), desc="Plata la POS BETA")  # the bon may have been paid in cash
+    direct = _tx("99.90", date(2026, 10, 20), desc="Plata clienti speciali VDF5")  # a direct debit, not a card
+    near = _tx("99.90", date(2026, 10, 21), desc="Plata la POS BETA")
+    efactura.match_statement(ledger, _debit_st(far, direct, near))
+    assert [efactura.tx_key(t) in ledger.used_txs() for t in (far, direct, near)] == [False, False, True]
 
 
 @pytest.mark.parametrize(
     "invoices,debit,offered",
     [
-        (
-            {"3001": "56.27"},
-            _tx("56.27", date(2026, 10, 20), desc="Plata la POS EPOS SHOPX7K2"),
-            ["3001"],
-        ),  # card, same day
-        ({"3001": "11.22"}, _tx("11.22", date(2026, 11, 4), desc="Plata clienti speciali VDF123"), ["3001"]),  # D+15
+        ({"3001": "11.22"}, _tx("11.22", date(2026, 10, 21), "ALT SRL", OTHER_IBAN, desc="Plata VDF123"), ["3001"]),
         (
             {"3001": "11.22", "3002": "11.22"},
-            _tx("11.22", date(2026, 10, 21), desc="Debit direct VDF123"),
+            _tx("11.22", date(2026, 10, 21), "ALT SRL", OTHER_IBAN, desc="Plata VDF123"),
             ["3001", "3002"],
         ),
-        ({"3001": "11.22"}, _tx("11.22", date(2026, 12, 20), desc="Debit direct VDF123"), []),  # two months later
-        ({"3001": "11.22"}, _tx("11.22", date(2026, 10, 21), desc="Plata BUGETUL DE STAT"), []),  # a tax: never
+        ({"3001": "11.22"}, _tx("11.22", date(2026, 12, 20), "ALT SRL", OTHER_IBAN, desc="Plata VDF123"), []),
     ],
 )
-def test_a_debit_fitting_invoices_by_amount_alone_waits_for_a_person(
+def test_a_transfer_to_an_account_no_invoice_lists_waits_for_a_person(
     ledger, home, sec, monkeypatch, invoices, debit, offered
 ):
-    """Nothing in the bank's text names the supplier: no matcher settles it; the invoices of exactly its amount are
-    offered as a Plată de lămurit, and the person's pick settles the one chosen."""
+    """A transfer to another account fits no invoice: the invoices of exactly its amount, up to AMOUNT_DAYS before it,
+    are offered as a Plată de lămurit, and the person's pick settles the one chosen."""
     _stored(ledger, monkeypatch, **{m: ubl(total=v, number=f"N{m}", issue="2026-10-20") for m, v in invoices.items()})
     assert efactura.match_statement(ledger, _debit_st(debit)) == [] and debit_key(debit) not in ledger.used_txs()
     recorded = ledger.ambiguous("NORD")
@@ -730,8 +758,9 @@ debit_key = efactura.tx_key
 
 
 def test_an_amount_alone_never_overrides_a_named_invoice_nor_teaches_a_name(ledger, home, sec, monkeypatch):
-    """Review: a debit naming another (paid) invoice, or moving money between the firm's own accounts, is offered
-    nothing; a pick made on the amount alone remembers no name or account for the supplier; bank text shown masked."""
+    """Review: a debit naming another (paid) invoice, or moving money between the firm's own accounts, settles and is
+    offered nothing; a pick made on the amount alone remembers no name or account for the supplier; bank text shown
+    masked."""
     numbers = {"3001": "N3001", "3002": "N3002", "3003": "INV-2026-0042", "3004": "123-456"}
     _stored(ledger, monkeypatch, **{m: ubl(total="11.22", number=n, issue="2026-10-20") for m, n in numbers.items()})
     ledger.db.execute("UPDATE efactura SET status='paid' WHERE message_id IN ('3002', '3003', '3004')")
@@ -740,12 +769,13 @@ def test_an_amount_alone_never_overrides_a_named_invoice_nor_teaches_a_name(ledg
     dashed = _tx("11.22", date(2026, 10, 21), desc="Plata factura INV-2026-0042")
     digits = _tx("11.22", date(2026, 10, 21), desc="Plata factura 123-456")
     own = _tx("11.22", date(2026, 10, 21), iban=companies.get("NORD").ibans["EUR"], desc="Transfer intern")
-    card = _tx("11.22", date(2026, 10, 22), "PAYPROC*XYZ", desc="Plata la POS PAYPROC*XYZ RO49AAAA1B31007593840000")
-    assert efactura.match_statement(ledger, _debit_st(named, dashed, digits, own, card)) == []
-    assert [a["tx_key"] for a in ledger.ambiguous("NORD")] == [debit_key(card)]
+    paid = "Plata PAYPROC*XYZ RO49AAAA1B31007593840000"
+    other = _tx("11.22", date(2026, 10, 22), "PAYPROC*XYZ", OTHER_IBAN, desc=paid)
+    assert efactura.match_statement(ledger, _debit_st(named, dashed, digits, own, other)) == []
+    assert [a["tx_key"] for a in ledger.ambiguous("NORD")] == [debit_key(other)]
     (shown,) = api.ambiguous(ledger, "NORD")
     assert "RO49AAAA1B31007593840000" not in shown["description"]
-    assert efactura.resolve_debit(ledger, "NORD", debit_key(card), "3001") == ("efactura", "3001")
+    assert efactura.resolve_debit(ledger, "NORD", debit_key(other), "3001") == ("efactura", "3001")
     assert ledger.memories("NORD") == []
     # a date in a debit's text is never read as an invoice number (the matchers' rule is digits as written)
     assert efactura._named({"20261021"}, _tx("1.00", date(2026, 10, 21), desc="Plata din 2026-10-21")) == set()
@@ -760,7 +790,6 @@ def test_eur_invoice_matches_original_amount(ledger, home, sec, monkeypatch):
         desc="Plata la POS non-BT FURNIZOR EXEMPLU",
         orig=("20.00", "EUR"),
     )
-    _known_name(ledger, t, "3001")
     st = _debit_st(t)
     assert efactura.match_statement(ledger, st) == ["3001"]
 
