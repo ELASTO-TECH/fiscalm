@@ -1962,33 +1962,54 @@ class Ledger:
     def link_bon(self, sha: str, message_id: str, note: str) -> bool:
         """The bon `sha` proves this invoice paid at the till: both sides are written in one transaction, or neither.
         A bon pays one invoice, ever (its key `bon:<sha>` is reserved like a debit), and an invoice takes one proof,
-        so two connections linking at once never double-link."""
+        so two connections linking at once never double-link. A refusal undoes only its own writes, also inside a
+        caller's transaction (receipt_invoice.associate)."""
         note = audit.note(note)
-        with self.tx() as db:
-            if not self._reserve(db, f"bon:{sha}", f"efactura {message_id}"):
-                return False
-            cur = db.execute(
-                "UPDATE efactura SET status='paid', paid_at=?, paid_note=?, paid_tx=? WHERE message_id=? "
-                f"AND (status='open' OR ({USER_MARKED})) AND {unlinked('efactura')} "
-                "AND NOT EXISTS(SELECT 1 FROM documents WHERE efactura_id=?)",
-                (now(), note, f"bon:{sha}", message_id, message_id),
-            )
-            if cur.rowcount:
-                cur = db.execute(
-                    "UPDATE documents SET efactura_id=? WHERE sha=? AND kind='receipt' AND efactura_id IS NULL",
-                    (message_id, sha),
-                )
-            if not cur.rowcount:
-                db.rollback()
-                return False
+        try:
+            with self.tx() as db:
+                self._bon_writes(db, sha, message_id, note)
+        except LinkRefused:
+            return False
         return True
+
+    def _bon_writes(self, db: sqlite3.Connection, sha: str, message_id: str, note: str) -> None:
+        if not self._reserve(db, f"bon:{sha}", f"efactura {message_id}"):
+            raise LinkRefused("used")
+        cur = db.execute(
+            "UPDATE efactura SET status='paid', paid_at=?, paid_note=?, paid_tx=? WHERE message_id=? "
+            f"AND (status='open' OR ({USER_MARKED})) AND {unlinked('efactura')} "
+            "AND NOT EXISTS(SELECT 1 FROM documents WHERE efactura_id=?) "
+            "AND company=(SELECT company FROM documents WHERE sha=? AND kind='receipt')",
+            (now(), note, f"bon:{sha}", message_id, message_id, sha),
+        )
+        if cur.rowcount:
+            cur = db.execute(
+                "UPDATE documents SET efactura_id=? WHERE sha=? AND kind='receipt' AND efactura_id IS NULL",
+                (message_id, sha),
+            )
+        if not cur.rowcount:
+            raise LinkRefused("changed")
+
+    def attach_receipt(self, sha: str, company: str, message_id: str) -> bool:
+        """The receipt and the invoice of one purchase, associated as documents only: nothing is paid or reserved. One
+        receipt, one invoice, both of `company`."""
+        with self.tx() as db:
+            return (
+                db.execute(
+                    "UPDATE documents SET efactura_id=? WHERE sha=? AND company=? AND kind='receipt' "
+                    "AND efactura_id IS NULL AND NOT EXISTS (SELECT 1 FROM documents WHERE efactura_id=?) "
+                    "AND EXISTS (SELECT 1 FROM efactura WHERE message_id=? AND company=? AND doc_type='invoice')",
+                    (message_id, sha, company, message_id, message_id, company),
+                ).rowcount
+                == 1
+            )
 
     def settle_bon_card(self, message_id: str, tx: str) -> bool:
         """A card debit paid a purchase whose invoice a bon already settled: the debit is used up, once per purchase,
         so it is never looked for again (nor taken by another invoice of the same shop and amount)."""
         what = f"card of bon, efactura {message_id}"
         with self.tx() as db:
-            if not self._card_proof("efactura", message_id, tx):
+            if not self._card_proof("efactura", message_id, tx) or not self._bon_card_fits(message_id, tx):
                 return False
             if db.execute("SELECT 1 FROM efactura WHERE paid_tx=?", (tx,)).fetchone():
                 return False
@@ -2000,6 +2021,17 @@ class Ledger:
                 ).rowcount
                 == 1
             )
+
+    def _bon_card_fits(self, message_id: str, tx: str) -> bool:
+        """The debit's card is the one the bon names, when both name one: another card is another purchase."""
+        row = self.db.execute("SELECT tx FROM statement_txs WHERE tx_key=?", (tx,)).fetchone()
+        card = json.loads(row["tx"]).get("card_last4") if row and row["tx"] else None
+        bon = self.db.execute(
+            "SELECT d.card_last4 FROM documents d JOIN efactura e ON e.message_id=d.efactura_id "
+            "AND e.paid_tx='bon:'||d.sha WHERE e.message_id=?",
+            (message_id,),
+        ).fetchone()
+        return not (card and bon and bon["card_last4"] and bon["card_last4"] != card)
 
     def mark_efactura_skipped(self, message_id: str, reason: str) -> bool:
         if not reason.strip():
@@ -2739,15 +2771,18 @@ class Ledger:
                 == 1
             )
 
-    def cash_receipts(self, company: str) -> set[str]:
-        """The firm's uploads whose reading says they were paid in cash, wholly or in part (receipt_header): their total
-        is not what a card paid."""
+    def receipts_off_debits(self, company: str) -> set[str]:
+        """The firm's receipts no bank debit may be matched with by amount: an upload read as paid in cash, wholly or in
+        part (receipt_header), and a bon that settled its invoice at the till, whose card debit Ledger.settle_bon_card
+        uses up instead."""
         return {
             r[0]
             for r in self.db.execute(
                 "SELECT h.sha FROM receipt_headers h JOIN documents d USING(sha) WHERE d.company=? "
-                "AND d.source LIKE 'upload:%' AND json_extract(h.header, '$.payment') IN ('cash','mixed')",
-                (company,),
+                "AND d.source LIKE 'upload:%' AND json_extract(h.header, '$.payment') IN ('cash','mixed') UNION SELECT d.sha "
+                "FROM documents d JOIN efactura e ON e.message_id=d.efactura_id AND e.paid_tx='bon:'||d.sha "
+                f"WHERE d.company=? AND e.{BON_PAID}",
+                (company, company),
             )
         }
 
@@ -2829,7 +2864,7 @@ class Ledger:
                 if not db.execute(
                     """UPDATE documents SET company=?,month=?,kind=?,path=?,vendor=?,doc_date=?,
                     amount=?,currency=?,card_last4=?,issues=?,source=?,created_at=?,accounts=? WHERE sha=? AND source LIKE 'upload:%'
-                    AND NOT EXISTS (SELECT 1 FROM tx_link_items WHERE item='receipt '||documents.sha)""",
+                    AND efactura_id IS NULL AND NOT EXISTS (SELECT 1 FROM tx_link_items WHERE item='receipt '||documents.sha)""",
                     values[:3] + (path if kind == "statement" else existing["path"],) + values[4:] + (accounts, sha),
                 ).rowcount:
                     return False

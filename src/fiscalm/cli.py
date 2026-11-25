@@ -29,6 +29,7 @@ from fiscalm import (
     links,
     pack,
     receipt_header,
+    receipt_invoice,
     recon,
     scheduler,
     setup,
@@ -103,6 +104,7 @@ def cmd_sync(a, L: Ledger) -> int:
                 )
     receipt_header.extract_pending(L)
     upload_assignment.process_pending(L)
+    receipt_invoice.associate(L, date.today())
     _out(
         {
             "mode": "live" if is_live() else "shadow",
@@ -265,7 +267,7 @@ def cmd_pay_validate(a, L) -> int:
 
 
 def cmd_efactura_sync(a, L: Ledger) -> int:
-    res = efactura.sync(L)
+    res = efactura.sync(L, first=receipt_invoice.associate)
     if a.json:
         _out(res)
     else:
