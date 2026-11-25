@@ -22,8 +22,8 @@ export function refusalOf(s: Pick<State, "refused">, id: string): Refused | null
   const x = s.refused.find((r) => r.id === id);
   return x ? { ...x, why: x.why in REFUSED_WHY ? x.why : "unclear" } : null;
 }
-/** The account as the app shows it: never more than its last four characters. */
-export const maskedIban = (last4: string) => `•••• ${last4}`;
+/** The account as the app shows it: only its ending (the engine sends 4 characters, 6 at most to tell accounts apart). */
+export const maskedIban = (ending: string) => `•••• ${ending}`;
 
 const INACTIVE_CHECK = "Verifică situația cu contabilul înainte de plată.";
 const inactiveSince = (checked: string | null, today: string) =>

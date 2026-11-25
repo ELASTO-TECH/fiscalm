@@ -6,10 +6,10 @@ from datetime import date
 import pytest
 from conftest import go_live
 from firms import iban as synthetic_iban
-from test_efactura import OTHER_IBAN, SUPPLIER_IBAN, _stored, ubl
+from test_efactura import OTHER_IBAN, SUPPLIER_IBAN, _debit_st, _stored, _tx, ubl
 from test_partner_anaf import CUIS
 
-from fiscalm import companies
+from fiscalm import companies, recon
 from fiscalm.api import actions, state as api, state as api_resources
 from fiscalm.bank import catalogue as banks
 from fiscalm.efactura import inbox as efactura, public as anaf_public
@@ -67,7 +67,7 @@ def test_each_refusal_disables_approval_everywhere(ledger, home, monkeypatch, co
     go_live(home)
     REFUSING[code](ledger, monkeypatch)
     assert efactura.payment_refusal(ledger, ledger.efactura("3001")).code == code
-    assert _can_approve(ledger) == (False, False)
+    assert _can_approve(ledger) == ((True, True) if code == "several_ibans" else (False, False))  # a person picks
     unrecorded = api.state(ledger, "NORD")["refused"]
     assert unrecorded == []
     ledger.set_meta("efactura_autopay_refused:3001", "stored before; the reason shown is the current one")
@@ -210,3 +210,44 @@ def test_a_credit_note_still_refuses_an_original_whose_due_date_is_unreadable(le
     _credited(ledger, monkeypatch, note_due)
     assert json.loads(ledger.efactura("3001")["issues"])
     assert efactura.payment_refusal(ledger, ledger.efactura("3001")).code == "credited"
+
+
+def test_a_person_picks_one_of_several_unproved_accounts_and_fiscalm_remembers_it_once_paid(ledger, home, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(), "3002": ubl(number="X2", total="300.00")})  # no rival debit
+    for mid in ("3001", "3002"):
+        _set(ledger, "ibans=?,supplier_iban=?", json.dumps([OTHER_IBAN, SUPPLIER_IBAN]), OTHER_IBAN, mid=mid)
+    invoice = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]
+    assert invoice["can_approve"] and invoice["accounts"] == [
+        {"index": 0, "bank": OTHER_IBAN[4:8], "ending": OTHER_IBAN[-4:]},
+        {"index": 1, "bank": SUPPLIER_IBAN[4:8], "ending": SUPPLIER_IBAN[-4:]},
+    ]
+    for picks in ({}, {"3001": 2}, {"3001": True}, {"3002": 1}):
+        body = {"name": "Picked", "invoice_ids": ["3001"], "accounts": picks}
+        assert actions.act("payment_file_create", "NORD", body)["ok"] is False
+    body = {"name": "Picked", "invoice_ids": ["3001"], "accounts": {"3001": 1}}
+    assert actions.act("payment_file_create", "NORD", body)["ok"] is True
+    item = ledger.efactura("3001")["item_id"]
+    assert ledger.payment(item)["payee_iban"] == SUPPLIER_IBAN
+    assert efactura.payment_refusal(ledger, ledger.efactura("3002")).code == "several_ibans"
+    _stored(ledger, monkeypatch, **{"3003": ubl(number="X3", total="320.00")})  # picked before proof arrives
+    _set(ledger, "ibans=?,supplier_iban=?", json.dumps([OTHER_IBAN, SUPPLIER_IBAN]), OTHER_IBAN, mid="3003")
+    debit = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN, desc="plata factura RMBU")
+    assert recon.auto_mark_paid(ledger, _debit_st(debit)) == [item]  # the bank statement proves the picked account
+    assert efactura.payment_item(ledger, "3002").payee_iban == SUPPLIER_IBAN
+    stale = {"name": "Stale", "invoice_ids": ["3003"], "accounts": {"3003": 0}}  # the other account, no longer offered
+    assert actions.act("payment_file_create", "NORD", stale)["ok"] is False
+
+
+def test_the_picker_never_offers_an_own_account_and_tells_alike_endings_apart(ledger, home, monkeypatch):
+    twin = synthetic_iban("RO00INGB0000999900021111")  # same bank and last 4 as SUPPLIER_IBAN (…01111 vs …21111)
+    own = synthetic_iban("RO00BTRL0000999900007777")
+    _stored(ledger, monkeypatch, **{"3001": ubl()})
+    _set(ledger, "ibans=?,supplier_iban=?", json.dumps([own, SUPPLIER_IBAN, twin]), own)
+    monkeypatch.setattr(companies, "company_by_iban", lambda iban: "NORD" if iban == own else None)
+    accounts = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]["accounts"]
+    assert [(a["index"], a["ending"]) for a in accounts] == [(1, SUPPLIER_IBAN[-5:]), (2, twin[-5:])]
+    assert SUPPLIER_IBAN[-4:] == twin[-4:] and SUPPLIER_IBAN[-5:] != twin[-5:]
+    far = synthetic_iban("RO00INGB1000999900001111")  # differs from SUPPLIER_IBAN only past 6 characters from the end
+    _set(ledger, "ibans=?,supplier_iban=?", json.dumps([SUPPLIER_IBAN, far]), SUPPLIER_IBAN)
+    invoice = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]
+    assert invoice["accounts"] == [] and not invoice["can_approve"]  # never more of the IBAN: paid by hand

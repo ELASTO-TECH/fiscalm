@@ -72,6 +72,7 @@ def state__invoices(
                 "paid_detail": (r["paid_detail"] or None) if status in ("marked", "paid") else None,
                 "overdue": owed and bool(r["due_date"]) and r["due_date"] < today.isoformat(),
                 "previous_iban_last4": [],  # The scale fixture has no proved supplier accounts.
+                "accounts": [],  # nor invoices listing several IBANs.
                 "can_approve": status == "open" and not part and efactura.payment_refusal(L, r) is None,
                 "can_mark_paid": status == "open",
                 "can_withdraw": ps in ("held", "in_file"),

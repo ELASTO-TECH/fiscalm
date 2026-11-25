@@ -372,6 +372,23 @@ def _refused(L: Ledger, co: str) -> tuple[list[dict], efactura.PaymentFacts]:
     return refused, facts
 
 
+def _approval(L: Ledger, r, facts: efactura.PaymentFacts, eligible: bool) -> dict:
+    """`can_approve`, and `accounts`: the invoice's IBANs a person picks from when no evidence decides which one is paid
+    (efactura.payee_choices, never one of the firms' own accounts), each named by its position in the invoice, its
+    bank code and the shortest ending of 4 to 6 characters that, with the bank, tells them apart. Never more (NN 7: bank
+    code and a long ending would rebuild the IBAN): accounts 6 characters cannot tell apart are not offered, and the
+    invoice stays one to pay by hand."""
+    refusal = efactura.payment_refusal(L, r, facts, unfiled=True) if eligible else None
+    choices = efactura.payee_choices(r, facts) if refusal and refusal.code == "several_ibans" else []
+    choices = (
+        list(dict.fromkeys(i for i in choices if not companies.company_by_iban(i))) if r["status"] == "open" else []
+    )
+    n = next((n for n in range(4, 7) if len({(i[4:8], i[-n:]) for i in choices}) == len(choices)), None)
+    ibans = json.loads(r["ibans"] or "[]")
+    accounts = [{"index": ibans.index(i), "bank": i[4:8], "ending": i[-n:]} for i in choices] if n else []
+    return {"accounts": accounts, "can_approve": eligible and (refusal is None or bool(accounts))}
+
+
 def _payee(r, facts: efactura.PaymentFacts) -> str:
     """The account fiscalm pays for this invoice: its queued payment's, else efactura.payee_iban, else the XML's first."""
     queued = facts.queued_payee(r)
@@ -397,7 +414,7 @@ def _invoices(
     status: open | linked (in the payment file) | marked (paid by the user, awaiting a statement debit or a mail, can be
     undone) | paid | skipped. `proved`: paid, and evidence proves it (Ledger.paid_proofs: a statement debit, a payment
     mail or the till's bon fiscal); a payment-file payment marked paid by hand is paid but not proved. `bon`: the proving bon.
-    `can_approve` is true exactly when `approve` would pass now
+    `can_approve` is true exactly when `approve` would pass now, with one of `accounts` picked when it lists any
     (efactura.payment_refusal, the rule behind `refused[].why`); named-file preparation is local in Sandbox."""
     where = {p["item_id"]: k for k in ("held", "in_file", "lost") for p in st[k]}
     marked = {r["message_id"] for r in efactura.awaiting(L, co)}
@@ -477,9 +494,7 @@ def _invoices(
                 "paid_detail": (r["paid_detail"] or None) if status in ("marked", "paid") else None,
                 "overdue": owed and bool(r["due_date"]) and r["due_date"] < today.isoformat(),
                 "previous_iban_last4": _previous_ibans(r, facts),
-                "can_approve": status in ("open", "linked")
-                and not part
-                and efactura.payment_refusal(L, r, facts, unfiled=True) is None,
+                **_approval(L, r, facts, status in ("open", "linked") and not part),
                 "can_mark_paid": status == "open",
                 "can_withdraw": ps in ("held", "in_file"),
                 "can_reopen": status == "marked",

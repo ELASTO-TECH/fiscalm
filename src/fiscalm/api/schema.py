@@ -96,6 +96,7 @@ def schemas() -> dict:
         "covered": MONEY,
         "left": MONEY,
         "previous_iban_last4": STRINGS,
+        "accounts": array(obj({"index": INTEGER, "bank": STRING, "ending": STRING})),
         **bools("overdue", "can_approve", "can_mark_paid", "can_withdraw", "can_reopen", "proved"),
     }
     issued = {

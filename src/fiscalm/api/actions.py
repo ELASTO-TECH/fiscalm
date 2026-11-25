@@ -1022,8 +1022,19 @@ def _product(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
 
 
 def _file_create(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
-    ident = pay.add_invoices(L, co, _file_invoice_ids(args), name=ctx.get("name"), approve_invoice=efactura.approve)
+    ids = _file_invoice_ids(args)
+    ident = pay.add_invoices(
+        L, co, ids, name=ctx.get("name"), approve_invoice=efactura.approve, accounts=_file_accounts(L, args, ids)
+    )
     return _res(True, "Fișierul a fost creat.", done={"file_id": ident})
+
+
+def _file_accounts(L: Ledger, args: dict, ids: list[str]) -> dict[str, str]:
+    """`accounts`: {invoice id: position of the picked IBAN in that invoice}, only for invoices in this request."""
+    picks = args.get("accounts") or {}
+    if not isinstance(picks, dict) or not set(picks) <= set(ids):
+        raise ValueError(BAD)
+    return {mid: efactura.account_at(L.efactura(mid) or {"ibans": "[]"}, n) for mid, n in picks.items()}
 
 
 def _file_invoice_ids(args: dict) -> list[str]:
@@ -1037,7 +1048,10 @@ def _file_add(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     ids = _file_invoice_ids(args)
     if not ids:
         raise ValueError(BAD)
-    ident = pay.add_invoices(L, co, ids, file_id=int(args["file_id"]), approve_invoice=efactura.approve)
+    accounts = _file_accounts(L, args, ids)
+    ident = pay.add_invoices(
+        L, co, ids, file_id=int(args["file_id"]), approve_invoice=efactura.approve, accounts=accounts
+    )
     return _res(True, "Plățile au fost adăugate.", done={"file_id": ident})
 
 
@@ -1172,6 +1186,9 @@ class Action:
         return size <= self.limit
 
 
+# An invoice listing several IBANs: {invoice id: position of the IBAN a person picked} (state's `accounts[].index`).
+ACCOUNT_PICKS = {"type": "object", "additionalProperties": {"type": "integer"}}
+
 # One row per entry keeps the handler and policy together.
 # fmt: off
 ACTIONS = {
@@ -1204,8 +1221,8 @@ ACTIONS = {
     'emag-resolve': Action(_emag_resolve, 'id', public_description='id: company-scoped order sheet ID; acknowledges the current review.'),
     'payment_file_restore': Action(_file_restore, 'file_id version', effect='payment_file', public=False, errors=(PaymentFileError, ValueError), schema={'type':'object','properties':{'file_id':{'type':'integer'},'version':{'type':'string'}},'required':['file_id','version']}),
     'payment_file_missing_import': Action(_file_missing_import, 'file_id version', effect='payment_file', public=False, errors=(PaymentFileError, ValueError), schema={'type':'object','properties':{'file_id':{'type':'integer'},'version':{'type':'string'}},'required':['file_id','version']}),
-    'payment_file_create': Action(_file_create, 'name invoice_ids', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'name': {'type': 'string'}, 'invoice_ids': {'type': 'array', 'items': {'type': ['string', 'integer']}}}, 'required': ['name', 'invoice_ids']}),
-    'payment_file_add': Action(_file_add, 'file_id invoice_ids', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'file_id': {'type': 'integer'}, 'invoice_ids': {'type': 'array', 'items': {'type': ['string', 'integer']}}}, 'required': ['file_id', 'invoice_ids']}),
+    'payment_file_create': Action(_file_create, 'name invoice_ids accounts', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'name': {'type': 'string'}, 'invoice_ids': {'type': 'array', 'items': {'type': ['string', 'integer']}}, 'accounts': ACCOUNT_PICKS}, 'required': ['name', 'invoice_ids']}),
+    'payment_file_add': Action(_file_add, 'file_id invoice_ids accounts', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'file_id': {'type': 'integer'}, 'invoice_ids': {'type': 'array', 'items': {'type': ['string', 'integer']}}, 'accounts': ACCOUNT_PICKS}, 'required': ['file_id', 'invoice_ids']}),
     'payment_file_rename': Action(_file_rename, 'file_id name', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'file_id': {'type': 'integer'}, 'name': {'type': 'string'}}, 'required': ['file_id', 'name']}),
     'payment_file_remove': Action(_file_remove, 'file_id payment_id', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'file_id': {'type': 'integer'}, 'payment_id': {'type': 'string'}}, 'required': ['file_id', 'payment_id']}),
     'payment_file_delete': Action(_file_delete, 'file_id', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'file_id': {'type': 'integer'}}, 'required': ['file_id']}),

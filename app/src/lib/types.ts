@@ -86,6 +86,9 @@ export type Invoice = {
   /** Past due and not paid by the user yet (the engine's rule, the same as `late`). */
   overdue: boolean;
   previous_iban_last4: string[];
+  /** The invoice lists several IBANs and no evidence decides which one is paid: a person picks one (by `index`).
+   * `ending`: the IBAN's last characters, as many as tell the accounts apart (4 or more), never the whole IBAN. */
+  accounts: { index: number; bank: string; ending: string }[];
   can_approve: boolean;
   can_mark_paid: boolean;
   can_withdraw: boolean;

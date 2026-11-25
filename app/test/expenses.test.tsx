@@ -403,6 +403,41 @@ describe("Received invoices and payment confirmation", () => {
       expect(within(sheet).queryByRole("button", { name: "Pune în fișier" })).toBeNull();
     });
 
+  it("sends the account the person picked on an invoice's sheet even when a refresh no longer asks for one", async () => {
+    at("?co=NORD&tab=cheltuieli&inv=102");
+    let s = fixture();
+    const ask = [{ index: 0, bank: "BTRL", ending: "2222" }, { index: 2, bank: "INGB", ending: "1111" }];
+    s.invoices = s.invoices.map((r) => r.id === "102" ? { ...r, accounts: ask } : r);
+    const api = renderApp({ state: () => json(s), onPost: () => json({ ok: true, message: "", state: s }) });
+    const sheet = await screen.findByRole("dialog", { busy: false });
+    await userEvent.click(within(sheet).getByRole("button", { name: "Pune în fișier" }));
+    const dialog = await screen.findByRole("dialog", { name: /^(Pune în fișier|Fișier nou)$/ });
+    await userEvent.click(within(dialog).getByRole("radio", { name: "INGB •••• 1111" }));
+    s = structuredClone(s);
+    s.invoices = s.invoices.map((r) => r.id === "102" ? { ...r, accounts: [] } : r); // a statement proved the other one
+    act(() => becomeVisible());
+    await waitFor(() => expect(within(dialog).queryByRole("radio", { name: "INGB •••• 1111" })).toBeNull());
+    await userEvent.click(within(dialog).getByRole("button", { name: "Pune în fișier" }));
+    await waitFor(() => expect(api.posts().map((c) => (c.body as { accounts?: unknown }).accounts)).toEqual([{ "102": 2 }]));
+  });
+
+  it("asks again when a refresh no longer offers the picked account among several", async () => {
+    at("?co=NORD&tab=cheltuieli&inv=102");
+    let s = fixture();
+    const ask = [{ index: 0, bank: "BTRL", ending: "2222" }, { index: 1, bank: "INGB", ending: "1111" }, { index: 2, bank: "RNCB", ending: "3333" }];
+    s.invoices = s.invoices.map((r) => r.id === "102" ? { ...r, accounts: ask } : r);
+    const api = renderApp({ state: () => json(s) });
+    await userEvent.click(within(await screen.findByRole("dialog", { busy: false })).getByRole("button", { name: "Pune în fișier" }));
+    const dialog = await screen.findByRole("dialog", { name: /^(Pune în fișier|Fișier nou)$/ });
+    await userEvent.click(within(dialog).getByRole("radio", { name: "RNCB •••• 3333" }));
+    s = structuredClone(s);
+    s.invoices = s.invoices.map((r) => r.id === "102" ? { ...r, accounts: ask.slice(0, 2) } : r);
+    act(() => becomeVisible());
+    await waitFor(() => expect(within(dialog).queryByRole("radio", { name: "RNCB •••• 3333" })).toBeNull());
+    expect(within(dialog).getByRole("button", { name: "Pune în fișier" })).toBeDisabled();
+    expect(api.posts()).toEqual([]);
+  });
+
   it.each([["102", "RON"], ["103", "EUR"]])("offers a payment file only for lei; marking %s (%s) is always there", async (id, currency) => {
     at(`?co=NORD&tab=cheltuieli&inv=${id}`);
     renderApp();
@@ -472,6 +507,22 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Pune în fișier" }));
     await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
       { action: "payment_file_create", co: "NORD", name: "Furnizori noiembrie", invoice_ids: ["102"] }]));
+  });
+
+  it("asks which account to pay for an invoice listing several, and sends the pick with the invoice", async () => {
+    const s = withFiles();
+    const telecom = s.invoices.find((r) => r.supplier === "Telecom Rapid SRL")!;
+    telecom.accounts = [{ index: 0, bank: "BTRL", ending: "2222" }, { index: 2, bank: "INGB", ending: "1111" }];
+    const api = await choose("open", { state: () => json(s), onPost: ok(s) });
+    await userEvent.click(box("Telecom Rapid SRL"));
+    await put();
+    const dialog = await chooser();
+    const send = within(dialog).getByRole("button", { name: "Pune în fișier" });
+    expect(send).toBeDisabled(); // nothing is guessed
+    await userEvent.click(within(dialog).getByRole("radio", { name: "INGB •••• 1111" }));
+    await userEvent.click(send);
+    await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
+      { action: "payment_file_add", file_id: 9, invoice_ids: [telecom.id], accounts: { [telecom.id]: 2 } }]));
   });
 
   it("asks again when the chosen file is imported elsewhere meanwhile, and sends nothing until then", async () => {
