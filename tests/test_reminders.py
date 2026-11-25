@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 from test_invoicing import draft, setup_invoice as setup_invoice
-from test_issued import _credit, _st, _stored, sec as sec
+from test_issued import OTHER_IBAN, _credit, _st, _stored, sec as sec
 from ubl_fake import ubl
 
 from fiscalm import companies
@@ -177,7 +177,9 @@ def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
     second = _client_credit(L, iid, day=date(2026, 11, 12), desc="Incasare 2")
     blank = _client_credit(L, iid, day=date(2026, 11, 11), counterparty="", iban="", desc="Incasare")
     settled = _client_credit(L, iid, day=date(2026, 11, 9), counterparty="", iban="", desc="Incasare 0")
-    other = _client_credit(L, iid, day=date(2026, 11, 8), counterparty="OTHER CLIENT SRL", desc="Incasare 3")
+    other = _client_credit(
+        L, iid, day=date(2026, 11, 8), counterparty="OTHER CLIENT SRL", iban=OTHER_IBAN, desc="Incasare 3"
+    )
     extra = {
         "two_payers_one_explained": [other],
         "two_twins_one_explained": [second],
