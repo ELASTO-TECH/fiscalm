@@ -54,10 +54,11 @@ USER = "user:"
 # their word, but not confirmed until a statement debit or a payment mail proves it.
 USER_MARKED = f"status='paid' AND paid_tx IS NULL AND paid_note LIKE '{USER}%'"
 # Proved paid by a payment mail, as _PROOFS reads it: `ef-proof:<mail key>` reserved for this invoice, and that mail
-# read for it (judged). Its bank debit, when the statement brings it, takes the mail's place as the proof; the mail
-# stays reserved for this invoice (settled_tx), so it never proves another.
+# read for it (judged); its payment-file row, if any, not paid by a debit already. Its bank debit, when the statement
+# brings it, takes the mail's place as the proof; the mail stays reserved for this invoice, so it never proves another.
 MAIL_PROVED = (
-    "status='paid' AND paid_tx LIKE 'ef-proof:_%' AND EXISTS (SELECT 1 FROM settled_tx s WHERE "
+    "status='paid' AND substr(paid_tx,1,9)='ef-proof:' AND length(paid_tx)>9 AND NOT EXISTS (SELECT 1 FROM payments "
+    "p WHERE p.item_id=efactura.item_id AND p.status='paid') AND EXISTS (SELECT 1 FROM settled_tx s WHERE "
     "s.tx_key=efactura.paid_tx AND s.what='efactura ' || efactura.message_id) AND EXISTS (SELECT 1 FROM meta m "
     "WHERE m.key='ef-judged:' || efactura.message_id || ':' || substr(efactura.paid_tx, 10))"
 )

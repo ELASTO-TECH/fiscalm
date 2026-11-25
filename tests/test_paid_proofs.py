@@ -88,7 +88,9 @@ def test_a_key_with_nothing_behind_it_proves_nothing(ledger):
         "806": "ef-proof:nm:never-read",
         "807": other,
         "808": credit,
+        "809": "EF-PROOF:m",  # read and reserved, but not the key a mail proof is written under
     }
+    efactura.judged(ledger, "809", ["m"])
     for mid, key in keys.items():
         _invoice(ledger, mid)
         assert ledger.mark_efactura_paid(mid, "payment proof", tx=key)

@@ -410,15 +410,15 @@ def test_a_reopen_during_matching_never_hides_a_rival(ledger, home, sec, monkeyp
     assert ledger.efactura("3002")["status"] == "open" and statements.tx_key(t) not in ledger.used_txs()
 
 
-@pytest.mark.parametrize("case", ["credited", "withdrawn", "unreadable twin"])
+@pytest.mark.parametrize("case", ["credited", "withdrawn", "unreadable twin", "payment paid by a debit"])
 def test_a_mail_proved_invoice_takes_its_debit_like_an_open_one(ledger, home, sec, monkeypatch, case):
     credit = ubl(number="COR 2", total="-50.00").replace(
         b"<cbc:DocumentCurrencyCode>",
         b"<cbc:Note>Storno factura seria TEST nr. 0001 din data 20/10/2026</cbc:Note><cbc:DocumentCurrencyCode>",
     )
     _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), **({"3002": credit} if case == "credited" else {})})
-    if case == "withdrawn":  # its payment-file row stays, skipped: the debit is still the invoice's
-        efactura.approve(ledger, "3001", origin="person")
+    if case in ("withdrawn", "payment paid by a debit"):  # its payment-file row stays, skipped
+        item_id = efactura.approve(ledger, "3001", origin="person")["item_id"]
         assert efactura.withdraw(ledger, "3001", "user: already paid (page)") is None
     if case == "unreadable twin":  # a mail proved an invoice fiscalm can't read: no amount, never a rival
         ledger.db.execute(
@@ -442,6 +442,12 @@ def test_a_mail_proved_invoice_takes_its_debit_like_an_open_one(ledger, home, se
         assert efactura.match_statement(ledger, _debit_st(t)) == [] and statements.tx_key(t) not in ledger.used_txs()
         return
     t = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
+    if case == "payment paid by a debit":  # a debit proved its payment row meanwhile: no second debit for the invoice
+        first = _tx("250.00", date(2026, 10, 29), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata 1")
+        ledger.record_statement(_debit_st(first))
+        assert ledger.mark_paid(item_id, "statement", statements.tx_key(first))
+        assert efactura.match_statement(ledger, _debit_st(t)) == [] and statements.tx_key(t) not in ledger.used_txs()
+        return
     assert efactura.match_statement(ledger, _debit_st(t)) == ["3001"]
     assert ledger.efactura("3001")["paid_tx"] == statements.tx_key(t)
 
