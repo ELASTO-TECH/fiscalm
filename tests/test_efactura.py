@@ -639,6 +639,35 @@ def test_a_debit_without_an_iban_settles_the_one_invoice_of_its_exact_amount(
     )
 
 
+@pytest.mark.parametrize(
+    "numbers, paid, desc, settled, waits",
+    [
+        ({"3001": "12345", "3002": "67890"}, [], "Order 9123456", [], True),  # part of a longer code: names nothing
+        ({"3001": "BILL-12", "3002": "N55555"}, ["3001"], "Plata factura BILL-12", [], False),  # names a paid one
+        ({"3001": "INV-2026-0042", "3002": "ALT-2026-0042"}, ["3001"], "Plata factura INV-2026-0042", [], False),
+        ({"3001": "INV-2026-0042", "3002": "ALT-2026-0042"}, [], "Plata factura ALT 2026 0042", ["3002"], False),
+    ],
+)
+def test_a_debit_settles_only_the_invoice_its_whole_reference_names(
+    ledger, home, sec, monkeypatch, numbers, paid, desc, settled, waits
+):
+    _stored(ledger, monkeypatch, **{m: ubl(total="11.22", number=n) for m, n in numbers.items()})
+    for m in paid:
+        ledger.db.execute("UPDATE efactura SET status='paid' WHERE message_id=?", (m,))
+    ledger.db.commit()
+    t = _tx("11.22", D, desc=desc)
+    assert efactura.match_statement(ledger, _debit_st(t)) == settled
+    assert len(ledger.ambiguous("NORD")) == int(waits)
+
+
+def test_a_pick_between_invoices_of_the_same_amount_teaches_no_name(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(total="11.22"), "3002": ubl(total="11.22", number="X2")})
+    card = _tx("11.22", D, "PAYPROC*XYZ", desc="Plata la POS PAYPROC*XYZ")  # a processor, not the supplier
+    assert efactura.match_statement(ledger, _debit_st(card)) == []
+    assert efactura.resolve_debit(ledger, "NORD", efactura.tx_key(card), "3001") == ("efactura", "3001")
+    assert ledger.memories("NORD") == []
+
+
 def test_a_cash_withdrawal_by_its_bank_code_settles_nothing(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"3001": ubl(total="17.42")})
     t = _tx("17.42", D)
