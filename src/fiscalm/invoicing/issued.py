@@ -405,7 +405,7 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
         claims = Counter(r["message_id"] for c in first for r, _ in c)
         # sets are found against the opening balances and accounts, before any single collection changes them
         plans = [(t, plan) for t, c in zip(credits, first, strict=True) if not c and (plan := pool.batch(t, ()))]
-        shown = _clients_by_account(credits, first, plans)
+        shown = _clients_by_account(pool, st)
         done = _collect_singles(L, pool, st, credits, first, claims)
         return batch_done + done + _collect_sets(L, pool, plans, claims, done, shown)
 
@@ -449,16 +449,12 @@ def _collect_singles(
     return done
 
 
-def _clients_by_account(credits: list, first: list, plans: list) -> dict[str, set[str]]:
-    """The clients each account shows on this statement, by single candidates or sets."""
+def _clients_by_account(pool: _Pool, st: statements.Statement) -> dict[str, set[str]]:
+    """The clients each account shows on any credit line of this statement, whatever its amount."""
     shown: dict[str, set[str]] = {}
-    for t, c in zip(credits, first, strict=True):
-        for r, how in c:
-            if t.counterparty_iban and how in CLIENT_PROOF:
-                shown.setdefault(t.counterparty_iban, set()).add(_client_key(r))
-    for t, (_, _, key) in plans:
-        if t.counterparty_iban:
-            shown.setdefault(t.counterparty_iban, set()).add(key)
+    for t in st.settlement_txs:
+        if t.direction == "credit" and t.counterparty_iban:
+            shown.setdefault(t.counterparty_iban, set()).update(pool.who(t))
     return shown
 
 
@@ -471,8 +467,9 @@ def _collect_sets(
     # every set a credit could pay competes, even one it can't settle for being ambiguous
     taken = Counter(m for _, (sets, _, _) in plans for m in {r["message_id"] for rows in sets for r in rows})
     out: list[str] = []
-    for t, (sets, how, _) in plans:
-        if len(sets) != 1 or len(shown.get(t.counterparty_iban, ())) > 1:
+    for t, (sets, how, key) in plans:
+        # the line shows this one client only, and so does its account on every line of the statement
+        if len(sets) != 1 or pool.who(t) != {key} or len(shown.get(t.counterparty_iban, ())) > 1:
             continue
         rows = sets[0]
         alone = all(
@@ -532,12 +529,18 @@ def _sets(mine: list, names: set[str], kind: str) -> list[tuple]:
     return sets + ([tuple(mine)] if len(mine) > BATCH_MAX else [])
 
 
+def _full_tax_id(r) -> str:
+    """An invoice's whole client tax id, country prefix kept ('AT123456789'); the digits when that is all it has."""
+    full = r["client_tax_id"] if "client_tax_id" in r.keys() else ""  # noqa: SIM118 (sqlite3.Row)
+    full = re.sub(r"[^A-Z0-9]", "", (full or "").upper())
+    return (full[2:] if re.fullmatch(r"RO\d+", full) else full) or tax_token(r["client_cui"]) or ""
+
+
 def _client_key(r) -> str:
-    """The client an invoice is for: its firm's full tax id (country prefix kept), or a private buyer's name."""
+    """The client an invoice is for: its firm's full tax id, or a private buyer's name."""
     if not firm_id(tax_token(r["client_cui"])):
         return "name:" + " ".join(efactura.firm_core(r["client_name"]))
-    full = r["client_tax_id"] if "client_tax_id" in r.keys() else ""  # noqa: SIM118 (sqlite3.Row)
-    return "tax:" + (re.sub(r"[\s.-]+", "", full or "").upper() or tax_token(r["client_cui"]))
+    return "tax:" + _full_tax_id(r)
 
 
 def _rank(cands: list) -> int:
@@ -566,11 +569,11 @@ class _Pool:
         self._numbers([*L.issued_rows(company=company), *old])
         self.accounts = client_accounts(L, company)
         self.clients = {
-            (r["client_name"] or "", r["client_cui"] or "")
+            (r["client_name"] or "", r["client_cui"] or "", _full_tax_id(r), _client_key(r))
             for r in [*L.issued_rows(company=company), *old]
             if r["doc_type"] == "invoice"
         }
-        self._from_client: dict[int, bool] = {}
+        self._who: dict[int, set[str]] = {}
 
     def _numbers(self, rows: list) -> None:
         """Every invoice number a credit may name: whole identifiers, digits, and the firm's series."""
@@ -606,13 +609,24 @@ class _Pool:
         return "other" if self.from_client(t) else "amount"
 
     def from_client(self, t: statements.Tx) -> bool:
-        """The credit shows one of the firm's clients (iban, CUI or name): it can pay only that client's invoices."""
-        if id(t) not in self._from_client:
-            self._from_client[id(t)] = any(
-                credit_from_client(self.L, self.company, name, cui, t, accounts=self.accounts)
-                for name, cui in self.clients
-            )
-        return self._from_client[id(t)]
+        """The credit shows one of the firm's clients: it can pay only that client's invoices."""
+        return bool(self.who(t))
+
+    def who(self, t: statements.Tx) -> set[str]:
+        """Every client of the firm (any invoice, any status, history too) the credit shows: by the account an
+        earlier collection came from, the CUI on it (a foreign firm's whole VAT id, country included), or the name."""
+        if id(t) not in self._who:
+            text = re.sub(r"[^A-Z0-9]", "", f"{t.counterparty} {t.description}".upper())
+            said = f"{t.counterparty} {t.description}"
+            self._who[id(t)] = {
+                key
+                for name, cui, full, key in self.clients
+                # the account, and also the words: a known account never hides another client named on the line
+                if credit_from_client(self.L, self.company, name, cui, t, accounts=self.accounts) == "iban"
+                or same_firm(name, t.counterparty)
+                or (_cui_on(tax_token(cui), said) and (full.isdigit() or full in text))
+            }
+        return self._who[id(t)]
 
     def client_of(self, r, t: statements.Tx) -> str:
         cui = r["client_cui"] or ""

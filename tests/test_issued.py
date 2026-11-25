@@ -449,6 +449,8 @@ def _gamma(mid, number, total):
         ("an account taught by a single", ["7001"]),
         ("a single shrinking two sets to one", ["7001"]),
         ("an unknown reference with digits in its series", []),
+        ("an account showing another client at any amount", []),
+        ("a foreign vat id of another firm", []),
     ],
 )
 def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec, monkeypatch, case, collected):
@@ -487,11 +489,24 @@ def test_a_set_never_mixes_clients_marks_or_competing_credits(ledger, home, sec,
     elif case == "a single shrinking two sets to one":  # 100 is 40+60 or 30+70 before the 40 is collected
         _stored(ledger, monkeypatch, **_owed("40.00", "60.00", "30.00", "70.00"))
         credits = [c("40.00"), c("100.00", "y")]
+    elif case == "an account showing another client at any amount":
+        _stored(ledger, monkeypatch, **_owed("400.00", "600.00") | _gamma("7003", "NRD 0060", "50.00"))
+        credits = [c("123.00", counterparty="GAMMA LABS SRL", iban=OTHER_IBAN), c("1000.00", "y", iban=OTHER_IBAN)]
+    elif case == "a foreign vat id of another firm":
+        de = {
+            m: ubl(number=f"NRD 00{m[-2:]}", total=t, client_cui="DE123456789")
+            for m, t in (("7001", "400.00"), ("7002", "600.00"))
+        }
+        at = {"7003": ubl(number="NRD 0060", total="80.00", client="AUSTRIA FIRMA GMBH", client_cui="AT123456789")}
+        _stored(ledger, monkeypatch, **de | at)
+        assert ledger.mark_issued_collected("7003", "statement", "tx-earlier")
+        credits = [c("1000.00", "AT123456789", counterparty="AUSTRIA FIRMA GMBH", iban=OTHER_IBAN)]
     else:
         b2b = {"7001": "400.00", "7002": "600.00"}
         _stored(ledger, monkeypatch, **{m: ubl(number=f"B2B-00{m[-2:]}", total=t) for m, t in b2b.items()})
         credits = [c("1000.00", "Plata B2B-0099")]
     assert issued.match_statement(ledger, _st(*credits)) == collected
+    assert issued.match_statement(ledger, _st(*credits)) == []  # the same statement again decides the same
 
 
 def test_a_set_is_collected_whole_or_not_at_all(ledger, home, sec, monkeypatch):
