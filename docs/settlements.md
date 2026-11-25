@@ -55,8 +55,8 @@ read as one table; any other non-empty sheet (a summary, a title row, another la
 A file covering several payouts (a mapped `batch` column with several ids) is stored as one report per payout, all
 or none, each keyed by its payout id; with a mapped `date` column every line of a payout names its one payment day,
 which dates that report. A payout's lines with different days refuse the file. The file's bytes are each report's
-evidence; uploading it again is a duplicate. After one payout is withdrawn, the same file brings back only that one;
-its other payouts must read exactly as stored, or the upload refuses.
+evidence; uploading it again is a duplicate. A payout withdrawn to correct it comes back as a corrected file
+(other bytes); the same bytes are never stored twice. Every worksheet the workbook names or holds is read.
 A refund's fee keeps its direction only through a mapped net (a fee returned or kept); without one it refuses.
 
 Every source needs an explicit column mapping, submitted by a person. The upload preview pre-fills it from header names

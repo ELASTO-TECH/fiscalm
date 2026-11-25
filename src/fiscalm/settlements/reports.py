@@ -105,11 +105,11 @@ def table(data: bytes, kind: str, delimiter: str = ",") -> list[list[str]]:
                     raise ReportError("Oversized or duplicate XLSX entries")
                 if any("externalLink" in i.filename or "vbaProject" in i.filename for i in infos):
                     raise ReportError("External links and macros refuse")
-                names = [i.filename for i in infos if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", i.filename)]
+                names = _worksheets(z)
                 strings = []
                 if "xl/sharedStrings.xml" in z.namelist():
                     strings = ["".join(x.itertext()) for x in _xml(z.read("xl/sharedStrings.xml")).findall("s:si", NS)]
-                rows = _one_table([_sheet(z.read(name), strings) for name in sorted(names, key=_sheet_number)])
+                rows = _one_table([_sheet(z.read(name), strings) for name in names])
         else:
             raise ReportError("Use CSV or XLSX")
     except (
@@ -133,8 +133,20 @@ def table(data: bytes, kind: str, delimiter: str = ",") -> list[list[str]]:
 NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 
-def _sheet_number(name: str) -> int:
-    return int(re.sub(r"\D", "", name))
+def _worksheets(z: zipfile.ZipFile) -> list[str]:
+    """Every worksheet of the workbook, none left unread: those its relationships name (each must be there) and any
+    other part in xl/worksheets/."""
+    named = []
+    if "xl/_rels/workbook.xml.rels" in z.namelist():
+        rels = "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"
+        for rel in _xml(z.read("xl/_rels/workbook.xml.rels")).iter(rels):
+            if rel.get("Type", "").endswith("/worksheet"):
+                target = rel.get("Target", "")
+                named.append(target.lstrip("/") if target.startswith("/") else "xl/" + target)
+    if any(not re.fullmatch(r"xl/[A-Za-z0-9_/]+\.xml", n) or ".." in n or n not in z.namelist() for n in named):
+        raise ReportError("Unreadable worksheet")
+    found = sorted(n for n in z.namelist() if re.fullmatch(r"xl/worksheets/[^/]+\.xml", n))
+    return list(dict.fromkeys([*named, *found]))
 
 
 def _one_table(sheets: list[list[list[str]]]) -> list[list[str]]:

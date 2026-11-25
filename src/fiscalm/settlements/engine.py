@@ -98,25 +98,6 @@ def report_digest(data: bytes, key: str, single: bool) -> str:
     return digest if single else f"{digest}:{key}"
 
 
-def _not_stored(db: sqlite3.Connection, company: str, digest: str, reports: list) -> list:
-    """The same bytes are one file, however mapped. Payouts of it already stored (not withdrawn) must be stored again
-    exactly as they are, and only a withdrawn one is stored anew (its corrected reimport); all stored: a duplicate."""
-    kept = {
-        r["report_key"]: json.loads(r["data"])["lines"]
-        for r in db.execute(
-            "SELECT report_key,data FROM settlement_reports WHERE company=? AND (digest=? OR digest LIKE ?) "
-            "AND status!='withdrawn'",
-            (company, digest, digest + ":%"),
-        )
-    }
-    mine = {key: lines for key, _, lines in reports}
-    if any(key not in mine or mine[key] != lines for key, lines in kept.items()):
-        raise ReportError("Report file already stored with other payouts")
-    if kept and all(key in kept for key in mine):
-        raise sqlite3.IntegrityError("duplicate report file")
-    return [r for r in reports if r[0] not in kept]
-
-
 def _store_reports(L: Ledger, company: str, data: bytes, spec: dict, reports: list) -> list[str]:
     identity = spec.get("payer_cui") or spec.get("payer_iban") or issued._norm(spec["payer_name"])
     base = {k: spec[k] for k in REQUIRED} | {k: spec.get(k, "") for k in ("payer_cui", "payer_iban")}
@@ -129,7 +110,13 @@ def _store_reports(L: Ledger, company: str, data: bytes, spec: dict, reports: li
         raise ReportError("Too many payouts for one file")
     ids, digest, single = [], hashlib.sha256(data).hexdigest(), len(reports) == 1
     with L.tx() as db:
-        reports = _not_stored(db, company, digest, reports)
+        # The same bytes are one file, however mapped: never stored twice. A payout corrected after a withdrawal
+        # comes back as a corrected file.
+        if db.execute(
+            "SELECT 1 FROM settlement_reports WHERE company=? AND (digest=? OR digest LIKE ?) AND status!='withdrawn'",
+            (company, digest, digest + ":%"),
+        ).fetchone():
+            raise sqlite3.IntegrityError("duplicate report file")
         for key, day, lines in reports:
             ids.append(uuid4().hex)
             db.execute(

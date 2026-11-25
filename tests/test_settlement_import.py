@@ -91,6 +91,19 @@ def test_xlsx_sheets_with_one_header_read_as_one_table():
     for other in (["Total", "Lines"], ["REF", "GROSS", "FEE"], ["Gross", "Ref", "Fee"]):
         with pytest.raises(ReportError):
             table(workbook(cells(header, ["TEST-1", "1", "0"], ["TEST-2", "1", "0"]), cells(other, ["1", "2"])), "xlsx")
+    rels = '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{}</Relationships>'
+    for target, extra in (("worksheets/refunds.xml", cells(["Gross"], ["-5.00"])), ("worksheets/missing.xml", "")):
+        named = io.BytesIO()  # a worksheet the workbook names but doesn't number (or doesn't hold)
+        with zipfile.ZipFile(named, "w") as z:
+            sheet = f"<worksheet {NS}><sheetData>{{}}</sheetData></worksheet>"
+            z.writestr("xl/worksheets/sheet1.xml", sheet.format(cells(header, ["T", "1", "0"])))
+            z.writestr(
+                "xl/_rels/workbook.xml.rels", rels.format(f'<Relationship Type="x/worksheet" Target="{target}"/>')
+            )
+            if extra:
+                z.writestr("xl/" + target, sheet.format(extra))
+        with pytest.raises(ReportError):
+            table(named.getvalue(), "xlsx")
 
 
 @pytest.mark.parametrize("data", [b"a,a\n1,2", b"a,b\n1", b"a,b\n1,2,3"])
@@ -208,18 +221,16 @@ def test_multi_payout_file_becomes_one_report_per_payout(ledger):
             bank_upload.accept_report(ledger, "NORD", bad, "text/csv", partner=partner, **UPLOAD)
     assert len(settlements.state(ledger, "NORD")) == 2  # nothing of a refused file is stored
     once = described | {"mapping": {k: v for k, v in mapping.items() if k not in ("batch", "date")}}
-    with pytest.raises(bank_upload.Refused):  # the same bytes mapped another way are still the same file
-        bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=once, **UPLOAD)
-    assert len(settlements.state(ledger, "NORD")) == 2
+    remapped = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=once, **UPLOAD)
+    assert remapped["status"] == "duplicate" and len(settlements.state(ledger, "NORD")) == 2  # same bytes, one file
     b2 = next(r["id"] for r in settlements.state(ledger, "NORD") if r["report_key"] == "B-2")
-    assert ledger.withdraw_report(b2, "NORD")  # withdrawn to correct it: the file brings back only that payout
-    back = bank_upload.accept_report(ledger, "NORD", data, "text/csv", partner=partner, **UPLOAD)
-    assert len(back["ids"]) == 1 and sorted(r["report_key"] for r in settlements.state(ledger, "NORD")) == [
-        "B-1",
-        "B-2",
-    ]
-    with pytest.raises(bank_upload.Refused):  # B-1 stays as stored: another reading of the file refuses
-        bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=once, **UPLOAD)
+    assert ledger.withdraw_report(b2, "NORD")  # withdrawn to correct it: it comes back as a corrected file
+    again = bank_upload.accept_report(ledger, "NORD", data, "text/csv", partner=partner, **UPLOAD)
+    assert again["status"] == "duplicate" and len(settlements.state(ledger, "NORD")) == 1
+    corrected = b"Borderou;Factura;Ramburs;Comision;Data\nB-2;TEST-2;50,00;1,00;11.10.2026\n"
+    assert (
+        bank_upload.accept_report(ledger, "NORD", corrected, "text/csv", partner=partner, **UPLOAD)["status"] == "added"
+    )
 
 
 def test_uploaded_format_belongs_to_partner_and_is_reused(ledger):
