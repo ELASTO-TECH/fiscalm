@@ -819,41 +819,52 @@ def _unsure(doc: Doc, out: Outcome) -> bool:
     return doc.kind == "pdf" and (out.result == "unreadable" or out.result == "asked" and out.reason in UNSURE)
 
 
-def _ai_refusal(L: Ledger, x: ai_extract.Extraction, *, allow_ro_supplier: bool) -> str:
-    if x.doc_type in ("proforma", "other"):
-        return {"proforma": "proforma", "other": "not-invoice"}[x.doc_type]
-    if x.doc_type == "credit_note":
-        return "credit-note"
-    if x.seller:
-        return "issued"
-    return "efactura" if not allow_ro_supplier and ai_extract.ro_seller(x, companies.all(L).values()) else ""
+def _ai_would_refuse(L: Ledger, x: ai_extract.Extraction) -> bool:
+    """The AI would refuse the document; alone, that only keeps the question open (the rules refuse, never the AI)."""
+    return (
+        x.doc_type in ("proforma", "credit_note", "other")
+        or bool(x.seller)
+        or ai_extract.ro_seller(x, companies.all(L).values())
+    )
+
+
+def _printed(text: str, amount: str, currency: str) -> bool:
+    """The amount stands positive on a line of the text in this currency: the line's only one, or none on the line
+    and none other on the document."""
+    shown = {_currency(m.group(0)) for m in _CUR.finditer(text)}
+    for line in text.splitlines():
+        curs = {_currency(m.group(0)) for m in _CUR.finditer(line)}
+        if curs != {currency} and (curs or not shown <= {currency}):
+            continue
+        for m in ai_extract.AMOUNT.finditer(line):
+            if ai_extract.money(m.group(1), m.group(2)) == Decimal(amount) and not _negative(line, m):
+                return True
+    return False
 
 
 def _agreed_totals(doc: Doc, x: ai_extract.Extraction) -> list[tuple[str, str]] | None:
     """The totals with the AI's reading: the rules' own when it read none; else its total when it is one of theirs or,
-    when they found none, printed in a currency the document shows (any, when it shows none). None: they disagree."""
+    when they found none, printed positive with its currency. None: they disagree."""
     if not x.total:
         return doc.totals
     if doc.totals:
         picked = [t for t in doc.totals if t[0] == x.total and t[1] in (x.currency, "")]
         return picked if len(picked) == 1 else None
-    shown = {_currency(m.group(0)) for m in _CUR.finditer(doc.text)}
-    return [(x.total, x.currency)] if x.currency and (not shown or x.currency in shown) else None
+    return [(x.total, x.currency)] if x.currency and (not doc.text or _printed(doc.text, x.total, x.currency)) else None
 
 
-def ai_reading(
-    L: Ledger, doc: Doc, data: bytes, *, ask: Callable | None = None, allow_ro_supplier: bool = False
-) -> Doc | None:
+def ai_reading(L: Ledger, doc: Doc, data: bytes, *, ask: Callable | None = None) -> Doc | None:
     """The document as the rules read it, completed by one checked AI reading (fiscalm.ai_extract) of its text, or of
     its first page's picture when it has no text. None without an AI integration or a usable answer.
 
     The AI never overrules the rules: a firm the rules found must include its buyer, a total they found must include
-    its total. A confident reading adds the buyer's role, the total, and refusals (a proforma, a credit note, one of the
-    firms as seller, a Romanian seller); a low confidence fills only the number, the date and the supplier's name, so
-    the question shows them."""
+    its total. A confident reading adds the buyer's role and the total; anything else (low confidence, a disagreement,
+    a refusal only the AI sees: proforma, credit note, a firm as seller, a Romanian seller) fills only the number, the
+    date and the supplier's name, so the question shows them. Only the rules refuse.
+    """
     image = None
     if not doc.text.strip():
-        png = first_page_png(data) if data.startswith(b"%PDF-") else None
+        png = first_page_png(data) if data.startswith(b"%PDF-") and (ask or ai_extract.ready(L)) else None
         if png is None:
             return None
         image = ("image/png", png)
@@ -867,12 +878,10 @@ def ai_reading(
         supplier=doc.supplier or x.seller_name,
         card_last4=doc.card_last4 or x.card_last4,
     )
-    if not x.confident:
-        return out
-    out.refused = _ai_refusal(L, x, allow_ro_supplier=allow_ro_supplier)
+    out.refused = ""  # read now: a scan without text waits as a question, never as a silent refusal
     totals = _agreed_totals(doc, x)
-    if out.refused or totals is None:  # a refusal stands; a total the rules contradict leaves the question open
-        return out
+    if not x.confident or _ai_would_refuse(L, x) or totals is None:
+        return out  # in doubt: the question stays, with the fields read
     out.totals = totals
     if x.buyer and (not doc.firms or x.buyer in doc.firms):
         out.firms = doc.firms or [x.buyer]
