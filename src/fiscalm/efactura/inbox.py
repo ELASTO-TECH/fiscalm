@@ -32,7 +32,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from fiscalm import ai, audit, companies, history_invoices, integrations
-from fiscalm.bank import statements
+from fiscalm.bank import catalogue as banks, statements
 from fiscalm.efactura import client as anaf, partners as partner_anaf
 from fiscalm.efactura.credits import credited, net_invoices
 from fiscalm.identity import partner_id, tax_token
@@ -1423,8 +1423,7 @@ def payment_item(L: Ledger, message_id: str, *, unfiled: bool = False, account: 
         kind="efactura",
         payee_name=r["supplier_name"],
         payee_iban=iban,
-        # The XML's BIC is not tied to one of several accounts (parse_ubl keeps the first BIC it meets): only with one.
-        payee_bic=(r["bic"] or "") if len(json.loads(r["ibans"] or "[]")) == 1 else "",
+        payee_bic=_payee_bic(r, iban),
         payee_fiscal_code="",
         amount=Decimal(r["total"]),
         details=f"Plata factura {r['number']} din {date.fromisoformat(r['issue_date']):%d.%m.%Y}",
@@ -1433,6 +1432,14 @@ def payment_item(L: Ledger, message_id: str, *, unfiled: bool = False, account: 
         source_path=r["raw_path"],
         source_sha=r["xml_sha"],
     )
+
+
+def _payee_bic(r, iban: str) -> str:
+    """Treasury accounts have one BIC; otherwise the XML's, only when it lists one account (parse_ubl keeps the first
+    BIC it meets, not tied to one of several accounts)."""
+    if iban[4:8] == "TREZ":
+        return banks.TREASURY_BIC
+    return (r["bic"] or "") if len(json.loads(r["ibans"] or "[]")) == 1 else ""
 
 
 def payment_refusal(L: Ledger, row, facts: PaymentFacts | None = None, *, unfiled: bool = False) -> ApproveError | None:

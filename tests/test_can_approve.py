@@ -1,6 +1,7 @@
 """can_approve is check_payment's verdict: state and API v1 offer approval exactly when `approve` would pass."""
 
 import json
+from datetime import date
 
 import pytest
 from conftest import go_live
@@ -10,7 +11,9 @@ from test_partner_anaf import CUIS
 
 from fiscalm import companies
 from fiscalm.api import actions, state as api, state as api_resources
+from fiscalm.bank import catalogue as banks
 from fiscalm.efactura import inbox as efactura, public as anaf_public
+from fiscalm.payments import btgo
 
 INACTIVE_CUI = CUIS[0]
 
@@ -141,6 +144,7 @@ TREZ_IBAN = synthetic_iban("RO00TREZ0000999900003333")
     [
         ([OTHER_IBAN, SUPPLIER_IBAN], SUPPLIER_IBAN, SUPPLIER_IBAN),  # the one proved for this supplier wins
         ([TREZ_IBAN, SUPPLIER_IBAN], None, SUPPLIER_IBAN),  # the only commercial account beside Treasury
+        ([SUPPLIER_IBAN, TREZ_IBAN], TREZ_IBAN, TREZ_IBAN),  # a proved Treasury account wins, with Treasury's BIC
         ([TREZ_IBAN, OTHER_IBAN, SUPPLIER_IBAN], None, "several_ibans"),
         ([OTHER_IBAN, SUPPLIER_IBAN], None, "several_ibans"),
         (["DE00NOTROMANIAN", SUPPLIER_IBAN], None, SUPPLIER_IBAN),  # only valid Romanian IBANs count
@@ -155,7 +159,10 @@ def test_an_invoice_with_several_ibans_pays_the_one_account_it_can_prove(
         _prove(ledger, proved)
     refusal = efactura.payment_refusal(ledger, ledger.efactura("3001"))
     assert (refusal.code if refusal else efactura.payment_item(ledger, "3001").payee_iban) == pays
-    assert refusal or efactura.payment_item(ledger, "3001").payee_bic == ""  # the XML's BIC is not tied to one of them
+    if not refusal:  # the XML's BIC is not tied to one of several accounts; Treasury has its own
+        item = efactura.payment_item(ledger, "3001")
+        assert item.payee_bic == (banks.TREASURY_BIC if pays == TREZ_IBAN else "")
+        assert btgo.validate_text(btgo.render(btgo.build_rows([item], date(2026, 10, 27))), "NORD") == []
 
 
 def _prove(ledger, iban):
@@ -178,6 +185,8 @@ def test_proof_arriving_after_the_account_was_chosen_keeps_paying_that_account_o
     ledger.set_meta("efactura_autopay_refused:3002", "stored before")
     assert api.state(ledger, "NORD")["refused"][0]["iban_last4"] == SUPPLIER_IBAN[-4:]  # the account it would pay
     _prove(ledger, TREZ_IBAN)
+    invoice = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]
+    assert invoice["previous_iban_last4"] == [TREZ_IBAN[-4:]]  # its queued payment pays the unproved account
     assert ledger.queue_efactura(item, "3002", "person") is True
     assert ledger.payment(item.item_id)["payee_iban"] == SUPPLIER_IBAN
     assert efactura.approve(ledger, "3001", origin="person", unfiled=True)["item_id"] == queued  # same row, offered

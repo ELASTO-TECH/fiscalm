@@ -365,24 +365,27 @@ def _refused(L: Ledger, co: str) -> tuple[list[dict], efactura.PaymentFacts]:
         refused.append(
             {
                 **x,
-                "iban_last4": (_payee(row, facts) or "")[-4:],
+                "iban_last4": (_payee(L, row, facts) or "")[-4:],
                 "supplier": row["supplier_name"],
             }
         )
     return refused, facts
 
 
-def _payee(r, facts: efactura.PaymentFacts) -> str:
-    """The account fiscalm would pay for this invoice (efactura.payee_iban), else the XML's first."""
+def _payee(L: Ledger, r, facts: efactura.PaymentFacts) -> str:
+    """The account fiscalm pays for this invoice: its queued payment's, else efactura.payee_iban, else the XML's first."""
+    queued = L.payment(r["item_id"]) if r["status"] == "linked" and r["item_id"] else None
+    if queued:
+        return queued["payee_iban"]
     try:
         return efactura.payee_iban(r, facts)
     except efactura.ApproveError:
         return r["supplier_iban"]
 
 
-def _previous_ibans(r, facts: efactura.PaymentFacts) -> list[str]:
-    """Last 4 digits of the supplier's proved accounts when the account fiscalm would pay is not one of them."""
-    payee = _payee(r, facts)
+def _previous_ibans(L: Ledger, r, facts: efactura.PaymentFacts) -> list[str]:
+    """Last 4 digits of the supplier's proved accounts when the account fiscalm pays is not one of them."""
+    payee = _payee(L, r, facts)
     proved = facts.proved(r)
     return sorted(i[-4:] for i in proved if i != payee) if payee and payee not in proved else []
 
@@ -473,7 +476,7 @@ def _invoices(
                 "paid_method": r["paid_method"] if status in ("marked", "paid") else None,
                 "paid_detail": (r["paid_detail"] or None) if status in ("marked", "paid") else None,
                 "overdue": owed and bool(r["due_date"]) and r["due_date"] < today.isoformat(),
-                "previous_iban_last4": _previous_ibans(r, facts),
+                "previous_iban_last4": _previous_ibans(L, r, facts),
                 "can_approve": status in ("open", "linked")
                 and not part
                 and efactura.payment_refusal(L, r, facts, unfiled=True) is None,
