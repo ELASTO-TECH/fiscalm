@@ -627,6 +627,8 @@ def test_an_amount_alone_never_overrides_a_named_invoice_nor_teaches_a_name(ledg
     assert "RO49AAAA1B31007593840000" not in shown["description"]
     assert efactura.resolve_debit(ledger, "NORD", debit_key(card), "3001") == ("efactura", "3001")
     assert ledger.memories("NORD") == []
+    # a date in a debit's text is never read as an invoice number (the matchers' rule is digits as written)
+    assert efactura._named({"20261021"}, _tx("1.00", date(2026, 10, 21), desc="Plata din 2026-10-21")) == set()
 
 
 def test_eur_invoice_matches_original_amount(ledger, home, sec, monkeypatch):

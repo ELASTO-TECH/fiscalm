@@ -830,9 +830,13 @@ def _known_numbers(L: Ledger, company: str, old: list) -> set[str]:
 
 
 def _named(known: set[str], t: statements.Tx) -> set[str]:
-    """The known invoice numbers a debit's text names, written plain or with separators ("INV-2026-0042")."""
-    text = t.description + " " + re.sub(r"(?<=\d)[-/. ](?=\d)", "", t.description)
-    return {n for n in known if re.search(rf"(?<!\d){n}(?!\d)", text)}
+    return {n for n in known if re.search(rf"(?<!\d){n}(?!\d)", t.description)}
+
+
+def _reference(number: str | None) -> str:
+    """An invoice number as a whole reference ("INV-2026-0042" -> "INV20260042"), long enough to be one."""
+    ref = re.sub(r"[^A-Z0-9]", "", (number or "").upper())
+    return ref if len(ref) >= 5 and re.search(r"\d", ref) else ""
 
 
 def _open_invoices(L: Ledger, company: str):
@@ -860,7 +864,8 @@ def candidates(L: Ledger, company: str, fit=None) -> Callable[[statements.Tx], s
     def known() -> tuple:  # read only once a debit fits no rival
         tracked = {(p["payee_iban"], Decimal(p["amount"])) for p in L.payments(company=company)}
         own = companies.get(company, L=L).own_ibans
-        return remembered_advance(L, company), _open_invoices(L, company)[0], tracked, fit.known, own
+        refs = {ref for r in L.efactura_rows(company=company) if (ref := _reference(r["number"]))}
+        return remembered_advance(L, company), _open_invoices(L, company)[0], tracked, fit.known | refs, own
 
     def alone(t: statements.Tx) -> set[tuple[str, str]]:
         statements.classify_tx(t)
@@ -869,11 +874,12 @@ def candidates(L: Ledger, company: str, fit=None) -> Callable[[statements.Tx], s
         advance, invoices, tracked, numbers, own = known()
         if advance(t) or t.counterparty_iban in own or (t.counterparty_iban, t.amount) in tracked:
             return set()
-        names = _named(numbers, t)
+        text = re.sub(r"[^A-Z0-9]", "", t.description.upper())  # a whole reference, written with separators too
+        names = _named(numbers, t) | {ref for ref in numbers if not ref.isdigit() and ref in text}
         return {
             ("efactura", r["message_id"])
             for r in invoices
-            if (not names or number_of(r["number"]) in names)
+            if (not names or number_of(r["number"]) in names or _reference(r["number"]) in names)
             and _amount_matches(t, Decimal(r["total"]), r["currency"])
             and -5 <= (t.date - date.fromisoformat(r["issue_date"])).days <= AMOUNT_DAYS
         }
