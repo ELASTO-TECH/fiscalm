@@ -138,8 +138,8 @@ def _sheet_number(name: str) -> int:
 
 
 def _one_table(sheets: list[list[list[str]]]) -> list[list[str]]:
-    """A workbook's table: its sheets with the same header row read as one, the header once. Several headers (a
-    summary sheet beside the lines) pick the one with the most lines; a tie can't be told and refuses."""
+    """A workbook's table: its sheets with the same header row read as one, the header once. Beside it, only sheets
+    sharing no column name (a summary) are left out; one that shares a column, or a tie, refuses."""
     tables: dict[tuple[str, ...], list[list[str]]] = {}
     for rows in sheets:
         if rows:
@@ -147,7 +147,11 @@ def _one_table(sheets: list[list[list[str]]]) -> list[list[str]]:
     ranked = sorted((len(t) for t in tables.values()), reverse=True)
     if not ranked or (len(ranked) > 1 and ranked[0] == ranked[1]):
         raise ReportError("Exactly one table required")
-    return max(tables.values(), key=len)
+    best = max(tables.values(), key=len)
+    # Another sheet may only be something else (a summary): one sharing a column could hold lines of this table.
+    if any(set(h) & set(best[0]) - {""} for h in tables if list(h) != best[0]):
+        raise ReportError("Exactly one table required")
+    return best
 
 
 def _sheet(xml: bytes, strings: list[str]) -> list[list[str]]:
@@ -194,7 +198,11 @@ def _money_line(n: int, line: dict[str, str]) -> dict[str, str]:
     # A refund, dispute or adjustment (negative amount or a category other than a charge) is kept as written and
     # flagged: its batch never settles on its own, and the Sarcină names this line.
     adjustment = total < 0 or line.get("category", "charge") != "charge"
-    if not total or (not adjustment and charge > total) or (net is not None and net[0] != total - charge):
+    if (
+        not (total or (adjustment and charge))
+        or (not adjustment and (total <= 0 or charge > total))
+        or (net is not None and net[0] != total - charge)
+    ):
         raise ReportError(f"Line {n}: invalid gross/fee/net")
     if not adjustment and not any(line.get(k) for k in ("reference", "awb", "order")):
         raise ReportError(f"Line {n}: missing reference or control character")

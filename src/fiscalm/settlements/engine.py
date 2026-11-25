@@ -88,6 +88,8 @@ def _check_spec(spec: dict) -> None:
 
 
 REQUIRED = ("source", "report_key", "date", "currency", "payer_name")
+# Each payout of a file keeps the whole file as its evidence; their sum stays bounded.
+EVIDENCE_LIMIT = 16 * 1024 * 1024
 
 
 def report_digest(data: bytes, key: str, single: bool) -> str:
@@ -104,8 +106,16 @@ def _store_reports(L: Ledger, company: str, data: bytes, spec: dict, reports: li
     if not base["partner"]:
         raise ReportError("Missing partner identity")
     base.update({k: spec[k] for k in ("channel", "courier") if k in spec})
-    ids = []
+    if len(reports) * len(data) > EVIDENCE_LIMIT:
+        raise ReportError("Too many payouts for one file")
+    ids, digest = [], hashlib.sha256(data).hexdigest()
     with L.tx() as db:
+        # The same bytes are one file, however they were mapped: never stored twice.
+        if db.execute(
+            "SELECT 1 FROM settlement_reports WHERE company=? AND (digest=? OR digest LIKE ?) AND status!='withdrawn'",
+            (company, digest, digest + ":%"),
+        ).fetchone():
+            raise sqlite3.IntegrityError("duplicate report file")
         for key, day, lines in reports:
             ids.append(uuid4().hex)
             db.execute(
@@ -269,6 +279,9 @@ def verify(L: Ledger, stored: sqlite3.Row, st: statements.Statement) -> tuple[st
     r = json.loads(stored["data"])
     if st.company != stored["company"]:
         raise SettlementError("wrong_company")
+    for n, line in enumerate(r["lines"], 1):
+        if line.get("adjustment"):
+            raise SettlementError(f"line_{n}_adjustment")  # a refund or adjustment is checked by a person
     gross = sum((money(x["gross"], signed=True) for x in r["lines"]), Decimal(0))
     fee = sum((money(x["fee"]) for x in r["lines"]), Decimal(0))
     candidates = [
@@ -314,8 +327,6 @@ def verify(L: Ledger, stored: sqlite3.Row, st: statements.Statement) -> tuple[st
     mids: list[str] = []
     seen: set[str] = set()
     for n, line in enumerate(r["lines"], 1):
-        if line.get("adjustment"):
-            raise SettlementError(f"line_{n}_adjustment")  # a refund or adjustment is checked by a person
         matches = resolver.resolve(r, line)
         if len(matches) != 1:
             raise SettlementError(f"line_{n}_{resolver.miss(r, line)}")
@@ -441,7 +452,7 @@ def snapshot(L: Ledger, company: str) -> tuple[list[dict], list[dict]]:
             if resolver is None:
                 resolver = Resolver(L, company, L.issued_rows(company=company))
             for n, line in enumerate(data["lines"], 1):
-                matches = resolver.resolve(data, line)
+                matches = [] if line.get("adjustment") else resolver.resolve(data, line)  # names no invoice
                 if len(matches) == 1:
                     proof[n] = matches[0]["message_id"]
         lines = [

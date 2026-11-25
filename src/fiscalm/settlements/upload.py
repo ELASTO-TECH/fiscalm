@@ -77,7 +77,8 @@ WHY = (
     ("wrong column count", "o linie are alt număr de coloane decât antetul"),
     ("Missing or duplicate headers", "antetul are coloane lipsă sau repetate"),
     ("Formula", "are formule; exportă valorile"),
-    ("Exactly one worksheet", "trebuie să aibă o singură foaie"),
+    ("Exactly one table", "are mai multe foi cu linii; păstrează într-un fișier o singură foaie cu liniile"),
+    ("Too many payouts", "are prea multe plăți pentru un singur fișier; împarte-l"),
     ("Invalid report dimensions", "este gol sau are prea multe linii sau coloane"),
 )
 
@@ -302,7 +303,7 @@ def accept_report(
     sig = _signature(kind, delimiter, header)
     described = _choose(L, company, sig, rows, partner, description)
     when = _report_date(report_date, today)
-    spec, lines = _report_spec(data, kind, delimiter, described, when)
+    spec, lines = _report_spec(data, kind, delimiter, described, when, today)
     stored = _store(L, company, data, spec, described, sig)
     if isinstance(stored, dict):
         return stored
@@ -383,7 +384,7 @@ def _choose(
     return described
 
 
-def _report_spec(data: bytes, kind: str, delimiter: str, described: dict, when: str) -> tuple[dict, list]:
+def _report_spec(data: bytes, kind: str, delimiter: str, described: dict, when: str, today: date) -> tuple[dict, list]:
     mapping = described["mapping"]
     spec = {
         "source": described["source"],
@@ -401,6 +402,8 @@ def _report_spec(data: bytes, kind: str, delimiter: str, described: dict, when: 
         lines = parse(data, kind, spec["source"], mapping, delimiter)
     except ReportError as e:
         raise Refused(422, _why(e)) from None
+    for day_ in {line["date"] for line in lines if "date" in line}:
+        _report_date(day_, today)  # each payout's own day obeys the form's rule
     batches = {line.get("batch", "") for line in lines}
     if "batch" in mapping and not all(re.fullmatch(r"[A-Za-z0-9_-]{1,100}", b) for b in batches):
         raise Refused(422, NOT_READ.format(why="numărul plății nu poate fi citit"))

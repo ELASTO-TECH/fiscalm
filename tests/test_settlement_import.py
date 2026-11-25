@@ -66,6 +66,8 @@ def test_stripe():
     data = b"invoice_number,gross,fee,net,currency,automatic_payout_id,reporting_category\nTEST-1,100.00,2.00,98.00,ron,po_test,charge\n"
     assert parse(data, "csv", "stripe")[0]["fee"] == "2.00"
     assert parse(data.replace(b"charge", b"refund"), "csv", "stripe")[0]["adjustment"] == "1"  # kept, flagged
+    fee_only = data.replace(b"100.00,2.00,98.00", b"0.00,2.00,-2.00").replace(b"charge", b"fee")
+    assert parse(fee_only, "csv", "stripe")[0]["fee"] == "2.00"  # a fee adjustment, flagged, not a refused file
     for bad in (data.replace(b"98.00", b"98.01"), data.replace(b"100.00", b"NaN")):
         with pytest.raises(ReportError):
             parse(bad, "csv", "stripe")
@@ -85,6 +87,9 @@ def test_xlsx_sheets_with_one_header_read_as_one_table():
     assert table(data, "xlsx") == [header, ["TEST-1", "100.00", "2.00"], ["TEST-2", "100.00", "2.00"]]
     with pytest.raises(ReportError):
         table(workbook(summary, cells(header, ["TEST-1", "100.00", "2.00"])), "xlsx")
+    reordered = cells(["Gross", "Ref", "Fee"], ["100.00", "TEST-3", "2.00"])  # lines another way round
+    with pytest.raises(ReportError):
+        table(workbook(summary, cells(header, ["TEST-1", "1", "0"], ["TEST-2", "1", "0"]), reordered), "xlsx")
 
 
 @pytest.mark.parametrize("data", [b"a,a\n1,2", b"a,b\n1", b"a,b\n1,2,3"])
@@ -149,7 +154,13 @@ def test_bad_delimiter_and_negative_string_index():
         ("100,005", "0", "", None),
         ("1e3", "0", "", None),
         ("100 RON", "2 EUR", "", None),
-        ("-100,00", "0", "", ("-100.00", "0.00", "")),  # a refund line: kept and flagged (test_settlements)
+        ("-100,00", "0", "", ("-100.00", "0.00", "")),
+        (
+            "0",
+            "2,00",
+            "-2,00",
+            None,
+        ),  # zero gross, a fee: an adjustment only with a non-charge category (test_stripe)  # a refund line: kept and flagged (test_settlements)
     ],
 )
 def test_real_amounts_parse_exactly_or_refuse(gross, fee, net, expected):
@@ -188,8 +199,15 @@ def test_multi_payout_file_becomes_one_report_per_payout(ledger):
     again = bank_upload.accept_report(ledger, "NORD", data, "text/csv", partner=partner, **UPLOAD)
     assert again["status"] == "duplicate" and len(settlements.state(ledger, "NORD")) == 2
     mixed = data.replace(b"B-2;TEST-2;50,00;1,00;11", b"B-1;TEST-2;50,00;1,00;11")
-    with pytest.raises(bank_upload.Refused):  # one payout, two days: nothing is stored
-        bank_upload.accept_report(ledger, "NORD", mixed, "text/csv", partner=partner, **UPLOAD)
+    old = data.replace(b"11.10.2026", b"11.10.2024")
+    clash = data.replace(b"B-1;", b"B-9;", 1).replace(b"B-2;", b"B-1;")  # a new payout, then one already stored
+    for bad in (mixed, old, clash):  # two days in one payout; a day past the upload rule; a stored payout id
+        with pytest.raises(bank_upload.Refused):
+            bank_upload.accept_report(ledger, "NORD", bad, "text/csv", partner=partner, **UPLOAD)
+    assert len(settlements.state(ledger, "NORD")) == 2  # nothing of a refused file is stored
+    once = described | {"mapping": {k: v for k, v in mapping.items() if k not in ("batch", "date")}}
+    again = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=once, **UPLOAD)
+    assert again["status"] == "duplicate"  # the same bytes mapped another way are still the same file
 
 
 def test_uploaded_format_belongs_to_partner_and_is_reused(ledger):
