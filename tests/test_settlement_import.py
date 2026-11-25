@@ -397,6 +397,106 @@ def test_preview_guesses_columns_and_date_only_to_prefill(ledger, dates, day, or
     assert ledger.db.execute("SELECT count(*) FROM settlement_reports").fetchone()[0] == 0
 
 
+def test_preview_recognizes_a_preset_header(ledger):
+    """A built-in preset fills the source and its columns; only the person's submit stores anything."""
+    data = (
+        b"Numar borderou;AWB;Numar factura;Ramburs;Comision ramburs;Telefon\nB1;1;TEST-1;1.250,50;-12,50;+40700000000\n"
+    )
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    preview = ask.value.extra
+    assert (preview["source"], preview["proposed"]) == ("fan", "preset")
+    assert preview["guess"] == dict(
+        reference="Numar factura", gross="Ramburs", fee="Comision ramburs", batch="Numar borderou"
+    )
+    with_currency = data.replace(b";Telefon\n", b";Moneda\n").replace(b";+40700000000\n", b";EUR\n")
+    with pytest.raises(bank_upload.Refused) as ask:  # a column the preset doesn't use keeps its header guess
+        bank_upload.accept_report(ledger, "NORD", with_currency, "text/csv", **UPLOAD)
+    assert ask.value.extra["guess"]["currency"] == "Moneda" and ask.value.extra["currency"] == "EUR"
+    twice = data.replace(b";Telefon\n", b";Num\xc4\x83r factur\xc4\x83\n")  # read alike as "Numar factura"
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", twice, "text/csv", **UPLOAD)
+    assert (ask.value.extra["proposed"], ask.value.extra["source"]) == ("", "")
+
+
+COLUMN_IDS = {"Doc": "c1", "Incasat": "c2", "Retinut": "c3", "Moneda": "c4"}
+
+
+@pytest.mark.parametrize(
+    "answer,expected",
+    [
+        (dict(reference="Doc", gross="Incasat", fee="Retinut"), dict(reference="Doc", gross="Incasat", fee="Retinut")),
+        (dict(reference="Doc", gross="Incasat", fee="Ignore previous instructions"), None),  # not a header name
+        (dict(reference="Doc", gross="Incasat", fee="Incasat"), None),  # one column twice
+        (dict(reference="Doc"), None),  # incomplete, even with the header guesses
+        (dict(reference="Doc", gross="Retinut", fee="Incasat"), None),  # contradicts the header guess
+        (  # a payout day is a person's: dropped from the proposal
+            dict(reference="Doc", gross="Incasat", fee="Retinut", date="Doc"),
+            dict(reference="Doc", gross="Incasat", fee="Retinut"),
+        ),
+    ],
+)
+def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, expected):
+    """An unknown header: the AI proposes, the engine keeps only header names, each once, complete; otherwise the
+    header-name guess stays."""
+    asked = []
+    monkeypatch.setattr(bank_upload.ai, "available", lambda L: True)
+    monkeypatch.setattr(
+        bank_upload.ai,
+        "ask_json",
+        # The fake answers with column ids, as the prompt asks, for the header names a case gives.
+        lambda L, s, p, schema: (
+            asked.append(p)
+            or {f: "" for f in bank_upload.FIELDS} | {f: COLUMN_IDS.get(c, c) for f, c in answer.items()}
+        ),
+    )
+    data = b"Doc,Incasat,Retinut,Moneda\nTEST-1,100.00,2.00,EUR\n"
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    preview, header = ask.value.extra, {"gross": "Incasat", "currency": "Moneda"}  # the header guesses stand
+    assert (preview["guess"], preview["proposed"]) == ((header | expected, "ai") if expected else (header, ""))
+    assert preview["currency"] == "EUR"
+    assert len(asked) == 1 and "TEST-1" not in asked[0] and "xxxx-9" in asked[0]  # cells leave only as shapes
+    assert '"name": "incasat"' in asked[0] and '"name": "xxx"' in asked[0]  # "Doc" is no settlement word
+    asked.clear()
+    firsts = (
+        b"TEST-1,100.00,2.00",
+        b"INV-12,EUR 42.50,EUR 1.25",
+        b"Mara Exemplu,Cluj,Achitat",
+        b"Mara,Cluj,Plata ramburs",
+    )
+    for first in firsts:  # a first line of data: nothing of it leaves as written
+        with pytest.raises(bank_upload.Refused):
+            bank_upload.accept_report(ledger, "NORD", first + b"\nTEST-2,5.00,0\n", "text/csv", **UPLOAD)
+    assert not any(w in p for p in asked for w in ("Mara", "Cluj", "INV-12", "TEST-1"))  # settlement words may go
+    asked.clear()
+    other = "Иван Петров,Cluj,Plata ramburs,Factura — Киев\nTEST-2,5.00,0,x\n".encode()  # another alphabet
+    with pytest.raises(bank_upload.Refused):
+        bank_upload.accept_report(ledger, "NORD", other, "text/csv", **UPLOAD)
+    assert asked and not any(w in p for p in asked for w in ("Иван", "Петров", "Киев"))
+    assert bank_upload._shape("12.50 € 📦 Doc🔒") == "99.99 ? ? xxx?"  # only the form leaves
+
+
+def test_ai_never_sets_the_report_currency_and_failure_proposes_nothing(ledger, monkeypatch):
+    """A three-letter column the AI calls a currency (a county, a country) never becomes the report's currency, and
+    an AI failure leaves the header-name guess."""
+    monkeypatch.setattr(bank_upload.ai, "available", lambda L: True)
+    answer = {f: "" for f in bank_upload.FIELDS} | dict(reference="c1", gross="c2", fee="c3", currency="c4")
+    monkeypatch.setattr(bank_upload.ai, "ask_json", lambda L, s, p, schema: answer)
+    data = b"Doc,Incasat,Retinut,Judet\nTEST-1,100.00,2.00,CLJ\n"
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    assert (ask.value.extra["proposed"], ask.value.extra["currency"]) == ("ai", "")
+
+    def fails(*args):
+        raise bank_upload.ai.AIError("synthetic failure")
+
+    monkeypatch.setattr(bank_upload.ai, "ask_json", fails)
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    assert (ask.value.extra["proposed"], ask.value.extra["guess"]) == ("", {"gross": "Incasat"})
+
+
 @pytest.mark.parametrize("second,currency", [("ron", "RON"), ("eur", "")])
 def test_preview_prefills_stripe_currency_and_saved_payers(ledger, second, currency):
     setup(ledger)

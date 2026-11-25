@@ -399,7 +399,7 @@ describe("Tranzacții", () => {
 });
 
 const PREVIEW = { columns: ["AWB", "Factura", "Ramburs", "Comision", "Data plata"], rows: [["1000000001", "TEST-1", "100.00", "2.00", "2026-10-25"]],
-  known: [], guess: { reference: "Factura", gross: "Ramburs", fee: "Comision" }, date: "2026-10-25", orders: false, payer: "", source: "", currency: "",
+  known: [], guess: { reference: "Factura", gross: "Ramburs", fee: "Comision" }, date: "2026-10-25", orders: false, payer: "", source: "", currency: "", proposed: "" as const,
   currencies: ["RON", "EUR"], payers: [{ source: "fan", name: "Curier Exemplu SRL", cui: "12345678", currency: "EUR", courier: "" }] };
 
 it("reads the report when the file is chosen and opens with the guessed columns, only the rest to choose", async () => {
@@ -425,6 +425,41 @@ it("reads the report when the file is chosen and opens with the guessed columns,
   expect(Object.fromEntries(new URL(api.posts()[1].url, "http://example.test").searchParams)).toEqual({ co: "NORD", report: "1", date: "2026-10-25",
     format: JSON.stringify({ source: "fan", name: "Curier Exemplu SRL", cui: "12345678", currency: "EUR", mapping: PREVIEW.guess }) });
   expect(api.posts()[1].raw).toBe(file);
+});
+
+it.each([["preset", "Coloanele sunt recunoscute după antet."], ["ai", "Coloanele sunt propuse de AI."]] as const)(
+  "says the %s proposed the columns, for the person to check", async (proposed, text) => {
+    at("?co=NORD&tab=tranzactii");
+    const cfg = config();
+    cfg.companies[0].accounts = [];
+    await page({ companies: () => json(cfg), onPost: () => json({ ok: false, message: "", state: null, report: { ...PREVIEW, proposed, source: "fan" } }) });
+    await openUpload("Încarcă raport de decontare");
+    await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["x"], "report.csv", { type: "text/csv" }));
+    expect(await screen.findByText(`${text} Verifică-le înainte de încărcare.`)).toBeVisible();
+    expect(screen.getByLabelText("Curier sau procesator")).toHaveValue("fan");
+    // PREVIEW has one saved FAN payer: a proposed source never fills it in; the person names who sent the file.
+    expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue("");
+    expect(screen.getByLabelText("CUI-ul partenerului (opțional)")).toHaveValue("");
+  });
+
+it("starts the next file with no payer from the previous one", async () => {
+  at("?co=NORD&tab=tranzactii");
+  const cfg = config();
+  cfg.companies[0].accounts = [];
+  const previews = [PREVIEW, { ...PREVIEW, proposed: "preset" as const, source: "fan" }, { ...PREVIEW, payers: [] }];
+  await page({ companies: () => json(cfg), onPost: () => json({ ok: false, message: "", state: null, report: previews.shift() }) });
+  await openUpload("Încarcă raport de decontare");
+  await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["a"], "a.csv", { type: "text/csv" }));
+  await choose(await screen.findByLabelText("Curier sau procesator"), "fan"); // fills the saved FAN payer
+  expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue("Curier Exemplu SRL");
+  await userEvent.click(screen.getByRole("button", { name: "Alege alt fișier" }));
+  await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["b"], "b.csv", { type: "text/csv" }));
+  await waitFor(() => expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue(""));
+  expect(screen.getByLabelText("CUI-ul partenerului (opțional)")).toHaveValue("");
+  await userEvent.type(screen.getByLabelText("Numele partenerului din extras"), "Alt Curier");
+  await userEvent.click(screen.getByRole("button", { name: "Alege alt fișier" })); // an ordinary preview, no saved payer
+  await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["c"], "c.csv", { type: "text/csv" }));
+  await waitFor(() => expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue(""));
 });
 
 it("clears a saved payer's CUI when another courier is chosen, keeping the name the person typed", async () => {
