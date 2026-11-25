@@ -4,6 +4,7 @@ import json
 
 import pytest
 from conftest import go_live
+from firms import iban as synthetic_iban
 from test_efactura import OTHER_IBAN, SUPPLIER_IBAN, _stored, ubl
 from test_partner_anaf import CUIS
 
@@ -40,7 +41,7 @@ REFUSING = {
     "credited": _credited,
     "invoice_issues": lambda L, mp: _set(L, "issues=?", '["synthetic issue"]'),
     "several_ibans": lambda L, mp: _set(L, "ibans=?", json.dumps([SUPPLIER_IBAN, OTHER_IBAN])),
-    "no_valid_iban": lambda L, mp: _set(L, "supplier_iban='RO00NOTANIBAN'"),
+    "no_valid_iban": lambda L, mp: _set(L, "ibans=?", json.dumps(["RO00NOTANIBAN"])),
     "own_iban": lambda L, mp: mp.setattr(
         companies, "company_by_iban", lambda iban: "NORD" if iban == SUPPLIER_IBAN else None
     ),
@@ -117,7 +118,7 @@ def test_previous_account_notice_requires_statement_proof(ledger, home, monkeypa
     elif proof in {"statement", "same", "other-firm"}:
         ledger.mark_efactura_paid("3001", "statement", "synthetic-debit", to_iban=SUPPLIER_IBAN)
         if proof == "same":
-            _set(ledger, "supplier_iban=?", SUPPLIER_IBAN, mid="3002")
+            _set(ledger, "supplier_iban=?,ibans=?", SUPPLIER_IBAN, json.dumps([SUPPLIER_IBAN]), mid="3002")
         elif proof == "other-firm":
             _set(ledger, "company='STUDIO9'")
             ledger.db.execute("UPDATE supplier_ibans SET company='STUDIO9'")
@@ -130,3 +131,38 @@ def test_previous_account_notice_requires_statement_proof(ledger, home, monkeypa
     assert invoice["previous_iban_last4"] == ([SUPPLIER_IBAN[-4:]] if proof in {"statement", "settled-payment"} else [])
     assert invoice["can_approve"]
     assert efactura.payment_item(ledger, "3002").payee_iban == (OTHER_IBAN if proof != "same" else SUPPLIER_IBAN)
+
+
+TREZ_IBAN = synthetic_iban("RO00TREZ0000999900003333")
+
+
+@pytest.mark.parametrize(
+    ("ibans", "proved", "pays"),
+    [
+        ([OTHER_IBAN, SUPPLIER_IBAN], SUPPLIER_IBAN, SUPPLIER_IBAN),  # the one proved for this supplier wins
+        ([TREZ_IBAN, SUPPLIER_IBAN], None, SUPPLIER_IBAN),  # the only commercial account beside Treasury
+        ([TREZ_IBAN, OTHER_IBAN, SUPPLIER_IBAN], None, "several_ibans"),
+        ([OTHER_IBAN, SUPPLIER_IBAN], None, "several_ibans"),
+        (["DE00NOTROMANIAN", SUPPLIER_IBAN], None, SUPPLIER_IBAN),  # only valid Romanian IBANs count
+    ],
+)
+def test_an_invoice_with_several_ibans_pays_the_one_account_it_can_prove(
+    ledger, home, monkeypatch, ibans, proved, pays
+):
+    _stored(ledger, monkeypatch, **{"3001": ubl()})
+    _set(ledger, "ibans=?,supplier_iban=?", json.dumps(ibans), ibans[0])
+    if proved:
+        ledger.db.execute(
+            "INSERT INTO supplier_ibans SELECT company,supplier_cui,?,'statement:x' FROM efactura", (proved,)
+        )
+        ledger.db.commit()
+    refusal = efactura.payment_refusal(ledger, ledger.efactura("3001"))
+    assert (refusal.code if refusal else efactura.payment_item(ledger, "3001").payee_iban) == pays
+
+
+@pytest.mark.parametrize(("issue", "blocks"), [("bad due date '2026-13-01'", False), ("buyer CUI 5 is not NORD", True)])
+def test_only_blocking_invoice_issues_refuse_payment(ledger, home, monkeypatch, issue, blocks):
+    _stored(ledger, monkeypatch, **{"3001": ubl()})
+    _set(ledger, "issues=?", json.dumps([issue]))
+    refusal = efactura.payment_refusal(ledger, ledger.efactura("3001"))
+    assert (refusal.code if refusal else None) == ("invoice_issues" if blocks else None)

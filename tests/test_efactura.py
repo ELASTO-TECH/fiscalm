@@ -898,13 +898,10 @@ def _forged_pm(due="", account=SUPPLIER_IBAN) -> str:
 
 @pytest.mark.parametrize("forged", [FORGED_INACTIVE, FORGED_CHANGED])
 @pytest.mark.parametrize("field", ["due", "payment_due", "account", "number", "supplier"])
-def test_invoice_text_never_chooses_an_autopay_refusal_or_its_date(ledger, home, sec, monkeypatch, field, forged):
-    """A DueDate reading "supplier inactive at ANAF; checked_at=2040-01-01" reached the stored reason
-    ("invoice has issues: bad due date ...") and state showed an inactive supplier checked in 2040. A refusal is read by
-    fiscalm's own code only; whatever the XML says, an unreadable invoice stays "unclear", undated, and is not an IBAN change."""
-    from fiscalm import rules
-    from fiscalm.api import actions
-
+def test_invoice_text_in_informational_issues_never_blocks_or_names_a_refusal(ledger, home, sec, monkeypatch, field, forged):
+    """A DueDate reading "supplier inactive at ANAF; checked_at=2040-01-01" once reached the stored reason and state
+    showed an inactive supplier checked in 2040. An unreadable due date or an extra non-IBAN account string is now only
+    informational (#51): the invoice is paid to its valid IBAN, and nothing the XML says becomes a refusal."""
     _stored(ledger, monkeypatch, **{"3001": ubl(issue="2026-09-15", number="RMBU 1")})
     ledger.mark_efactura_paid("3001", "statement", None)
     efactura.set_autopay(ledger, "3001")
@@ -917,25 +914,9 @@ def test_invoice_text_never_chooses_an_autopay_refusal_or_its_date(ledger, home,
     }
     _stored(ledger, monkeypatch, **{"3002": ubl(**{"issue": "2026-10-25", **fields[field]})})  # sync runs autopay
     row = ledger.efactura("3002")
-    assert row["status"] == "open" and json.loads(row["issues"])
-    assert efactura.stored_refusal(ledger.get_meta("efactura_autopay_refused:3002")) == ("invoice_issues", None)
-    assert [
-        {k: x[k] for k in ("id", "why", "refused_checked_at", "still_inactive")}
-        for x in api.state(ledger, "NORD")["refused"]
-    ] == [{"id": "3002", "why": "unclear", "refused_checked_at": None, "still_inactive": None}]
-    ident = "NORD:supplier_autopay:99999999"
-    assert next(r for r in rules.list_rules(ledger, "NORD") if r["id"] == ident)["reason"] == "invoice_refused"
-    rules.set_enabled(ledger, "NORD", ident, False)
-    rules.set_enabled(ledger, "NORD", ident, True)  # an unreadable invoice is no IBAN change: resuming is allowed
-    (home / "state").mkdir(exist_ok=True)
-    (home / "state" / "LIVE").touch()
-    result = actions.act("payment_file_create", "NORD", {"name": "Untrusted", "invoice_ids": ["3002"]})
-    assert result == {
-        **result,
-        "ok": False,
-        "message": "Factura are probleme de citire. Verifică în SPV.",
-    }
-    assert ledger.efactura("3002")["status"] == "open" and not ledger.db.execute("SELECT 1 FROM payments").fetchone()
+    assert json.loads(row["issues"]) and row["status"] == "linked"  # autopay queued it despite its issues
+    assert not ledger.get_meta("efactura_autopay_refused:3002") and api.state(ledger, "NORD")["refused"] == []
+    assert ledger.payment(row["item_id"])["payee_iban"] == SUPPLIER_IBAN
 
 
 def test_cli_mail_proof_confirms_one_invoice_only(ledger, home, sec, monkeypatch, capsys):

@@ -372,6 +372,16 @@ def _refused(L: Ledger, co: str) -> tuple[list[dict], efactura.PaymentFacts]:
     return refused, facts
 
 
+def _previous_ibans(r, facts: efactura.PaymentFacts) -> list[str]:
+    """Last 4 digits of the supplier's proved accounts when the account fiscalm would pay is not one of them."""
+    try:
+        payee = efactura.payee_iban(r, facts)
+    except efactura.ApproveError:
+        payee = r["supplier_iban"]
+    proved = facts.proved(r)
+    return sorted(i[-4:] for i in proved if i != payee) if payee and payee not in proved else []
+
+
 def _invoices(
     L: Ledger, co: str, st: dict, today: date, live: bool, facts: efactura.PaymentFacts | None = None
 ) -> list[dict]:
@@ -458,9 +468,7 @@ def _invoices(
                 "paid_method": r["paid_method"] if status in ("marked", "paid") else None,
                 "paid_detail": (r["paid_detail"] or None) if status in ("marked", "paid") else None,
                 "overdue": owed and bool(r["due_date"]) and r["due_date"] < today.isoformat(),
-                "previous_iban_last4": sorted(i[-4:] for i in facts.proved(r) if i != r["supplier_iban"])
-                if r["supplier_iban"] and r["supplier_iban"] not in facts.proved(r)
-                else [],
+                "previous_iban_last4": _previous_ibans(r, facts),
                 "can_approve": status in ("open", "linked")
                 and not part
                 and efactura.payment_refusal(L, r, facts, unfiled=True) is None,
