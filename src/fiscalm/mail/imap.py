@@ -592,7 +592,8 @@ def _clauses(header: str) -> list[list[str]] | None:
             out.append(" " if quoted else ch)
     if depth or quoted or escaped:
         return None
-    text = re.sub(r"\bheader\s*\.\s*from\b", "header.from", re.sub(r"\s*=\s*", "=", "".join(out).lower()))
+    text = re.sub(r"\s*=\s*", "=", "".join(out).lower())
+    text = re.sub(r"(^|\s)header\s*\.\s*from=", r"\1header.from=", text, flags=re.M)  # the property's name only
     return [c.split() for c in text.split(";")[1:]]
 
 
