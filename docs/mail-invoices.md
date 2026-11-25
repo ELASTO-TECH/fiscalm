@@ -52,8 +52,9 @@ of the firms': its invoice is in SPV, and the e-Factura copy is the legal one), 
 (the number of one of its issued invoices, with its own tax id on it).
 
 **Which firm.** The existing ownership rule (`docs.inspect_text`: the firm's name, its aliases, its CUI/VAT id on the
-document) says which firms are named; the label nearest each mention (Bill to, Customer, Client, Cumpărător… or
-Seller, Supplier, Furnizor…) says where it stands. A firm named only as the seller is never filed (it is the firm's own
+document) says which firms are named; a label says where it stands: right before the mention (`Bill to: …`), or
+heading its single-column block a few lines up (Bill to, Customer, Client, Cumpărător… or Seller, Supplier,
+Furnizor…). Side-by-side columns are never told apart by layout: the AI reads them, or the user answers. A firm named only as the seller is never filed (it is the firm's own
 sale). Exactly one firm, named as the buyer: that firm. For UBL, the buyer party's full tax id (a foreign `DE…` id is
 never a Romanian CUI) and name, which must agree. A sender the user has tied to a firm ("mailurile de la acest
 expeditor sunt ale firmei X") fills in a document that names no firm, or names it without a clear role; a document

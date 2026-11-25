@@ -113,7 +113,8 @@ DELIVERY = re.compile(
     re.I,
 )
 PARTY_END = re.compile(r"^\s*(?:description|quantity|qty|item|payment terms|thank you)\b", re.I)
-COLUMN_TEXT = re.compile(r"\S+(?:[ \t]\S+)*")
+COLUMNS = re.compile(r"\S[ \t]{2,}\S")  # pdftotext -layout puts two spaces or more between side-by-side columns
+LABEL_GAP = re.compile(r"[ \t:.,-]*")  # between a label and the name it introduces
 ABOVE = 4
 
 _SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP", "lei": "RON"}
@@ -213,75 +214,39 @@ def totals(text: str) -> list[tuple[str, str]]:
     return [(f"{v:.2f}", c) for v, c in sorted(out, key=lambda x: (-x[0], x[1]))]
 
 
-def _column(line: str, col: int) -> int:
-    """Start of the text region containing a mention; two spaces separate columns."""
-    for part in COLUMN_TEXT.finditer(line):
-        if part.start() <= col < part.end():
-            return part.start()
-    return col
-
-
-def _party_labels(line: str) -> list[tuple[int, str]]:
-    return (
-        [(m.start(), "buyer") for m in BUYER.finditer(line)]
-        + [(m.start(), "seller") for m in SELLER.finditer(line)]
-        + [(m.start(), "") for m in DELIVERY.finditer(line)]
+def _labels(line: str) -> list[tuple[int, int, str]]:
+    return sorted(
+        (m.start(), m.end(), kind)
+        for pattern, kind in ((BUYER, "buyer"), (SELLER, "seller"), (DELIVERY, ""))
+        for m in pattern.finditer(line)
     )
 
 
-def _nearest_labels(found: list[tuple[int, str]], col: int) -> set[str]:
-    distance = min((abs(col - at) for at, _ in found), default=-1)
-    return {k for at, k in found if abs(col - at) == distance}
-
-
-def _bare_party_label(line: str, col: int) -> bool:
-    return any(
-        abs(part.start() - col) <= 4
-        and any(label.fullmatch(part.group().strip(" :")) for label in (BUYER, SELLER, DELIVERY))
-        for part in COLUMN_TEXT.finditer(line)
-    )
-
-
-def _name_inherits(lines: list[str], i: int, j: int, col: int, co: companies.Company, tax_id: bool) -> bool:
-    if tax_id:
-        return True
-    if co.name_at(lines[i]) >= 0 and co.name_at(lines[i], suffix_free=False) < 0:
-        return i == j or (i == j + 1 and _bare_party_label(lines[j], col))
-    if i - j <= ABOVE:
-        return True
-    return any(
-        (at := co.name_at(line, suffix_free=False)) >= 0 and abs(_column(line, at) - col) <= 4
-        for line in lines[j : j + ABOVE + 1]
-    )
-
-
-def _label(lines: list[str], i: int, col: int, co: companies.Company, *, tax_id: bool = False) -> str | None:
-    """Nearest role, empty for a conflict/delivery, None for an unlabelled mention.
-
-    Beyond the proximity window, a label must align with the mention's column
-    and a name mention needs the firm identified near that label. An exact CUI
-    identifies the firm anywhere in a continuous block. Gaps and body text end it.
-    """
-    column = _column(lines[i], col)
-    for j in range(i, -1, -1):
-        region = lines[j][column:]
-        if TOTAL.search(region) or NUMBER.search(region) or PARTY_END.search(region):
-            break
-        found = _party_labels(lines[j])
-        if j == i:
-            found = [(at, k) for at, k in found if column <= at < col]
-        else:
-            if len(_nearest_labels(found, col)) > 1:
-                return ""
-            found = [(at, k) for at, k in found if abs(at - column) <= 4]
+def _label(lines: list[str], i: int, col: int, co: companies.Company) -> str | None:
+    """The role of a mention: the label right before it on its line ("Bill to: …"), or the label heading its
+    single-column block a few lines up ("Bill to" or "Bill to: <this firm>" above it); "" for a delivery label or a
+    block under several labels, None for no label. Side-by-side columns are never told apart: they leave the mention
+    unlabelled, for the user or the AI."""
+    line = lines[i]
+    adjacent = [kind for _, end, kind in _labels(line) if end <= col and LABEL_GAP.fullmatch(line[end:col])]
+    if adjacent:
+        return adjacent[-1]
+    if line[:col].strip() or COLUMNS.search(line.strip()):
+        return None
+    for above in reversed(lines[max(0, i - ABOVE) : i]):
+        found = _labels(above)
+        if len(found) == 1:
+            start, end, kind = found[0]
+            rest = above[end:].strip(" \t:")
+            heads = not above[:start].strip() and (not rest or co.name_at(rest, suffix_free=False) == 0)
+            heads = heads and abs(start - col) <= 4  # the label heads the mention's own column
+            return kind if heads else ""
         if found:
-            if not _name_inherits(lines, i, j, column, co, tax_id):
-                return None
-            best = _nearest_labels(found, col)
-            return best.pop() if len(best) == 1 else ""
-        # A blank in this column ends its block, even if another column continues.
-        if not any(abs(m.start() - column) <= 4 for m in COLUMN_TEXT.finditer(lines[j])):
-            break
+            return ""
+        if not above.strip() or COLUMNS.search(above.strip()) or TOTAL.search(above) or NUMBER.search(above):
+            return None
+        if PARTY_END.search(above):
+            return None
     return None
 
 
@@ -316,10 +281,11 @@ def role_labels(text: str, firms: list[str]) -> dict[str, set[str]]:
         core_evidence = co.name_at(text, suffix_free=False) >= 0 or co.tax_id_match(text, labelled=True) is not None
         seen = set()
         for i, line in enumerate(lines):
-            positions = dict.fromkeys(co.name_columns(line, suffix_free=core_evidence), False)
-            positions.update({tax.start(): bool(tax["label"]) for tax in co.tax_id_matches(line)})
-            for col, tax_id in positions.items():
-                label = _label(lines, i, col, co, tax_id=tax_id)
+            for col in {
+                *co.name_columns(line, suffix_free=core_evidence),
+                *(t.start() for t in co.tax_id_matches(line)),
+            }:
+                label = _label(lines, i, col, co)
                 if label is not None:
                     seen.add(label)
         out[key] = seen

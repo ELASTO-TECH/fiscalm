@@ -757,12 +757,6 @@ def test_document_ai_runs_in_sandbox_and_live_only_when_configured(
             "Bill to: Foreign Customer Ltd",
             "Total 12.10 EUR",
         ],
-        [
-            "INVOICE S-2",
-            "Seller                                   Bill to",
-            "Atelier Nord SRL                         Foreign Customer Ltd",
-            "Total 12.10 EUR",
-        ],
         ["INVOICE S-3", "Furnizor: Atelier Nord SRL          Client: Foreign Customer Ltd", "Total 12.10 EUR"],
     ],
 )
@@ -801,7 +795,7 @@ def test_the_firm_as_seller_is_never_its_purchase(ledger, lines):
                     strict=True,
                 )
             ],
-            "buyer",
+            "",  # side-by-side columns are never told apart: asked, or read by the AI
         ),
         (["Bill to", "Atelier Nord SRL", "", "footer", "footer", "footer", "Footer: Atelier Nord SRL"], "buyer"),
         (["Ship to", "Atelier Nord SRL"], ""),
@@ -825,7 +819,6 @@ def test_party_blocks_and_unlabelled_mentions(ledger, lines, role):
         ("Bill to", "Invented Soft", "RO TIN 11111111", "buyer"),
         ("Bill to", "Foreign Cloud", "RO 1111 1111", "buyer"),
         ("Bill to", "Foreign Cloud", "CUI11111111", "buyer"),
-        ("Bill to", "Foreign Cloud", "RO TIN 11111111", "buyer"),
         ("Bill to", "Foreign Cloud", "RO TIN 111111112", ""),
         ("Seller", "Invented Soft", "RO TIN 11111111", "seller"),
         ("Ship to", "Invented Soft", "RO TIN 11111111", ""),
@@ -833,24 +826,13 @@ def test_party_blocks_and_unlabelled_mentions(ledger, lines, role):
 )
 def test_party_block_without_legal_form_or_alias(ledger, label, printed, tax, role):
     set_firms(companies.all() | {"NORD": replace(companies.get("NORD"), legal_name="Invented Soft S.R.L.", aliases=())})
-    left = [
-        "Example Cloud, Inc",
-        "1 Market Street",
-        "Suite 10",
-        "San Francisco",
-        "United States",
-        "support@example.invalid",
-        "",
-        "",
-    ]
-    right = [label, printed, "Str. Exemplu 3", "bl.2, ap.9", "400000 Cluj", "Romania", "billing@example.invalid", tax]
-    lines = [f"{a:<45}{b}" for a, b in zip(left, right, strict=True)]
-    text = "\n".join(lines)
-    assert mi.roles(text, ["NORD"]) == {"NORD": role}
-    # Courier preserves the fixed column positions in the reported pdftotext layout.
-    raw = text_pdf(["INVOICE LEGAL-42", *lines, "Total 12.10 EUR"], font="Courier")
+    block = [label, printed, "400000 Cluj", tax]
+    raw = text_pdf(["INVOICE LEGAL-42", "", *block, "Total 12.10 EUR"])
     assert mi.read_pdf(raw).roles == {"NORD": role}
     assert mi.handle(ledger, message(("pdf", raw))) == {"buyer": "filed:1", "seller": "issued:1", "": "asked:1"}[role]
+    # The same block beside the supplier's column is never told apart by layout.
+    beside = [f"{a:<45}{b}" for a, b in zip(["Example Cloud, Inc", "1 Market Street", "", ""], block, strict=True)]
+    assert mi.roles("\n".join(beside), ["NORD"]) == {"NORD": ""}
 
 
 @pytest.mark.parametrize(
