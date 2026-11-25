@@ -93,17 +93,30 @@ def validate(body: object) -> dict:
     return row
 
 
-# Legal forms by the saved firm's country: in Romania 'Spa' is a word of the name, in Italy it is S.p.A.
-RO_LEGAL_FORMS = frozenset({"srl", "srld", "sa", "pfa", "ii", "if", "snc", "scs", "sca"})
-LEGAL_FORMS = frozenset(
-    {"gmbh", "ag", "ug", "kg", "ohg", "ltd", "llc", "inc", "plc", "sas", "sarl", "bv", "nv", "spa", "srl", "sl", "sa"}
-)
+# Legal forms by the saved firm's country ('Spa' is a word in a Romanian or British name, S.p.A. in Italy).
+# A country without an entry keeps every word.
+LEGAL_FORMS = {
+    country: frozenset(forms.split())
+    for country, forms in {
+        "RO": "srl srld sa pfa ii if snc scs sca",
+        "IT": "spa srl srls sas snc",
+        "DE": "gmbh ag ug kg ohg",
+        "AT": "gmbh ag kg og",
+        "FR": "sa sas sasu sarl",
+        "ES": "sa sl",
+        "NL": "bv nv",
+        "BE": "bv nv sa srl",
+        "GB": "ltd plc llp",
+        "IE": "ltd plc dac",
+        "US": "inc llc corp",
+    }.items()
+}
 
 
 def _name_parts(name: str, country: str) -> tuple[list[str], str]:
     """The words of a firm name and its trailing legal form ('' when it has none)."""
     words = [w for w in firm_name(name).split("-") if w]
-    forms = RO_LEGAL_FORMS if country == "RO" else LEGAL_FORMS
+    forms = LEGAL_FORMS.get(country, frozenset())
     return (words[:-1], words[-1]) if len(words) > 1 and words[-1] in forms else (words, "")
 
 

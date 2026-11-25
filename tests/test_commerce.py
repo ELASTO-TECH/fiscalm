@@ -170,6 +170,8 @@ def test_shop_never_overwrites_saved_client(shop):
         ("Atelier Spa Design SRL", "Atelier Design SRL", "RO", False),
         ("Atelier Spa SRL", "Atelier SRL", "RO", False),
         ("Atelier Fittizio S.p.A.", "Atelier Fittizio", "IT", True),
+        ("Fictional Spa", "Fictional", "GB", False),
+        ("Fictional Spa", "Fictional", "MC", False),
         ("...", "!!!", "RO", False),
     ],
 )
