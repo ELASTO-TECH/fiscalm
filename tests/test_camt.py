@@ -655,5 +655,5 @@ def test_offline_scale_tick_reads_synthetic_inputs_without_money_changes(ledger,
     seed_mail_questions(ledger, 3)
     measured = tick_benchmark.run(ledger, datetime(2026, 10, 27, 9, 30), legacy_registry=legacy, mail_count=1)
     assert measured["mode"] == "shadow"
-    assert measured["mail_messages"] == 1 and measured["receipt_extractions"] == 3
-    assert measured["external_connections"] == 0 and measured["pdf_subprocesses"] == 4
+    assert measured["mail_messages"] == 1 and measured["receipt_extractions"] == 0
+    assert measured["external_connections"] == 0 and measured["pdf_subprocesses"] == 1

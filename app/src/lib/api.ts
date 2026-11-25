@@ -301,7 +301,7 @@ export async function getPaymentFile(id: number, signal?: AbortSignal): Promise<
 }
 
 export type UserAction = "user-create" | "user-update" | "user-disable" | "user-enable" | "user-unlock" | "user-setup-link" | "user-reset" | "session-close";
-export type Action = "upload-assign" | "document-correct" | "mode-switch" | UserAction | "history-review" | "receipt-lines-save" | "receipt-invoice-confirm" | "emag-refund" | "emag-resolve" | "mark-paid" | "reopen" | "withdraw" | "pack-prepare" | "pack-sent" | "pack-unsent" | "check" | "mail-answer"
+export type Action = "upload-assign" | "document-correct" | "mode-switch" | UserAction | "history-review" | "emag-refund" | "emag-resolve" | "mark-paid" | "reopen" | "withdraw" | "pack-prepare" | "pack-sent" | "pack-unsent" | "check" | "mail-answer"
   | "settlement-confirm" | "settlement-withdraw" | "settlement-format-delete" | "issued-mark" | "issued-unmark" | "resolve-debit" | "card-owner" | "tx-link" | "tx-unlink" | "tx-await" | "memory-forget" | ProductAction | ConfigAction;
 export type ProductAction = "product-add" | "product-update" | "product-archive" | "product-delete";
 

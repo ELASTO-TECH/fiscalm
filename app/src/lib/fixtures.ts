@@ -84,7 +84,7 @@ export function fixtureDetailData(view: View, kind: DetailKind, id: string, curs
   const reversals = issued?.reversed_by?.flatMap((local) => s.issued.filter((r) => r.local_id === local)) ?? [];
   const all = invoice?.credits ?? settlement?.lines ?? reversals, start = Number(cursor || 0);
   const related = { data: all.slice(start, start + 50), total: all.length, next_cursor: start + 50 < all.length ? String(start + 50) : null };
-  const invoices = [invoice ?? row?.invoice, ...(doc?.items?.proposal ? s.invoices.filter((r) => r.id === doc.items?.proposal) : [])].filter((r): r is Invoice => !!r);
+  const invoices = [invoice ?? row?.invoice].filter((r): r is Invoice => !!r);
   if (invoice) invoice.credits = related.data as NonNullable<Invoice["credits"]>;
   const selectedIssued = issued ? [issued, ...s.issued.filter((r) => !!issued.storno_of && r.local_id === issued.storno_of), ...reversals.slice(start, start + 50)]
     : order?.draft_id ? s.issued.filter((r) => r.local_id === order.draft_id).slice(0, 1) : [];

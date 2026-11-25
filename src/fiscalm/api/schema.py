@@ -176,16 +176,6 @@ def schemas() -> dict:
             "month's statement of the paying account; one a person added never waits for it.",
         },
     }
-    receipt_items = obj(
-        {
-            "lines": array(obj(strings("name", "unit", "quantity", "net", "vat"))),
-            **strings("total", "currency", "payment", "provenance", "state"),
-            "revision": INTEGER,
-            "verified": BOOL,
-            "proposal": NULL_STRING,
-            "payment_mismatch": BOOL,
-        }
-    )
     document = {
         "document_type": {
             "enum": ["invoice", "receipt"],
@@ -206,7 +196,6 @@ def schemas() -> dict:
         },
         "files": array(obj(strings("id", "type"))),
         "mail": {"anyOf": [obj({**strings("sender", "subject"), **nullable("date", "number")}), {"type": "null"}]},
-        "items": {"anyOf": [receipt_items, {"type": "null"}]},
     }
     bank = obj(
         {
@@ -1091,7 +1080,7 @@ def schemas() -> dict:
         {
             "state": {
                 **ref("StateSummary"),
-                "description": "Company shell with only the requested document and its purchase, receipt proposal, refusal and partner context populated.",
+                "description": "Company shell with only the requested document and its purchase, refusal and partner context populated.",
             },
             "related": obj(
                 {

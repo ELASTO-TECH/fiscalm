@@ -13,8 +13,6 @@
   "user-reset": "local",
   "session-close": "local",
   "history-review": "local",
-  "receipt-lines-save": "local",
-  "receipt-invoice-confirm": "local",
   "setup-card-dismiss": "local",
   "setup-card-show": "local",
   "telemetry-settings": "local",

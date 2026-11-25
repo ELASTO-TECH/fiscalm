@@ -15,7 +15,7 @@ from unittest.mock import patch
 from imap_fake import Fake, mail, plain_connect
 from pdf_fake import text_pdf
 
-from fiscalm import ai, cli, companies, integrations, receipt_items
+from fiscalm import ai, cli, companies, integrations
 from fiscalm.ledger import Ledger, finance_home, is_live
 from fiscalm.mail import invoices
 
@@ -163,7 +163,6 @@ def run(L: Ledger, now: datetime, *, legacy_registry: bool = False, mail_count: 
                 (cli.pay, "prepare_files", cli.pay.prepare_files),
                 (cli.pay, "refresh_to_pay", cli.pay.refresh_to_pay),
                 (cli.pack, "ready", cli.pack.ready),
-                (receipt_items, "extract_pending", receipt_items.extract_pending),
             ):
                 stack.enter_context(patch.object(module, name, timed(name, fn)))
             for module, name, value in (
@@ -183,11 +182,10 @@ def run(L: Ledger, now: datetime, *, legacy_registry: bool = False, mail_count: 
             assert cli.cmd_sync(None, L) == 0
             elapsed = perf_counter() - start
         assert money_digest(L) == before
-        assert not is_live() and not external_calls and inference_calls == 3
+        assert not is_live() and not external_calls and inference_calls == 0
         assert not (fake.verbs() & {"STORE", "APPEND", "EXPUNGE"})
         added = L.db.execute("SELECT count(*) FROM documents").fetchone()[0] - documents
         assert added == mail_count
-        assert L.db.execute("SELECT count(*) FROM receipt_items").fetchone()[0] == 3
         return {
             "phase": "offline_tick",
             "mode": output[0]["mode"],

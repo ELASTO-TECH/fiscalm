@@ -4,15 +4,13 @@ import json
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from copy import deepcopy
 from datetime import date
 from decimal import Decimal
 
 import pytest
 from test_api import _req, quiet, server as server, world as world  # noqa: F401
-from test_efactura import anaf_zip, ubl
 
-from fiscalm import ai, backup, companies, docs, integrations, links, pack, receipt_items, recon, transactions
+from fiscalm import ai, backup, companies, docs, links, pack, recon, transactions
 from fiscalm.api import (
     actions,
     lists,
@@ -23,10 +21,8 @@ from fiscalm.api import (
     v1 as api_v1,
 )
 from fiscalm.bank import statements
-from fiscalm.efactura import inbox as ef
 from fiscalm.ledger import Ledger, LinkRefused
 from fiscalm.mail import invoices
-from fiscalm.receipt_lines import signatures
 
 JPEG = b"\xff\xd8\xffexample"
 PNG = b"\x89PNG\r\n\x1a\nexample"
@@ -848,168 +844,6 @@ def test_upload_trusted_proxy_origin(ledger, server, monkeypatch):
         {"Sec-Fetch-Site": "cross-site"},
     ):
         assert post(server, path, [("photo.jpg", JPEG)], **(headers | overrides))[0] == 403
-
-
-def item_payload(**changes):
-    return {
-        "lines": [{"name": "Cablu USB 2", "unit": "H87", "quantity": "2", "net": "100.00", "vat": "21"}],
-        "total": "121.00",
-        "currency": "RON",
-        "payment": "cash",
-        **changes,
-    }
-
-
-def structured_purchase(ledger, home):
-    made = upload_links.create(ledger, "NORD", "Phone")
-    sha = intake.accept(ledger, made["path"].split("/u/")[1], [("jpg", JPEG)])[0]["sha"]
-    node = '<cac:InvoiceLine><cbc:InvoicedQuantity unitCode="H87">2</cbc:InvoicedQuantity><cbc:LineExtensionAmount>100.00</cbc:LineExtensionAmount><cac:Item><cbc:Name>Cablu USB 2</cbc:Name><cac:ClassifiedTaxCategory><cbc:Percent>21</cbc:Percent></cac:ClassifiedTaxCategory></cac:Item></cac:InvoiceLine>'
-    raw = anaf_zip(ubl(total="121.00").replace(b"</Invoice>", node.encode() + b"</Invoice>"))
-
-    ef.store(ledger, "NORD", {"id": "8001", "data_creare": "202610211200"}, raw)
-    return sha
-
-
-@pytest.mark.parametrize(
-    "change,expected",
-    [
-        ({}, True),
-        ({"name": "Hârtie"}, False),
-        ({"name": "Cablu USB 3"}, False),
-        ({"quantity": "1"}, False),
-        ({"unit": "SET"}, False),
-        ({"vat": ""}, False),
-        ({"net": "110.00"}, False),
-    ],
-)
-def test_receipt_line_rules(change, expected):
-    left = item_payload()
-    right = deepcopy(left)
-    right["lines"][0].update(change)
-    assert (signatures(left) == signatures(right)) is expected
-    left["lines"].append({"name": "Adaptor", "unit": "H87", "quantity": "1", "net": "10.00", "vat": "21"})
-    left["total"] = "133.10"
-    assert signatures(left) == signatures({**left, "lines": list(reversed(left["lines"]))})
-    assert signatures({**left, "total": "120.00"}) is None
-
-
-def test_receipt_confirm_is_atomic_and_never_payment(ledger, home):
-    sha = structured_purchase(ledger, home)
-    assert not ledger.save_receipt_items("STUDIO9", sha, item_payload(), 0)
-    assert ledger.save_receipt_items("NORD", sha, item_payload(), 0)
-    assert receipt_items.matching(ledger, "NORD", sha) == ["8001"]
-    assert not receipt_items.confirm(ledger, "STUDIO9", sha, "8001", 1)
-    assert not receipt_items.confirm(ledger, "NORD", sha, "8001", 0)
-
-    def attempt():
-        other = Ledger(ledger.path)
-        try:
-            return receipt_items.confirm(other, "NORD", sha, "8001", 1)
-        finally:
-            other.close()
-
-    with ThreadPoolExecutor(2) as pool:
-        assert sorted(pool.map(lambda _: attempt(), range(2))) == [False, True]
-    assert ledger.document(sha)["efactura_id"] == "8001"
-    assert ledger.efactura("8001")["status"] == "open"
-    assert not ledger.efactura("8001")["paid_tx"]
-    assert not ledger.save_receipt_items("NORD", sha, item_payload(), 1)
-    assert ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 0
-
-
-@pytest.mark.parametrize("fail", [False, True])
-@pytest.mark.parametrize("live_mode", [False, True])
-def test_uploaded_receipt_ai_is_untrusted_and_optional(ledger, home, monkeypatch, fail, live_mode):
-    sha = structured_purchase(ledger, home)
-    if live_mode:
-        (home / "state" / "LIVE").touch()
-    monkeypatch.setattr(ai, "ask_json", lambda *a, **kw: pytest.fail("unconfigured AI called"))
-    receipt_items.extract_pending(ledger)
-    assert not ledger.db.execute("SELECT 1 FROM receipt_items").fetchone()
-    integrations.add(
-        ledger, "ai", "Local", {"provider": "openai", "base_url": "http://127.0.0.1:11434/v1", "model": "test"}
-    )
-
-    def ask(L, system, prompt, schema, **kw):
-        assert "untrusted" in system and schema == receipt_items.SCHEMA
-        assert kw["image"] == ("image/jpeg", JPEG)
-        if fail:
-            raise ai.AIError("no decision")
-        return item_payload()
-
-    monkeypatch.setattr(ai, "ask_json", ask)
-    receipt_items.extract_pending(ledger)
-    detail = receipt_items.details(ledger, "NORD", sha)
-    assert detail["lines"] == ([] if fail else item_payload()["lines"])
-    assert not detail["verified"] and detail["proposal"] is None
-    assert ledger.save_receipt_items("NORD", sha, item_payload(), 1)
-    assert receipt_items.details(ledger, "NORD", sha)["proposal"] == "8001"
-
-
-def test_cash_receipt_warns_only_for_verified_card_debit(ledger, home):
-    sha = structured_purchase(ledger, home)
-    assert ledger.save_receipt_items("NORD", sha, item_payload(), 0)
-    assert receipt_items.confirm(ledger, "NORD", sha, "8001", 1)
-    with ledger.tx() as db:
-        db.execute(
-            "INSERT INTO statement_txs(tx_key,company,direction,tx) VALUES('card-proof','NORD','debit',?)",
-            (json.dumps({"card_last4": "9876"}),),
-        )
-    assert ledger.assign_card("NORD", "card-proof", "NORD")
-    assert ledger.mark_efactura_paid("8001", "statement", "card-proof")
-    assert receipt_items.details(ledger, "NORD", sha)["payment_mismatch"]
-    with ledger.tx() as db:
-        db.execute("UPDATE statement_txs SET company='STUDIO9' WHERE tx_key='card-proof'")
-    assert not receipt_items.details(ledger, "NORD", sha)["payment_mismatch"]
-
-
-def test_moved_receipt_never_reports_a_save_it_did_not_make(ledger, home):
-    sha = structured_purchase(ledger, home)
-    assert ledger.save_receipt_items("NORD", sha, item_payload(), 0)
-    with ledger.tx() as db:
-        db.execute("UPDATE documents SET company='STUDIO9' WHERE sha=?", (sha,))
-    assert not ledger.save_receipt_items("STUDIO9", sha, item_payload(), 0)
-    assert receipt_items.details(ledger, "STUDIO9", sha)["lines"] == []
-
-
-def test_stale_edits_and_a_second_receipt_cannot_replace_verified_evidence(ledger, home):
-    sha = structured_purchase(ledger, home)
-    assert not receipt_items.confirm(ledger, "NORD", sha, "8001", 0)
-    assert ledger.save_receipt_items("NORD", sha, item_payload(), 0)
-    assert not ledger.save_receipt_items("NORD", sha, item_payload(lines=[]), 0, verified=False)
-    assert not receipt_items.confirm(ledger, "NORD", sha, "missing", 1)
-    assert receipt_items.confirm(ledger, "NORD", sha, "8001", 1)
-    other = "f" * 64
-    ledger.add_document(other, "NORD", "2026-10", "receipt", str(home / "NORD" / "other.jpg"))
-    assert ledger.save_receipt_items("NORD", other, item_payload(), 0)
-    assert not receipt_items.confirm(ledger, "NORD", other, "8001", 1)
-    assert ledger.document(other)["efactura_id"] is None
-    assert not ledger.link_bon(other, "8001", "another receipt")
-    assert ledger.efactura("8001")["status"] == "open"
-
-
-def test_receipt_writer_rechecks_a_previously_eligible_proposal(ledger, home):
-    sha = structured_purchase(ledger, home)
-    assert ledger.save_receipt_items("NORD", sha, item_payload(), 0)
-    with ledger.tx() as db:
-        db.execute("UPDATE efactura SET company='STUDIO9' WHERE message_id='8001'")
-    assert not ledger.confirm_receipt_invoice("NORD", sha, "8001", 1, lambda: True)
-    assert ledger.document(sha)["efactura_id"] is None
-    with ledger.tx() as db:
-        db.execute("UPDATE efactura SET company='NORD' WHERE message_id='8001'")
-    assert receipt_items.confirm(ledger, "NORD", sha, "8001", 1)
-    assert not ledger.confirm_receipt_invoice("NORD", sha, "8001", 1, lambda: True)
-
-
-def test_receipt_actions_keep_payment_separate(ledger, home):
-    sha = structured_purchase(ledger, home)
-    (home / "state" / "LIVE").touch()
-    body = {"id": sha, "revision": 0, "payload": json.dumps(item_payload())}
-    assert not actions.act("receipt-lines-save", "STUDIO9", body)["ok"]
-    assert actions.act("receipt-lines-save", "NORD", body)["ok"]
-    assert api._documents(ledger, "NORD")[0]["items"]["proposal"] == "8001"
-    assert actions.act("receipt-invoice-confirm", "NORD", {"id": sha, "revision": 1, "invoice": "8001"})["ok"]
-    assert ledger.efactura("8001")["status"] == "open"
 
 
 def card_debit(ledger, co="NORD", n=1, direction="debit"):

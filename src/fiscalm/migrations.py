@@ -609,6 +609,13 @@ def account_opened(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE firm_accounts ADD COLUMN opened TEXT NOT NULL DEFAULT ''")
 
 
+def drop_receipt_items(db: sqlite3.Connection) -> None:
+    # Line-by-line receipt transcription is gone (#44). A receipt already associated with an invoice keeps that
+    # association on documents.efactura_id; the tables only held the transcribed lines and a copy of that link.
+    db.execute("DROP TABLE receipt_invoice_links")
+    db.execute("DROP TABLE receipt_items")
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     baseline,
     transaction_links,
@@ -650,6 +657,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     one_off_switch,
     app_statements_imported,
     account_opened,
+    drop_receipt_items,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

@@ -13,8 +13,6 @@
   "user-reset": "manage_users",
   "session-close": "manage_users",
   "history-review": "manage_firms",
-  "receipt-lines-save": "member",
-  "receipt-invoice-confirm": "member",
   "setup-card-dismiss": "manage_firms",
   "setup-card-show": "manage_firms",
   "telemetry-settings": "manage_firms",

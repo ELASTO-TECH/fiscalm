@@ -19,7 +19,7 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from fiscalm import companies
 
-from fiscalm import audit, backup, receipt_lines
+from fiscalm import audit, backup
 from fiscalm.migrations import check_version, migrate
 from fiscalm.paths import finance_home
 
@@ -1819,49 +1819,6 @@ class Ledger:
             )
         return bool(removed)
 
-    def save_receipt_items(self, co: str, sha: str, payload: dict, revision: int, *, verified: bool = True) -> bool:
-        receipt_lines.validate(payload)
-        with self.tx() as db:
-            doc = db.execute(
-                "SELECT 1 FROM documents WHERE sha=? AND company=? AND kind='receipt' AND efactura_id IS NULL",
-                (sha, co),
-            ).fetchone()
-            row = db.execute("SELECT revision FROM receipt_items WHERE sha=? AND company=?", (sha, co)).fetchone()
-            if not doc or (row["revision"] if row else 0) != revision:
-                return False
-            data = json.dumps(payload, ensure_ascii=False)
-            origin = "user" if verified else "ai"
-            cur = db.execute(
-                "INSERT INTO receipt_items VALUES(?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(sha) DO UPDATE SET payload=excluded.payload, verified=excluded.verified, "
-                "revision=excluded.revision,at=excluded.at WHERE receipt_items.company=excluded.company",
-                (sha, co, data, data, origin, int(verified), revision + 1, now()),
-            )
-        return cur.rowcount == 1
-
-    def confirm_receipt_invoice(
-        self, co: str, sha: str, invoice: str, revision: int, eligible: Callable[[], bool]
-    ) -> bool:
-        """Associate documents only. Re-read both sides under the write lock; never reserve a payment."""
-        with self.tx() as db:
-            row = db.execute(
-                "SELECT revision FROM receipt_items WHERE sha=? AND company=? AND verified=1", (sha, co)
-            ).fetchone()
-            if not row or row["revision"] != revision or not eligible():
-                return False
-            if db.execute("SELECT 1 FROM receipt_invoice_links WHERE sha=? OR invoice=?", (sha, invoice)).fetchone():
-                return False
-            cur = db.execute(
-                "UPDATE documents SET efactura_id=? WHERE sha=? AND company=? AND efactura_id IS NULL "
-                "AND NOT EXISTS(SELECT 1 FROM documents WHERE efactura_id=?) "
-                "AND EXISTS(SELECT 1 FROM efactura WHERE message_id=? AND company=?)",
-                (invoice, sha, co, invoice, invoice, co),
-            )
-            if not cur.rowcount:
-                return False
-            db.execute("INSERT INTO receipt_invoice_links VALUES(?,?,?,?)", (sha, invoice, co, now()))
-        return True
-
     def link_bon(self, sha: str, message_id: str, note: str) -> bool:
         """The bon `sha` proves this invoice paid at the till: both sides are written in one transaction, or neither.
         A bon pays one invoice, ever (its key `bon:<sha>` is reserved like a debit), and an invoice takes one proof,
@@ -2089,7 +2046,7 @@ class Ledger:
         references = (
             "NOT EXISTS (SELECT 1 FROM settlement_lines WHERE invoice_id=?) AND NOT EXISTS (SELECT 1 FROM invoice_sent_links WHERE message_id=?)"
             if way == "issued"
-            else "NOT EXISTS (SELECT 1 FROM receipt_invoice_links WHERE invoice=?)"
+            else "NOT EXISTS (SELECT 1 FROM documents WHERE efactura_id=?)"
         )
         with self.tx() as db:
             return (
