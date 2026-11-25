@@ -684,26 +684,41 @@ def test_empty_pdf_review_is_separate_and_answer_is_once(ledger):
     assert not history_pdf.pending(ledger, "NORD")
 
 
-HISTORY_TEXT = [
-    "Factura SB-0099",
-    "Firma Exemplu SRL      Atelier Nord SRL",
-    "RO77777777      RO11111111",
-    "03.11.2026",
-]
+HISTORY_TEXT = ["Firma Exemplu SRL      Atelier Nord SRL", "RO77777777      RO11111111", "03.11.2026", "119,00 lei"]
+FACTURA = ["Factura SB-0099", *HISTORY_TEXT]
 
 
 @pytest.mark.parametrize(
-    ("lines", "fields", "review"),
+    ("lines", "fields"),
     [
-        (HISTORY_TEXT + ["119,00 lei"], {}, 0),
-        ([], {}, 0),  # a scan: read from its first page's picture
-        (HISTORY_TEXT + ["119,00 lei"], {"confidence": "low"}, 1),
-        (HISTORY_TEXT + ["119,00 lei"], {"seller_tax_id": "RO88888888"}, 1),  # a partner id it doesn't print
-        (HISTORY_TEXT + ["119,00 lei"], {"issue_date": "03.11.2026"}, 1),  # a field failing its rule
-        (HISTORY_TEXT + ["119,00 lei", "Total 120,00 RON"], {}, 1),  # the rules found another total
+        (FACTURA, {"confidence": "low"}),
+        (FACTURA, {"seller_tax_id": "RO88888888"}),  # a partner id it doesn't print
+        (FACTURA, {"seller_tax_id": "7777"}),  # a fragment of the printed one
+        (FACTURA, {"issue_date": "03.11.2026"}),  # a field failing its rule
+        (FACTURA + ["Total 120,00 RON"], {}),  # the rules found another total
+        (FACTURA + ["Total 120,00 RON", "Total 121,00 RON", "Subtotal 119,00 RON"], {}),  # none of their totals
+        (FACTURA + ["Factura SB-0100"], {}),  # two invoices in one PDF: the rules cleared the number
+        (["Factura Seria SB nr 0099", *HISTORY_TEXT], {"number": "0099"}),  # a separately printed series
     ],
 )
-def test_history_pdf_read_by_ai_in_sandbox(ledger, monkeypatch, lines, fields, review):
+def test_history_pdf_ai_reading_in_doubt_waits_in_review(ledger, monkeypatch, lines, fields):
+    history_ai(ledger, monkeypatch, fields)
+    assert run(ledger, zipped(("factura.pdf", text_pdf(lines)))).review == 1
+    (q,) = history_pdf.pending(ledger, "NORD")
+    assert (q["reason"], q["direction"], q["party_name"]) == ("unsure", "received", "Firma Exemplu SRL")
+
+
+@pytest.mark.parametrize("lines", [FACTURA, []])  # a text PDF, and a scan read from its first page's picture
+def test_history_pdf_read_by_ai_in_sandbox(ledger, monkeypatch, lines):
+    history_ai(ledger, monkeypatch, {})
+    res = run(ledger, zipped(("factura.pdf", text_pdf(lines))))
+    assert (res.history_received, res.review) == (1, 0)
+    row = history.rows(ledger, "NORD")[0]
+    got = tuple(row[k] for k in ("direction", "number", "issue_date", "total", "party_tax_id"))
+    assert got == ("received", "SB-0099", "2026-11-03", "119.00", "77777777")
+
+
+def history_ai(ledger, monkeypatch, fields):
     integrations.add(
         ledger, "ai", "Local AI", {"provider": "openai", "base_url": "http://127.0.0.1:9/v1", "model": "t"}
     )
@@ -721,15 +736,6 @@ def test_history_pdf_read_by_ai_in_sandbox(ledger, monkeypatch, lines, fields, r
         "confidence": "high",
     } | fields
     monkeypatch.setattr(ai, "ask_json", lambda L, system, prompt, schema, image=None: answer)
-    res = run(ledger, zipped(("factura.pdf", text_pdf(lines))))
-    assert (res.history_received, res.review) == (1 - review, review)
-    got = history_pdf.pending(ledger, "NORD")[0] if review else dict(history.rows(ledger, "NORD")[0])
-    assert (got["direction"], got["number"], got["total"], got["party_name"]) == (
-        "received",
-        "SB-0099",
-        "120.00" if "Total 120,00 RON" in lines else "119.00",
-        "Firma Exemplu SRL",
-    )
 
 
 @pytest.mark.parametrize("numbers", [("NRD 1", "NRD 2"), ("A-0042", "B-0042")])
