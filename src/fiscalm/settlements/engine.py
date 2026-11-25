@@ -23,7 +23,7 @@ from fiscalm.identity import firm_name, partner_id
 from fiscalm.invoicing import issued
 from fiscalm.ledger import Ledger, covered, finance_home
 from fiscalm.pdftext import pdf_text
-from fiscalm.settlements.reports import ReportError, money, parse
+from fiscalm.settlements.reports import ReportError, money, parse, payouts
 from fiscalm.storage import read_file
 from fiscalm.validate import iban_valid
 
@@ -33,8 +33,38 @@ class SettlementError(ValueError):
 
 
 def import_report(L: Ledger, company: str, data: bytes, spec: dict) -> str:
-    """Operator-supplied spec establishes payer and report identity; attachment content never chooses either."""
+    """One payout's report (CLI, Shopify): a file covering several payouts refuses here; see `import_payouts`."""
+    reports = _payout_reports(L, company, data, spec)
+    if len(reports) != 1:
+        raise ReportError("Exactly one payout required")
+    return _store_reports(L, company, data, spec, reports)[0]
+
+
+def import_payouts(L: Ledger, company: str, data: bytes, spec: dict) -> list[str]:
+    """Every payout of one file as its own report, all stored or none. Each payout is keyed by its payout id and
+    dated by its own day when the file has a date column; the file's bytes are each report's evidence."""
+    return _store_reports(L, company, data, spec, _payout_reports(L, company, data, spec))
+
+
+def _payout_reports(L: Ledger, company: str, data: bytes, spec: dict) -> list[tuple[str, str, list[dict]]]:
+    """Operator-supplied spec establishes payer and report identity; attachment content never chooses either.
+    Returns (report key, date, lines) per payout."""
     companies.get(company, L=L)
+    _check_spec(spec)
+    lines = parse(data, spec.get("format", "csv"), spec["source"], spec.get("mapping"), spec.get("delimiter", ","))
+    if any(r.get("currency", spec["currency"]).upper() != spec["currency"] for r in lines):
+        raise ReportError("Mixed currencies")
+    check_company_cuis(lines, companies.get(company, L=L).cui)
+    groups = payouts(lines)
+    if len(groups) == 1 and next(iter(groups)) not in ("", spec["report_key"]):
+        raise ReportError("Payout id differs from report key")
+    if len(groups) > 1 and not all(re.fullmatch(r"[A-Za-z0-9_-]{1,100}", k) for k in groups):
+        raise ReportError("Invalid report key or currency")
+    single = len(groups) == 1
+    return [(spec["report_key"] if single else k, g[0].get("date", spec["date"]), g) for k, g in groups.items()]
+
+
+def _check_spec(spec: dict) -> None:
     if not isinstance(spec, dict):
         raise ReportError("Report specification must be an object")
     for field in ("payer_cui", "payer_iban"):
@@ -47,43 +77,61 @@ def import_report(L: Ledger, company: str, data: bytes, spec: dict) -> str:
         not iban_valid(spec["payer_iban"]) or spec["payer_iban"] != spec["payer_iban"].replace(" ", "").upper()
     ):
         raise ReportError("Payer IBAN must be valid and normalized")
-    required = ("source", "report_key", "date", "currency", "payer_name")
-    if any(not isinstance(spec.get(k), str) or not 1 <= len(spec[k]) <= 200 for k in required):
+    if any(not isinstance(spec.get(k), str) or not 1 <= len(spec[k]) <= 200 for k in REQUIRED):
         raise ReportError("Missing report identity")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", spec["report_key"]) or not re.fullmatch(r"[A-Z]{3}", spec["currency"]):
         raise ReportError("Invalid report key or currency")
     date.fromisoformat(spec["date"])
-    lines = parse(data, spec.get("format", "csv"), spec["source"], spec.get("mapping"), spec.get("delimiter", ","))
-    if any(r.get("currency", spec["currency"]).upper() != spec["currency"] for r in lines):
-        raise ReportError("Mixed currencies")
-    if any(r.get("batch", spec["report_key"]) != spec["report_key"] for r in lines):
-        raise ReportError("Payout id differs from report key")
     for field in ("channel", "courier"):
         if field in spec and (not isinstance(spec[field], str) or not spec[field] or len(spec[field]) > 200):
             raise ReportError("Invalid channel or courier")
-    check_company_cuis(lines, companies.get(company, L=L).cui)
-    body = {k: spec[k] for k in required} | {k: spec.get(k, "") for k in ("payer_cui", "payer_iban")} | {"lines": lines}
+
+
+REQUIRED = ("source", "report_key", "date", "currency", "payer_name")
+# Each payout of a file keeps the whole file as its evidence; their sum stays bounded.
+EVIDENCE_LIMIT = 16 * 1024 * 1024
+
+
+def report_digest(data: bytes, key: str, single: bool) -> str:
+    """The file's digest; a payout of a several-payout file adds its key, so each payout is one report."""
+    digest = hashlib.sha256(data).hexdigest()
+    return digest if single else f"{digest}:{key}"
+
+
+def _store_reports(L: Ledger, company: str, data: bytes, spec: dict, reports: list) -> list[str]:
     identity = spec.get("payer_cui") or spec.get("payer_iban") or issued._norm(spec["payer_name"])
-    body["payer_id"] = hashlib.sha256(identity.encode()).hexdigest()[:32]
-    body["partner"] = partner_id(company, spec.get("payer_cui") or None, spec["payer_name"])
-    if not body["partner"]:
+    base = {k: spec[k] for k in REQUIRED} | {k: spec.get(k, "") for k in ("payer_cui", "payer_iban")}
+    base["payer_id"] = hashlib.sha256(identity.encode()).hexdigest()[:32]
+    base["partner"] = partner_id(company, spec.get("payer_cui") or None, spec["payer_name"])
+    if not base["partner"]:
         raise ReportError("Missing partner identity")
-    body.update({k: spec[k] for k in ("channel", "courier") if k in spec})
-    rid = uuid4().hex
+    base.update({k: spec[k] for k in ("channel", "courier") if k in spec})
+    if len(reports) * len(data) > EVIDENCE_LIMIT:
+        raise ReportError("Too many payouts for one file")
+    ids, digest, single = [], hashlib.sha256(data).hexdigest(), len(reports) == 1
     with L.tx() as db:
-        db.execute(
-            "INSERT INTO settlement_reports(id,company,source,report_key,digest,raw,data) VALUES(?,?,?,?,?,?,?)",
-            (
-                rid,
-                company,
-                spec["source"],
-                spec["report_key"],
-                hashlib.sha256(data).hexdigest(),
-                data,
-                json.dumps(body),
-            ),
-        )
-    return rid
+        # The same bytes are one file, however mapped: never stored twice. A payout corrected after a withdrawal
+        # comes back as a corrected file.
+        if db.execute(
+            "SELECT 1 FROM settlement_reports WHERE company=? AND (digest=? OR digest LIKE ?) AND status!='withdrawn'",
+            (company, digest, digest + ":%"),
+        ).fetchone():
+            raise sqlite3.IntegrityError("duplicate report file")
+        for key, day, lines in reports:
+            ids.append(uuid4().hex)
+            db.execute(
+                "INSERT INTO settlement_reports(id,company,source,report_key,digest,raw,data) VALUES(?,?,?,?,?,?,?)",
+                (
+                    ids[-1],
+                    company,
+                    spec["source"],
+                    key,
+                    report_digest(data, key, single),
+                    data,
+                    json.dumps(base | {"report_key": key, "date": day, "lines": lines}),
+                ),
+            )
+    return ids
 
 
 def check_company_cuis(lines: list[dict], cui: str) -> None:
@@ -232,7 +280,10 @@ def verify(L: Ledger, stored: sqlite3.Row, st: statements.Statement) -> tuple[st
     r = json.loads(stored["data"])
     if st.company != stored["company"]:
         raise SettlementError("wrong_company")
-    gross = sum((money(x["gross"]) for x in r["lines"]), Decimal(0))
+    for n, line in enumerate(r["lines"], 1):
+        if line.get("adjustment"):
+            raise SettlementError(f"line_{n}_adjustment")  # a refund or adjustment is checked by a person
+    gross = sum((money(x["gross"]) for x in r["lines"]), Decimal(0))  # no adjustment line left: all positive
     fee = sum((money(x["fee"]) for x in r["lines"]), Decimal(0))
     candidates = [
         t
@@ -254,7 +305,7 @@ def verify(L: Ledger, stored: sqlite3.Row, st: statements.Statement) -> tuple[st
         "SELECT * FROM settlement_reports WHERE company=? AND id!=? AND status='pending'", (st.company, stored["id"])
     ):
         o = json.loads(other["data"])
-        net = sum((money(x["gross"]) - money(x["fee"]) for x in o["lines"]), Decimal(0))
+        net = sum((money(x["gross"], signed=True) - money(x["fee"], signed=True) for x in o["lines"]), Decimal(0))
         if (
             net == t.amount
             and o["currency"] == t.currency
@@ -402,7 +453,7 @@ def snapshot(L: Ledger, company: str) -> tuple[list[dict], list[dict]]:
             if resolver is None:
                 resolver = Resolver(L, company, L.issued_rows(company=company))
             for n, line in enumerate(data["lines"], 1):
-                matches = resolver.resolve(data, line)
+                matches = [] if line.get("adjustment") else resolver.resolve(data, line)  # names no invoice
                 if len(matches) == 1:
                     proof[n] = matches[0]["message_id"]
         lines = [

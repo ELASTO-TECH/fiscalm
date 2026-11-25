@@ -28,14 +28,25 @@ NETOPIA = dict(
 NS = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
 
 
-def workbook(rows="", *, sheet=None, strings=None):
-    """A one-worksheet XLSX holding `rows` (or the raw `sheet` XML), with optional shared strings."""
+def workbook(rows="", *more, sheet=None, strings=None):
+    """An XLSX holding `rows` (or the raw `sheet` XML) on its first worksheet and `more` on the next ones, with
+    optional shared strings."""
     b = io.BytesIO()
     with zipfile.ZipFile(b, "w") as z:
         if strings is not None:
             z.writestr("xl/sharedStrings.xml", f"<sst {NS}>{strings}</sst>")
         z.writestr("xl/worksheets/sheet1.xml", sheet or f"<worksheet {NS}><sheetData>{rows}</sheetData></worksheet>")
+        for n, extra in enumerate(more, 2):
+            z.writestr(f"xl/worksheets/sheet{n}.xml", f"<worksheet {NS}><sheetData>{extra}</sheetData></worksheet>")
     return b.getvalue()
+
+
+def cells(*rows):
+    cell = '<c r="{}{}" t="inlineStr"><is><t>{}</t></is></c>'
+    return "".join(
+        "<row>" + "".join(cell.format(chr(65 + i), n, v) for i, v in enumerate(r)) + "</row>"
+        for n, r in enumerate(rows, 1)
+    )
 
 
 @pytest.mark.parametrize("source", [s for s in SOURCES if s != "stripe"])
@@ -54,7 +65,12 @@ def test_mapped_sources(source):
 def test_stripe():
     data = b"invoice_number,gross,fee,net,currency,automatic_payout_id,reporting_category\nTEST-1,100.00,2.00,98.00,ron,po_test,charge\n"
     assert parse(data, "csv", "stripe")[0]["fee"] == "2.00"
-    for bad in (data.replace(b"98.00", b"98.01"), data.replace(b"charge", b"refund"), data.replace(b"100.00", b"NaN")):
+    assert parse(data.replace(b"charge", b"refund"), "csv", "stripe")[0]["adjustment"] == "1"  # kept, flagged
+    fee_only = data.replace(b"100.00,2.00,98.00", b"0.00,2.00,-2.00").replace(b"charge", b"fee")
+    assert parse(fee_only, "csv", "stripe")[0]["fee"] == "2.00"  # a fee adjustment, flagged, not a refused file
+    fee_back = data.replace(b"100.00,2.00,98.00", b"-100.00,2.00,-98.00").replace(b"charge", b"refund")
+    assert parse(fee_back, "csv", "stripe")[0]["fee"] == "-2.00"  # the refund returned its fee: net says so
+    for bad in (data.replace(b"98.00", b"98.01"), data.replace(b"100.00", b"NaN")):
         with pytest.raises(ReportError):
             parse(bad, "csv", "stripe")
 
@@ -64,6 +80,143 @@ def test_xlsx_sparse_and_formula():
     assert table(workbook(header + '<row><c r="C2"><v>12</v></c></row>'), "xlsx") == [["Ref"], ["", "", "12"]]
     with pytest.raises(ReportError):
         table(workbook(header + '<row><c r="A2"><f>1+1</f><v>2</v></c></row>'), "xlsx")
+
+
+def excel_package(*sheets) -> bytes:
+    """A synthetic workbook in the layout Excel saves: package, workbook and content-type manifests, styles, a theme
+    and document properties."""
+    pkg, rel = "http://schemas.openxmlformats.org/package/2006", "http://schemas.openxmlformats.org/officeDocument/2006"
+    ct = "application/vnd.openxmlformats-officedocument"
+    parts = {
+        f"xl/worksheets/sheet{n}.xml": f"<worksheet {NS}><sheetData>{rows}</sheetData></worksheet>"
+        for n, rows in enumerate(sheets, 1)
+    }
+    overrides = "".join(f'<Override PartName="/{p}" ContentType="{ct}.spreadsheetml.worksheet+xml"/>' for p in parts)
+    links = "".join(
+        f'<Relationship Id="rId{n}" Type="{rel}/relationships/worksheet" Target="worksheets/sheet{n}.xml"/>'
+        for n in range(1, len(sheets) + 1)
+    )
+    listed = "".join(f'<sheet name="Foaie{n}" sheetId="{n}" r:id="rId{n}"/>' for n in range(1, len(sheets) + 1))
+    parts |= {
+        "[Content_Types].xml": f'<Types xmlns="{pkg}/content-types"><Default Extension="rels" ContentType="application/'
+        f'vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+        f'<Override PartName="/xl/workbook.xml" ContentType="{ct}.spreadsheetml.sheet.main+xml"/>{overrides}'
+        f'<Override PartName="/xl/styles.xml" ContentType="{ct}.spreadsheetml.styles+xml"/></Types>',
+        "_rels/.rels": f'<Relationships xmlns="{pkg}/relationships"><Relationship Id="rId1" Type="{rel}/relationships/'
+        f'officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="{pkg}/relationships/metadata/'
+        f'core-properties" Target="docProps/core.xml"/></Relationships>',
+        "docProps/core.xml": f'<cp:coreProperties xmlns:cp="{pkg}/metadata/core-properties"/>',
+        "xl/workbook.xml": f'<workbook {NS} xmlns:r="{rel}/relationships"><sheets>{listed}</sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{pkg}/relationships">{links}<Relationship Id="rId99" '
+        f'Type="{rel}/relationships/styles" Target="styles.xml"/></Relationships>',
+        "xl/styles.xml": f"<styleSheet {NS}/>",
+        "xl/theme/theme1.xml": '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>',
+    }
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for name, body in parts.items():
+            z.writestr(name, body)
+    return out.getvalue()
+
+
+def test_xlsx_sheets_with_one_header_read_as_one_table():
+    """Monthly workbooks split lines over sheets with one header: one table. Any other sheet (a summary, a title row,
+    another layout) refuses: no sheet is left unread."""
+    header = ["Ref", "Gross", "Fee"]
+    data = workbook(cells(header, ["TEST-1", "100.00", "2.00"]), cells(header, ["TEST-2", "100.00", "2.00"]))
+    excel = excel_package(cells(header, ["TEST-1", "100.00", "2.00"]), cells(header, ["TEST-2", "100.00", "2.00"]))
+    assert table(excel, "xlsx") == table(data, "xlsx")  # a workbook as Excel saves it reads the same
+    assert table(data, "xlsx") == [header, ["TEST-1", "100.00", "2.00"], ["TEST-2", "100.00", "2.00"]]
+    for other in (["Total", "Lines"], ["REF", "GROSS", "FEE"], ["Gross", "Ref", "Fee"]):
+        with pytest.raises(ReportError):
+            table(workbook(cells(header, ["TEST-1", "1", "0"], ["TEST-2", "1", "0"]), cells(other, ["1", "2"])), "xlsx")
+    rels = '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{}</Relationships>'
+    for target, extra in (("worksheets/refunds.xml", cells(["Gross"], ["-5.00"])), ("worksheets/missing.xml", "")):
+        named = io.BytesIO()  # a worksheet the workbook names but doesn't number (or doesn't hold)
+        with zipfile.ZipFile(named, "w") as z:
+            sheet = f"<worksheet {NS}><sheetData>{{}}</sheetData></worksheet>"
+            z.writestr("xl/worksheets/sheet1.xml", sheet.format(cells(header, ["T", "1", "0"])))
+            z.writestr(
+                "xl/_rels/workbook.xml.rels",
+                rels.format(f'<Relationship Id="rId9" Type="x/worksheet" Target="{target}"/>'),
+            )
+            if extra:
+                z.writestr("xl/" + target, sheet.format(extra))
+        with pytest.raises(ReportError):
+            table(named.getvalue(), "xlsx")
+
+    def declared(*targets):  # a workbook declaring Sales and Refunds, with relationships for `targets` only
+        out, rid = io.BytesIO(), 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+        with zipfile.ZipFile(out, "w") as z:
+            sheet = f"<worksheet {NS}><sheetData>{{}}</sheetData></worksheet>"
+            for n in (1, 2):
+                z.writestr(f"xl/worksheets/sheet{n}.xml", sheet.format(cells(header, [f"T{n}", "1", "0"])))
+            sheets = '<sheet name="Sales" r:id="rId1"/><sheet name="Refunds" r:id="rId2"/>'
+            z.writestr("xl/workbook.xml", f"<workbook {NS} {rid}><sheets>{sheets}</sheets></workbook>")
+            links = "".join(f'<Relationship Id="rId{n}" Type="x/worksheet" Target="{t}"/>' for n, t in targets)
+            z.writestr("xl/_rels/workbook.xml.rels", rels.format(links))
+        return out.getvalue()
+
+    both = declared((1, "worksheets/sheet1.xml"), (2, "worksheets/sheet2.xml"))
+    assert [r[0] for r in table(both, "xlsx")] == ["Ref", "T1", "T2"]
+    with pytest.raises(ReportError):  # Refunds declared, its relationship gone
+        table(declared((1, "worksheets/sheet1.xml")), "xlsx")
+    for old, new in ((b"sheetData", b"data"), (b"xl/workbook.xml", b"xl/workbook.xmz")):
+        broken = io.BytesIO()  # Refunds unreadable (no sheetData); the workbook manifest missing
+        with zipfile.ZipFile(io.BytesIO(both)) as src, zipfile.ZipFile(broken, "w") as z:
+            for info in src.infolist():
+                body = src.read(info)
+                name = (
+                    info.filename.replace("xl/workbook.xml", new.decode())
+                    if old == b"xl/workbook.xml"
+                    else info.filename
+                )
+                z.writestr(name, body.replace(old, new) if name.endswith("sheet2.xml") else body)
+            z.writestr(
+                "_rels/.rels", rels.format('<Relationship Id="rId1" Type="x/officeDocument" Target="xl/workbook.xml"/>')
+            )
+        with pytest.raises(ReportError):
+            table(broken.getvalue(), "xlsx")
+
+    def variant(**parts):  # `both` with parts replaced or added (None drops one)
+        out = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(both)) as src, zipfile.ZipFile(out, "w") as z:
+            files = {n: src.read(n) for n in src.namelist()} | parts
+            for name, body in files.items():
+                if body is not None:
+                    z.writestr(name, body)
+        return out.getvalue()
+
+    refunds = f"<worksheet {NS}><sheetData>{cells(['Gross'], ['-5.00'])}</sheetData></worksheet>".encode()
+    twice = rels.format(
+        '<Relationship Id="rId1" Type="x/worksheet" Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId1" Type="x/worksheet" Target="worksheets/sheet2.xml"/>'
+    )
+    strict = both_book = zipfile.ZipFile(io.BytesIO(both)).read("xl/workbook.xml")
+    strict = both_book.replace(NS.split('"')[1].encode(), b"http://purl.oclc.org/ooxml/spreadsheetml/main")
+    for parts in (
+        {"xl/_rels/workbook.xml.rels": twice.encode()},  # one id twice: a sheet could be dropped
+        {"xl/workbook.xml": strict},  # another dialect: its sheet list can't be read
+        {"xl/worksheets/sub/refunds.xml": refunds},  # nested under xl/worksheets/
+        {"xl/worksheets/SHEET3.XML": refunds},  # upper case
+        {  # Refunds outside xl/worksheets/, said to be a chart sheet
+            "xl/refunds.xml": refunds,
+            "xl/worksheets/sheet2.xml": None,
+            "xl/_rels/workbook.xml.rels": rels.format(
+                '<Relationship Id="rId1" Type="x/worksheet" Target="worksheets/sheet1.xml"/>'
+                '<Relationship Id="rId2" Type="x/chartsheet" Target="refunds.xml"/>'
+            ).encode(),
+        },
+        {"xl/workbook.xml": both_book.replace(b' r:id="rId2"', b"")},  # a sheet without its id
+        {"_rels/.rels": rels.format("").encode()},  # a package naming no workbook
+        {  # Refunds outside xl/worksheets/, named only by the content types
+            "xl/refunds.xml": refunds,
+            "[Content_Types].xml": b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            b'<Override PartName="/xl/refunds.xml" ContentType="application/x.worksheet+xml"/></Types>',
+        },
+    ):
+        with pytest.raises(ReportError):
+            table(variant(**parts), "xlsx")
 
 
 @pytest.mark.parametrize("data", [b"a,a\n1,2", b"a,b\n1", b"a,b\n1,2,3"])
@@ -77,12 +230,7 @@ def test_xlsx_source_happy(source):
     """XLSX reads the same for the Stripe preset and for a mapped source (every mapped source parses alike)."""
     headers = ["invoice_number", "gross", "fee", "net", "currency", "automatic_payout_id", "reporting_category"]
     values = ["TEST-1", "100.00", "2.00", "98.00", "ron", "po_synthetic", "charge"]
-    rows = "".join(
-        "<row>"
-        + "".join(f'<c r="{chr(65 + i)}{n}" t="inlineStr"><is><t>{v}</t></is></c>' for i, v in enumerate(row))
-        + "</row>"
-        for n, row in enumerate([headers, values], 1)
-    )
+    rows = cells(headers, values)
     mapping = (
         None if source == "stripe" else {"reference": "invoice_number", "gross": "gross", "fee": "fee", "net": "net"}
     )
@@ -133,7 +281,14 @@ def test_bad_delimiter_and_negative_string_index():
         ("100,005", "0", "", None),
         ("1e3", "0", "", None),
         ("100 RON", "2 EUR", "", None),
-        ("-100,00", "0", "", None),
+        ("-100,00", "0", "", ("-100.00", "0.00", "")),
+        ("-100,00", "2,00", "", None),  # a refund's fee: kept or returned? Only a mapped net says.
+        (
+            "0",
+            "2,00",
+            "-2,00",
+            None,
+        ),  # zero gross, a fee: an adjustment only with a non-charge category (test_stripe)  # a refund line: kept and flagged (test_settlements)
     ],
 )
 def test_real_amounts_parse_exactly_or_refuse(gross, fee, net, expected):
@@ -146,9 +301,49 @@ def test_real_amounts_parse_exactly_or_refuse(gross, fee, net, expected):
         return
     line = parse(data, "csv", "fan", mapping, ";")[0]
     assert (line["reference"], line["gross"], line["fee"], line.get("currency", "")) == ("=TEST-1", *expected)
-    assert money(line["gross"]) + 0 == Decimal(expected[0])  # what is stored reads back exactly
+    assert money(line["gross"], signed=True) == Decimal(expected[0])  # what is stored reads back exactly
     if net:  # a mapped net is stored as gross minus fee, never `-0.00`
         assert line["net"] == f"{Decimal(expected[0]) - Decimal(expected[1]):.2f}"
+
+
+def test_multi_payout_file_becomes_one_report_per_payout(ledger):
+    """Two payout ids in one borderou: two reports, each dated by its own day, stored together; the file again is a
+    duplicate."""
+    for n in (1, 2):
+        ledger.add_issued(dict(message_id=f"m{n}", company="NORD", number=f"TEST-{n}", status="open", raw_path=""))
+    data = (
+        b"Borderou;Factura;Ramburs;Comision;Data\nB-1;TEST-1;100,00;2,00;09.10.2026\nB-2;TEST-2;50,00;1,00;11.10.2026\n"
+    )
+    mapping = dict(batch="Borderou", reference="Factura", gross="Ramburs", fee="Comision", date="Data")
+    described = NETOPIA | dict(source="fan", name="Synthetic Courier SRL", mapping=mapping)
+    result = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    rows = settlements.state(ledger, "NORD")
+    assert sorted(result["ids"]) == sorted(r["id"] for r in rows)
+    assert sorted((r["report_key"], r["date"], r["net"]) for r in rows) == [
+        ("B-1", "2026-10-09", "98.00"),
+        ("B-2", "2026-10-11", "49.00"),
+    ]
+    partner = ledger.db.execute("SELECT partner FROM partner_settlement_formats").fetchone()[0]
+    again = bank_upload.accept_report(ledger, "NORD", data, "text/csv", partner=partner, **UPLOAD)
+    assert again["status"] == "duplicate" and len(settlements.state(ledger, "NORD")) == 2
+    mixed = data.replace(b"B-2;TEST-2;50,00;1,00;11", b"B-1;TEST-2;50,00;1,00;11")
+    old = data.replace(b"11.10.2026", b"11.10.2024")
+    clash = data.replace(b"B-1;", b"B-9;", 1).replace(b"B-2;", b"B-1;")  # a new payout, then one already stored
+    for bad in (mixed, old, clash):  # two days in one payout; a day past the upload rule; a stored payout id
+        with pytest.raises(bank_upload.Refused):
+            bank_upload.accept_report(ledger, "NORD", bad, "text/csv", partner=partner, **UPLOAD)
+    assert len(settlements.state(ledger, "NORD")) == 2  # nothing of a refused file is stored
+    once = described | {"mapping": {k: v for k, v in mapping.items() if k not in ("batch", "date")}}
+    remapped = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=once, **UPLOAD)
+    assert remapped["status"] == "duplicate" and len(settlements.state(ledger, "NORD")) == 2  # same bytes, one file
+    b2 = next(r["id"] for r in settlements.state(ledger, "NORD") if r["report_key"] == "B-2")
+    assert ledger.withdraw_report(b2, "NORD")  # withdrawn to correct it: it comes back as a corrected file
+    again = bank_upload.accept_report(ledger, "NORD", data, "text/csv", partner=partner, **UPLOAD)
+    assert again["status"] == "duplicate" and len(settlements.state(ledger, "NORD")) == 1
+    corrected = b"Borderou;Factura;Ramburs;Comision;Data\nB-2;TEST-2;50,00;1,00;11.10.2026\n"
+    assert (
+        bank_upload.accept_report(ledger, "NORD", corrected, "text/csv", partner=partner, **UPLOAD)["status"] == "added"
+    )
 
 
 def test_uploaded_format_belongs_to_partner_and_is_reused(ledger):

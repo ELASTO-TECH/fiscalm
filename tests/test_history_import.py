@@ -975,9 +975,16 @@ def unpaid_xlsx(
         sheet.append(f'<row r="{i}">{"".join(cells)}</row>')
     data = io.BytesIO(workbook("".join(sheet)))
     with zipfile.ZipFile(data, "a") as z:
+        rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
         z.writestr(
             "xl/workbook.xml",
-            f'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><workbookPr date1904="{int(date1904)}"/></workbook>',
+            f'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="{rel}">'
+            f'<workbookPr date1904="{int(date1904)}"/><sheets><sheet name="Facturi" r:id="rId1"/></sheets></workbook>',
+        )
+        z.writestr(  # a real workbook lists its sheets through its relationships
+            "xl/_rels/workbook.xml.rels",
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rId1" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
         )
     return data.getvalue()
 

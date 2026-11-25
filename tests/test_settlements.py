@@ -388,6 +388,20 @@ def test_retired_gate_reason_is_replaced(ledger):
     assert settlements.state(ledger, "NORD")[0]["error"] == "credit_missing_or_ambiguous"
 
 
+def test_refund_line_is_kept_and_flagged_alone(ledger):
+    """A refund line no longer refuses the file: the report is stored, its net counts the refund, and the Sarcină names
+    that line; nothing settles."""
+    setup(ledger)
+    data = REPORT + b"Retur client,-4.00,0\n"
+    rid = settlements.import_report(ledger, "NORD", data, SPEC | {"report_key": "with-refund"})
+    for credit in ("192.00", "1.00"):  # the refund line is the reason, with or without the payout's credit
+        with pytest.raises(settlements.SettlementError, match="^line_3_adjustment$"):
+            collect(ledger, rid, statement(amount=Decimal(credit)))
+    row = next(r for r in settlements.state(ledger, "NORD") if r["id"] == rid)
+    assert (row["net"], row["lines"][2]["gross"]) == ("192.00", "-4.00") and not ledger.used_txs()
+    assert row["lines"][2]["invoice"] is None  # an adjustment names no invoice a partner could hold
+
+
 def test_single_writer_cannot_take_batch_credit(ledger):
     rid = setup(ledger)
     collect(ledger, rid, statement())

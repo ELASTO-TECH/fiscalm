@@ -16,7 +16,7 @@ export type ReportPreview = { columns: string[]; rows: string[][]; known: { id: 
 const SOURCES = [["fan", "FAN Courier"], ["sameday", "Sameday"], ["cargus", "Cargus"], ["dpd", "DPD"], ["gls", "GLS"],
   ["stripe", "Stripe"], ["netopia", "Netopia"], ["payu", "PayU"], ["courier", "Alt curier"], ["processor", "Alt procesator"]];
 export const REPORT_FIELDS = [["reference", "Numărul facturii"], ["order", "Numărul comenzii"], ["awb", "AWB"], ["gross", "Suma încasată de la client"],
-  ["fee", "Comisionul reținut"], ["net", "Suma netă"], ["batch", "Referința decontării"], ["currency", "Moneda"], ["category", "Categoria operațiunii (Stripe)"], ["company_cui", "CUI-ul firmei (opțional)"]];
+  ["fee", "Comisionul reținut"], ["net", "Suma netă"], ["batch", "Referința decontării"], ["date", "Data fiecărei plăți"], ["currency", "Moneda"], ["category", "Categoria operațiunii (Stripe)"], ["company_cui", "CUI-ul firmei (opțional)"]];
 const SHOP = new Set(["order", "awb"]);
 const REQUIRED = new Set(["reference", "order", "awb", "gross", "fee"]);
 const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";

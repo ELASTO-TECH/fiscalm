@@ -62,6 +62,7 @@ function details(r: Settlement, today: string) {
 /** Why a report line names no single open invoice, with the value it carries when this page of lines has it. */
 function lineError(r: Settlement) {
   const line = r.lines.find((l) => l.position === r.failed_line), error = r.error ?? "";
+  if (error.endsWith("adjustment")) return "este o rambursare sau o ajustare. Verific-o manual.";
   if (error.endsWith("awb_unknown")) return `${line?.awb ? `AWB ${line.awb}` : "AWB-ul"} nu corespunde niciunei comenzi.`;
   if (error.endsWith("order_unknown")) return `${line?.order ? `comanda ${line.order}` : "comanda"} nu există în comenzile firmei.`;
   if (error.endsWith("invoice_missing_or_ambiguous")) return !line?.reference ? "factura nu poate fi găsită."
@@ -97,7 +98,7 @@ function SettlementBody({ id, onClose }: { id: string; onClose: () => void }) {
       <DetailPages />
       <ul className="m-0 list-none divide-x-0 divide-y divide-solid divide-line p-0">
         {r.lines.map((line) => <li className="flex items-start justify-between gap-4 p-4 text-sm leading-relaxed" key={line.position}>
-          <span className="min-w-0 wrap-anywhere">{line.invoice ? <L to={{ co: s.co, iss: line.invoice }}>Factura {line.reference || line.order || line.awb || "emisă"}</L> : line.reference || line.awb || line.order}</span>
+          <span className="min-w-0 wrap-anywhere">{line.invoice ? <L to={{ co: s.co, iss: line.invoice }}>Factura {line.reference || line.order || line.awb || "emisă"}</L> : line.reference || line.awb || line.order || "Ajustare"}</span>
           <span className="shrink-0 tabular-nums">{lei(line.gross)} {curOf(r.currency)}</span>
         </li>)}
       </ul>

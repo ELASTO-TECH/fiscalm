@@ -14,7 +14,9 @@ Credit must be 0–14 days after the report date. Same currency, no FX fallback.
 no competing report and every line mapped to one open issued invoice with its entire exact amount.
 Credit notes, marked/collected invoices and repeated lines refuse. Fees are an expense record linked
 to the report, not a tax invoice or a generated payment. No courier IBAN is learned as a buyer IBAN.
-Refunds, disputes, currency conversion and adjustments require manual investigation, never partial collection.
+A refund, dispute or adjustment line (a negative amount, or a category other than `charge`) is kept with the report
+and counted in its net; the batch never settles on its own and its Sarcină names that line (`line_N_adjustment`).
+Currency conversion is never assumed.
 
 AWB/order references resolve through company-scoped shop orders and verified SPV invoice links.
 All supplied identifiers must agree; duplicate orders/AWBs, a wrong courier or another firm refuse.
@@ -38,24 +40,35 @@ See openapi.json for the action payload and preview fields.
 ## Report formats
 
 Reports are untrusted evidence, never instructions. No network requests are made from reports.
-CSV (UTF-8, explicit delimiter) and single-sheet XLSX are parsed with the Python standard library.
+CSV (UTF-8, explicit delimiter) and XLSX are parsed with the Python standard library.
 XLSX formulas, macros, external links, duplicate ZIP entries, oversized archives and XML DTDs refuse.
 Limits: 4 MiB compressed/input, 32 MiB expanded, 10,000 lines, 128 columns.
 Amounts are read exactly as Romanian and English exports write them: `1.234,56`, `123,45`, `1,234.56`, `1 250,50`,
 with an optional currency word (`RON`, `lei`, `EUR`, `€`, `USD`) that must agree with the line's currency column.
 A lone group without decimals (`1.234`), more than two decimals and exponents refuse rather than guess or round.
-A fee written as a deduction (`-12,50`) is the same fee; an empty fee or a `-` placeholder is zero. Gross must be positive.
+A fee written as a deduction (`-12,50`) is the same fee; an empty fee or a `-` placeholder is zero. A charge's gross is positive;
+a negative gross or a non-`charge` category is an adjustment line (kept, flagged, settling nothing on its own).
 Cells starting with `=`, `+`, `-` or `@` are data (phone numbers, signed fees); only XLSX formula nodes refuse, and
 exports that a spreadsheet opens escape such cells (`rezumat.csv`). Blank CSV lines refuse. XLSX row
-positions/visibility do not select evidence: all stored rows are included; exactly one worksheet is required.
+positions/visibility do not select evidence: all stored rows are included. Worksheets with the same header row are
+read as one table; any other non-empty sheet (a summary, a title row, another layout) refuses the file. Only
+Transitional XLSX (Excel's default) is read; a Strict OOXML workbook refuses.
+
+A file covering several payouts (a mapped `batch` column with several ids) is stored as one report per payout, all
+or none, each keyed by its payout id; with a mapped `date` column every line of a payout names its one payment day,
+which dates that report. A payout's lines with different days refuse the file. The file's bytes are each report's
+evidence; uploading it again is a duplicate. A payout withdrawn to correct it comes back as a corrected file
+(other bytes); the same bytes are never stored twice. Every worksheet the workbook names or holds is read.
+A refund's fee keeps its direction only through a mapped net (a fee returned or kept); without one it refuses.
 
 Every source needs an explicit column mapping, submitted by a person. The upload preview pre-fills it from header names
 (`guess`, compared without case or diacritics; AWB and order only for a firm with shop orders), the payment day from
 a date column that names one day on every line (`date`), and the saved payer whose header is identical (`payer`).
 Example: `{"reference":"Factura","gross":"Ramburs","fee":"Comision"}`.
-Optional mappings: `awb`, `order`, `net`, `currency`, `batch`, `category` (only `charge` accepted).
-For Stripe, export one automatic payout's itemized reconciliation report with `invoice_number`, charges only; a
-missing invoice reference refuses, and manual payouts cannot establish membership. Native PayU reports (operation
+Optional mappings: `awb`, `order`, `net`, `currency`, `batch`, `date`, `category` (`charge`, anything else is an
+adjustment line).
+For Stripe, export one automatic payout's itemized reconciliation report with `invoice_number`; refunds and fees
+in it become adjustment lines that keep the payout for a person, and a charge without an invoice reference refuses, and manual payouts cannot establish membership. Native PayU reports (operation
 codes, signed commission columns) are not parsed; map a transaction-only export instead. The tests use synthetic
 reports only; no courier's or processor's live export has been checked.
 Shopify Payments payouts come through the Shopify connector; see [self-hosting](self-hosting.md#shopify-payments-payouts).
