@@ -280,10 +280,12 @@ def test_payer_iban_never_falls_back_to_name(ledger, identity, right):
         ({}, {"counterparty": "Synthetic Courier SA"}, "Synthetic Courier S.R.L."),
         ({"payer_name": "Synthetic 北京 SRL"}, {"counterparty": "Synthetic 上海 SRL"}, "SYNTHETIC 北京"),
         ({"payer_name": "Atelier Sa Maison SRL"}, {"counterparty": "Atelier Maison"}, "Atelier Sa Maison"),
+        ({"payer_name": "Atelier Sa SRL"}, {"counterparty": "Atelier"}, "Atelier Sa"),
         ({"payer_cui": "12345678"}, {"counterparty": "Other SRL", "description": "CUI 12345678"}, "Other 12345678"),
         ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE123456789"}, "Other RO123456789"),
+        ({"payer_cui": "12345678"}, {"counterparty": "Other Firm ID 12345678X"}, "Other Firm CUI:12345678"),
     ],
-    ids=["legal_form", "alphabet", "inner_word", "memo", "foreign_vat"],
+    ids=["legal_form", "alphabet", "inner_word", "form_word", "memo", "foreign_vat", "longer_id"],
 )
 def test_first_report_needs_its_own_payer(ledger, identity, wrong, right):
     """With no confirmation gate, only the payer itself can bring a batch's credit."""
@@ -292,6 +294,18 @@ def test_first_report_needs_its_own_payer(ledger, identity, wrong, right):
     with pytest.raises(settlements.SettlementError, match="^credit_missing_or_ambiguous$"):
         collect(ledger, rid, statement(**wrong))
     assert collect(ledger, rid, statement(counterparty=right))
+
+
+def test_report_that_may_be_the_payers_competes(ledger):
+    """A CUI report the credit names only in its memo still competes with a name report for that credit."""
+    rid = setup(ledger)
+    spec = SPEC | {"report_key": "by-cui", "payer_cui": "12345678"}
+    other = settlements.import_report(ledger, "NORD", b"\xef\xbb\xbf" + REPORT, spec)
+    st = statement(description="CUI 12345678")
+    for report in (rid, other):
+        with pytest.raises(settlements.SettlementError):
+            collect(ledger, report, st)
+    assert not ledger.used_txs() and {r["status"] for r in ledger.issued_rows()} == {"open"}
 
 
 def test_refused_batch_credit_stays_out_of_single_invoice_matching(ledger):

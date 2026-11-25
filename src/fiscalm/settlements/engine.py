@@ -125,25 +125,28 @@ def _payer(report: dict, credit: statements.Tx, company: str, *, claim: bool = F
     if report["payer_cui"]:
         # Only on the paying party, as a Romanian CUI (optionally RO): a memo can name anyone's tax id, and a foreign
         # VAT number (DE123456789) is another firm's.
-        cui = rf"(?<![A-Za-z0-9])(?:RO)?{report['payer_cui']}(?!\d)"
+        cui = rf"(?<![A-Za-z0-9])(?:RO)?{report['payer_cui']}(?![A-Za-z0-9])"
         return re.search(cui, credit.counterparty or "", re.I) is not None
     return same_payer(report["payer_name"], credit.counterparty)
 
 
-def _firm(name: str) -> tuple[list[str], set[str]]:
-    """A name's words (`identity.firm_name`, any alphabet) and the legal forms it ends with, removed."""
-    words, forms = firm_name(name).split("-"), set()
-    while len(words) > 1 and words[-1].upper() in companies.LEGAL_FORMS:
-        forms.add(words.pop())
-    return words, forms
+def _readings(name: str) -> list[tuple[list[str], str]]:
+    """A name's words (`identity.firm_name`, any alphabet) as written, and, when its last word is a legal form,
+    without it: (words, the form left out)."""
+    words = firm_name(name).split("-")
+    last = words[-1] if len(words) > 1 and words[-1].upper() in companies.LEGAL_FORMS else ""
+    return [(words, ""), (words[:-1], last)] if last else [(words, "")]
 
 
 def same_payer(named: str, paid: str) -> bool:
-    """The report's payer name is the credit's paying party: the same words, a final legal form missing on one side
-    but never two different ones ('Curier SRL' = 'Curier S.R.L.' = 'Curier', != 'Curier SA'); a form inside a name
-    ('Atelier Sa Maison') is one of its words."""
-    (x, fx), (y, fy) = _firm(named), _firm(paid)
-    return len("".join(x)) >= 6 and x == y and not (fx and fy and fx != fy)
+    """The report's payer name is the credit's paying party: the same words, one final legal form missing on one side
+    but never two different ones ('Curier SRL' = 'Curier S.R.L.' = 'Curier', != 'Curier SA'); a form-like word inside
+    a name ('Atelier Sa Maison', 'Atelier Sa SRL') is one of its words."""
+    return any(
+        len("".join(x)) >= 6 and x == y and not (fx and fy and fx != fy)
+        for x, fx in _readings(named)
+        for y, fy in _readings(paid)
+    )
 
 
 class Resolver:
@@ -239,7 +242,7 @@ def verify(L: Ledger, stored: sqlite3.Row, st: statements.Statement) -> tuple[st
         if (
             net == t.amount
             and o["currency"] == t.currency
-            and _payer(o, t, st.company)
+            and _payer(o, t, st.company, claim=True)  # a report that may be this payer's competes
             and 0 <= (t.date - date.fromisoformat(o["date"])).days <= 14
         ):
             raise SettlementError("competing_reports")
