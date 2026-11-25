@@ -128,12 +128,17 @@ def _reserve(L, tx, what):
         ("unexplained", False),
         ("explained", True),
         ("conflict", False),
+        ("named_on_a_later_read", False),  # first recorded without its payer, then read again naming the client
         ("no_details", False),
     ],
 )
 def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, case, reminded):
     L, iid = reminder
     credit = _client_credit(L, iid)
+    if case == "named_on_a_later_read":
+        blank = _client_credit(L, iid, counterparty="", iban="", desc=credit.description)
+        assert statements.tx_key(blank) == statements.tx_key(credit)
+        L.record_statement(_st(blank))
     L.record_statement(_st(credit))
     if case in ("explained", "conflict"):
         _reserve(L, credit, "issued other" if case == "explained" else "bank reference conflict")

@@ -1607,6 +1607,15 @@ class Ledger:
                             "INSERT OR IGNORE INTO settled_tx VALUES(?,?,?)", (key, "bank reference conflict", now())
                         )
                         self._reference_copy(db, st.company, t, key, iban, True, statement_keys)
+                    elif t.counterparty or t.counterparty_iban:
+                        # The same money read again naming its payer (a parser that learned the layout) keeps that
+                        # evidence when the stored copy named none: who paid is what a client reminder checks.
+                        db.execute(
+                            "UPDATE statement_txs SET tx=? WHERE tx_key=? AND company=? AND (tx IS NULL OR "
+                            "(COALESCE(json_extract(tx,'$.counterparty'),'')='' "
+                            "AND COALESCE(json_extract(tx,'$.counterparty_iban'),'')=''))",
+                            (shown, key, st.company),
+                        )
                     # A row recorded before accounts were (iban NULL) learns its account from the same statement
                     # read again; a recorded account is never overwritten, and another company's row is never touched.
                     db.execute(
