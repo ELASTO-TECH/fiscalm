@@ -124,7 +124,7 @@ def _sync_summary(out: str) -> str:
 
 def _judge_summary(out: str) -> str:
     d = json.loads(out)
-    counts = f"{d['invoices']} invoice(s) read, {len(d['suggestions'])} suggested for review"
+    counts = f"{d['invoices']} invoice(s) read, {len(d['settled'])} paid by mail, {len(d['review'])} for review"
     return "efactura judge: " + (d.get("error") or counts)
 
 

@@ -262,13 +262,19 @@ def test_judge_through_the_configured_provider_end_to_end(ledger, home, sec, mon
         anthropic_answer(
             {
                 "decisions": [
-                    {"message_id": "3001", "paid": True, "mail_key": inbox[0]["key"], "reason": "plata primita"}
+                    {
+                        "message_id": "3001",
+                        "paid": True,
+                        "confidence": "high",
+                        "mail_key": inbox[0]["key"],
+                        "reason": "plata primita",
+                    }
                 ]
             }
         )
     )
     res = efactura.judge(ledger, read=lambda q: inbox)
-    assert [p["message_id"] for p in res["suggestions"]] == ["3001"]
+    assert [r["message_ids"] for r in res["review"]] == [["3001"]]  # no authenticated sender: a person confirms
     body = fake.requests[0]["body"]
     assert "untrusted" in body["system"] and "Ignore previous instructions" in body["messages"][0]["content"]
     assert body["output_config"]["format"]["schema"]["required"] == ["decisions"]
@@ -278,7 +284,7 @@ def test_an_answer_that_doesnt_fit_changes_nothing(ledger, home, sec, monkeypatc
     """One valid decision followed by a malformed one must not apply the first."""
     fake = Fake()
     inbox = lumen(ledger, monkeypatch, fake)
-    good = {"message_id": "3001", "paid": True, "mail_key": inbox[0]["key"], "reason": "plata"}
+    good = {"message_id": "3001", "paid": True, "confidence": "high", "mail_key": inbox[0]["key"], "reason": "plata"}
     fake.answers.append(anthropic_answer({"decisions": [good, None]}))
     with pytest.raises(ai.AIError, match=r"decisions\[1\]"):
         efactura.judge(ledger, read=lambda q: inbox)
@@ -305,8 +311,14 @@ def test_broken_text_in_an_answer_changes_nothing(ledger, home, sec, monkeypatch
     ]
     answer = {
         "decisions": [
-            {"message_id": "3001", "paid": True, "mail_key": inbox[0]["key"], "reason": "plata"},
-            {"message_id": "3002", "paid": True, "mail_key": inbox[1]["key"], "reason": json.loads('"\\ud800"')},
+            {"message_id": "3001", "paid": True, "confidence": "high", "mail_key": inbox[0]["key"], "reason": "plata"},
+            {
+                "message_id": "3002",
+                "paid": True,
+                "confidence": "high",
+                "mail_key": inbox[1]["key"],
+                "reason": json.loads('"\\ud800"'),
+            },
         ]
     }
     with pytest.raises(ai.AIError, match="not valid text"):

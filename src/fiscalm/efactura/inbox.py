@@ -1087,8 +1087,9 @@ def resolve_debit(L: Ledger, co: str, key: str, target: str) -> tuple[str, str]:
 # ------------------------------------------------------------------ card payments: evidence in mail
 # Card/online payments reach the bank statement only at the start of next month, but shops and payment
 # processors confirm them by mail the same day. Reading those mails is judgment, not rules: fiscalm gathers
-# candidate mails per invoice (`evidence`). AI analysis (`judge`) only recommends them;
-# a person must confirm payment.
+# candidate mails per invoice (`evidence`), the AI reads them (`judge`), and the engine decides: a mail settles an
+# invoice on its own only when the AI is sure, that invoice alone fits it and the sender is authenticated;
+# anything less waits for a person (`reviews`). Their later bank debit confirms them (mail_proved).
 
 # Payment processors, and marketplaces whose order mails name the seller (eMAG: "vândute de Mobilier Exemplu").
 PROCESSORS = (
@@ -1120,15 +1121,8 @@ def evidence(L: Ledger, read=None) -> list[dict]:
 
     read = read or (lambda q: imapread.texts(L, *q))
     out = []
-    # paid in part by the user's links: a mail proving "paid" would close its rest too (Ledger refuses it as well)
-    partial = {r[0] for r in L.db.execute("SELECT substr(item, 10) FROM tx_link_items WHERE item LIKE 'efactura %'")}
-    partial.update(key for co in companies.all(L) for key in credited(L, co))
-    for r in list(L.efactura_rows(status=OPEN)) + list(awaiting(L)):
-        if r["parse_error"] or r["doc_type"] != "invoice" or Decimal(r["total"]) <= 0 or r["message_id"] in partial:
-            continue
+    for r in _unpaid(L):
         words = name_words(r["supplier_name"])
-        if not words:
-            continue
         issued = date.fromisoformat(r["issue_date"])
         start, end = issued - timedelta(days=MAIL_DAYS_BEFORE), issued + timedelta(days=MAIL_DAYS_AFTER)
         try:
@@ -1143,16 +1137,13 @@ def evidence(L: Ledger, read=None) -> list[dict]:
                 continue
             if imapread.is_own_sender(m["sender"], L):
                 continue
-            sender, body = f" {_norm(m['sender'])} ", f" {_norm(m['subject'] + ' ' + m['text'])} "
-            by_processor = any(p in m["sender"].lower() for p in PROCESSORS) and any(f" {w} " in body for w in words)
-            if not (any(f" {w} " in sender for w in words) or by_processor):
-                continue
+            by = _sent_by(words, m["sender"], m["subject"] + " " + m["text"])
+            body = f" {_norm(m['subject'] + ' ' + m['text'])} "
             # Only mails about this purchase: its amount or invoice number, or a payment processor's.
             # Newsletters and delivery notices never reach the model.
-            flat = re.sub(r"(\d) +([.,]\d{2})\b", r"\1\2", m["subject"] + " " + m["text"])
-            if not (
-                by_processor
-                or any(a in flat for a in amounts)
+            if not by or not (
+                by == "processor"
+                or any(a in _flat(m["subject"] + " " + m["text"]) for a in amounts)
                 or (len(number.replace(" ", "")) >= 4 and f" {number} " in body)
             ):
                 continue
@@ -1163,6 +1154,7 @@ def evidence(L: Ledger, read=None) -> list[dict]:
                     "date": str(m["date"]),
                     "subject": m["subject"],
                     "text": m["text"][:MAIL_TEXT],
+                    "domain": m.get("domain", ""),
                 }
             )
         mails.sort(key=lambda m: abs((date.fromisoformat(m["date"]) - issued).days))  # closest to the invoice first
@@ -1186,6 +1178,36 @@ def evidence(L: Ledger, read=None) -> list[dict]:
     return out
 
 
+def _unpaid(L: Ledger) -> list:
+    """Whole invoices still to pay (open, or marked by the user and unconfirmed) that a payment mail could prove;
+    one paid in part by the user's links or credited is left out: a mail proving "paid" would close its rest too."""
+    partial = {r[0] for r in L.db.execute("SELECT substr(item, 10) FROM tx_link_items WHERE item LIKE 'efactura %'")}
+    partial.update(key for co in companies.all(L) for key in credited(L, co))
+    return [
+        r
+        for r in [*L.efactura_rows(status=OPEN), *awaiting(L)]
+        if not r["parse_error"]
+        and r["doc_type"] == "invoice"
+        and Decimal(r["total"]) > 0
+        and r["message_id"] not in partial
+        and name_words(r["supplier_name"])
+    ]
+
+
+def _sent_by(words: list[str], sender: str, text: str) -> str:
+    """ "supplier" when the mail's sender names the supplier, "processor" when a payment processor sent it naming the
+    supplier in its text, else "". Names only: a display name proves nothing, authenticated_domain does."""
+    body = f" {_norm(text)} "
+    if any(f" {w} " in f" {_norm(sender)} " for w in words):
+        return "supplier"
+    by_processor = any(p in sender.lower() for p in PROCESSORS) and any(f" {w} " in body for w in words)
+    return "processor" if by_processor else ""
+
+
+def _flat(text: str) -> str:
+    return re.sub(r"(\d) +([.,]\d{2})\b", r"\1\2", text)
+
+
 def _amount_texts(total: str) -> set[str]:
     i, d = f"{Decimal(total):.2f}".split(".")
     th = f"{int(i):,}"
@@ -1200,10 +1222,11 @@ JUDGE_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["message_id", "paid", "mail_key", "reason"],
+                "required": ["message_id", "paid", "confidence", "mail_key", "reason"],
                 "properties": {
                     "message_id": {"type": "string"},
                     "paid": {"type": "boolean"},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "none"]},
                     "mail_key": {"type": "string"},
                     "reason": {"type": "string"},
                 },
@@ -1223,25 +1246,108 @@ Not proof: an order confirmation without payment, a payment link or request, cas
 a pending, failed, refunded or cancelled payment, a proforma, an invoice notice, a mail about another order.
 When in doubt, paid=false.
 
-Answer one decision per invoice: message_id, paid, mail_key (the key of the proving mail, "" if none), and a
-short reason in Romanian (a few words, e.g. "confirmare plată NETOPIA 19.10").
+Answer one decision per invoice: message_id, paid, confidence, mail_key (the key of the proving mail, "" if none),
+and a short reason in Romanian (a few words, e.g. "confirmare plată NETOPIA 19.10").
+confidence: "high" only when the mail plainly confirms this payment and supplier, amount and order all fit;
+"medium" when it probably does but something is unclear; "none" when paid is false.
 
 """
 
 
 def judge(L: Ledger, ask: Callable | None = None, read: Callable | None = None) -> dict:
-    """Suggest payment mails for human review; unverified mail and model answers never settle an invoice."""
+    """One AI reading of the payment mails of unpaid invoices, then the engine's decision (`_act`). Every mail shown
+    is recorded as read for its invoice once the whole answer fits the schema, so it is never sent again."""
     if ask is None and not ai.available(L):
-        return {"invoices": 0, "suggestions": [], "skipped": "no AI provider"}
+        return {"invoices": 0, "settled": [], "review": [], "skipped": "no AI provider"}
     ev = evidence(L, read=read)
     if not ev:
-        return {"invoices": 0, "suggestions": []}
+        return {"invoices": 0, "settled": [], "review": []}
     data = json.dumps(ev, ensure_ascii=False, default=str)
     answer = ask(JUDGE_PROMPT + data) if ask else ai.ask_json(L, JUDGE_PROMPT, data, JUDGE_SCHEMA)
     ai.check(answer, JUDGE_SCHEMA)
-    shown = {e["message_id"]: {m["key"] for m in e["mails"]} for e in ev}
-    suggestions = [d for d in answer["decisions"] if d["paid"] and d["mail_key"] in shown.get(d["message_id"], set())]
-    return {"invoices": len(ev), "suggestions": suggestions}
+    acted = _act(L, ev, answer["decisions"])
+    for e in ev:  # after acting: a run stopped halfway reads the same mails again
+        judged(L, e["message_id"], [m["key"] for m in e["mails"]])
+    return {"invoices": len(ev)} | acted
+
+
+def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> dict:
+    """A paid decision names one of the mails shown for its invoice, else it is dropped. Its mail settles that invoice
+    only when the AI is sure ("high"), names no other invoice with it, the engine finds that invoice alone fits the
+    mail (_fits_mail) and the receiving server authenticated a sender domain of the supplier or a payment processor;
+    otherwise the mail and every invoice it fits wait for a person (set_review)."""
+    mails = {(e["message_id"], m["key"]): m for e in ev for m in e["mails"]}
+    paid = [d for d in decisions if d["paid"] and d["confidence"] in ("high", "medium") and _key(d) in mails]
+    unpaid = _unpaid(L)
+    settled, review = [], []
+    for key in dict.fromkeys(d["mail_key"] for d in paid):
+        named = [d for d in paid if d["mail_key"] == key]
+        mail = mails[_key(named[0])]
+        fits = [r for r in unpaid if _fits_mail(r, mail)]
+        one = named[0]
+        sure = (
+            len(named) == 1 and one["confidence"] == "high" and [r["message_id"] for r in fits] == [one["message_id"]]
+        )
+        if sure and _trusted(fits[0], mail) and _settle(L, one):
+            settled.append(one["message_id"])
+        elif not _mail_used(L, key):
+            ids = sorted({d["message_id"] for d in named} | {r["message_id"] for r in fits})
+            review.append(set_review(L, mail, ids, one["reason"]))
+    return {"settled": settled, "review": review}
+
+
+def _settle(L: Ledger, d: dict) -> bool:
+    judged(L, d["message_id"], [d["mail_key"]])  # the proof's record (ledger _PROOFS)
+    return confirm_by_mail(L, d["message_id"], d["mail_key"], f"mail: {d['reason']}")
+
+
+def _key(d: dict) -> tuple[str, str]:
+    return d["message_id"], d["mail_key"]
+
+
+def _fits_mail(r, mail: dict) -> bool:
+    """The mail is about this invoice by fiscalm's own reading: sent by its supplier or a processor naming it, dated in
+    the invoice's window and showing its exact total."""
+    issued, sent = date.fromisoformat(r["issue_date"]), date.fromisoformat(mail["date"])
+    text = mail["subject"] + " " + mail["text"]
+    return (
+        issued - timedelta(days=MAIL_DAYS_BEFORE) <= sent <= issued + timedelta(days=MAIL_DAYS_AFTER)
+        and bool(_sent_by(name_words(r["supplier_name"]), mail["from"], text))
+        and any(a in _flat(text) for a in _amount_texts(r["total"]))
+    )
+
+
+def _trusted(r, mail: dict) -> bool:
+    """The authenticated sender domain is the supplier's (a word of its name) or a payment processor's."""
+    labels = set(re.split(r"[.-]", mail["domain"]))
+    words = {w.lower() for w in name_words(r["supplier_name"])}
+    return bool(mail["domain"]) and bool(labels & (words | set(PROCESSORS)))
+
+
+def _review_key(mail_key: str) -> str:
+    return f"ef-review:{mail_key}"
+
+
+def set_review(L: Ledger, mail: dict, message_ids: list[str], reason: str) -> dict:
+    """A payment mail the AI read as proof that settled nothing on its own: kept with the invoices it may prove, for a
+    person to confirm one (confirm_by_mail) or dismiss it. Mail text stays out: a person opens the mail."""
+    item = {"mail_key": mail["key"], "message_ids": message_ids, "reason": reason[:200]}
+    item |= {k: mail[k][:200] for k in ("from", "subject", "date")}
+    L.set_meta(_review_key(mail["key"]), json.dumps(item, ensure_ascii=False))
+    return item
+
+
+def reviews(L: Ledger, company: str) -> list[dict]:
+    """The payment mails waiting for a person, with the invoices of `company` they may still prove (unpaid, or marked);
+    one whose mail proved something since, or none of whose invoices are still unpaid, is left out."""
+    unpaid = {r["message_id"] for r in _unpaid(L) if r["company"] == company}
+    out = []
+    for (value,) in L.db.execute("SELECT value FROM meta WHERE key LIKE 'ef-review:%' ORDER BY key"):
+        item = json.loads(value)
+        ids = [m for m in item["message_ids"] if m in unpaid]
+        if ids and not _mail_used(L, item["mail_key"]):
+            out.append(item | {"message_ids": ids})
+    return out
 
 
 def _proof_key(mail_key: str) -> str:

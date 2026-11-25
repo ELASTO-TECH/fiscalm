@@ -729,7 +729,7 @@ echo "$*" >> {calls}
 case "$*" in
   "efactura sync-issued") exit {2 if fails else 0} ;;
   sync) echo '{{"mode":"shadow","actions_needed":[],"fetched":[],"ingested":[],"missing_attachments":[],"drive_archive":[]}}' ;;
-  "efactura judge") echo '{{"invoices":0,"suggestions":[]}}' ;;
+  "efactura judge") echo '{{"invoices":0,"settled":[],"review":[]}}' ;;
 esac
 exit 0
 """)
@@ -743,6 +743,7 @@ exit 0
     assert not {"check", "dispatch", "notify"} & set(ran)  # no agent thread
     log = next((fh / "logs").glob("finance-*.log")).read_text()
     assert ("efactura sync-issued failed (rc=2)" in log) is fails and ("saved rules skipped" in log) is fails
+    assert "efactura judge: 0 invoice(s) read, 0 paid by mail, 0 for review" in log
 
 
 def test_full_identifier_wins_over_bare_digits(ledger, home, sec, monkeypatch):
