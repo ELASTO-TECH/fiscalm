@@ -1009,7 +1009,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = c.add_parser("opened", help="the first month an account existed: its bank's earlier statements don't need it")
     s.add_argument("--company", required=True)
     s.add_argument("--iban", required=True)
-    s.add_argument("--month", required=True, help="YYYY-MM; '' forgets it")
+    s.add_argument("--month", required=True, help="YYYY-MM, or the exact day YYYY-MM-DD; '' forgets it")
     s.set_defaults(fn=cmd_company_opened)
 
     b = sub.add_parser("bank", help="open banking: the install's Enable Banking application and its connections")

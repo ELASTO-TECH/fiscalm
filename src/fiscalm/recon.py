@@ -21,6 +21,7 @@ from fiscalm.bank.intake import (
     import_lock,
     refuse_incomplete,
     refuse_overlap,
+    refuse_unchained,
     statement_ibans,
 )
 from fiscalm.efactura import inbox as efactura
@@ -217,7 +218,8 @@ def ingest_statements(
                 groups.setdefault((o.company, o.month), []).append(o)
             if one_set and (failed or len(groups) > 1):
                 return failed[:1] or [_refused(opened, "Statement set: files of different months or companies")]
-            return failed + [_store_set(ledger, g, home, check, source) for g in groups.values()]
+            # month by month: a month that starts after the 1st is checked against the one before it
+            return failed + [_store_set(ledger, groups[k], home, check, source) for k in sorted(groups)]
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -250,6 +252,7 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
     try:
         st = combine([o.st for o in parts])
         _set_checks(st, parts, check)
+        refuse_unchained(ledger, st)  # under the import lock: the previous month can't change meanwhile
         for o in parts:
             refuse_overlap(ledger, o.st, o.digest, siblings={p.digest for p in parts})
     except StoredStatementUnavailable as exc:

@@ -33,15 +33,19 @@ def text_pdf(lines: list[str], *, font: str = "Helvetica") -> bytes:
 
 def bt_statement(path, cui: str, period: tuple[str, str], accounts, password: str | None = "synthetic"):
     """A synthetic encrypted BT statement PDF laid out as pdftotext reads BT's: the holder's CUI, the period
-    (dd/mm/yyyy, dd/mm/yyyy) and one section per account, (currency, iban, opening, lines), each line
+    (dd/mm/yyyy, dd/mm/yyyy) and one section per account, (currency, iban, opening, lines[, its own period printed
+    above it]), each line
     (dd/mm/yyyy, reference, Decimal amount: below zero a debit). `password=None`: a plain PDF, as BT24 downloads."""
 
     def at(text: str, amount, end: int) -> str:  # an amount right-aligned under its column (Debit ends at 68)
         shown = f"{abs(amount):,.2f}"
         return text.ljust(end - len(shown)) + shown
 
-    lines = ["BANCA TRANSILVANIA S.A.", f"CUI:{cui}", f"EXTRAS CONT Numarul: 6 din {period[0]} - {period[1]}"]
-    for currency, iban, opening, moves in accounts:
+    lines = ["BANCA TRANSILVANIA S.A.", f"CUI:{cui}"]
+    if not accounts or len(accounts[0]) < 5:  # the file's period, unless each section prints its own
+        lines += [f"EXTRAS CONT Numarul: 6 din {period[0]} - {period[1]}"]
+    for currency, iban, opening, moves, *own in accounts:
+        lines += [f"EXTRAS CONT Numarul: 6 din {own[0][0]} - {own[0][1]}"] if own else []
         debit = sum((-a for *_, a in moves if a < 0), opening * 0)
         credit = sum((a for *_, a in moves if a > 0), opening * 0)
         lines += ["CONT 123 Valuta", f"{currency} Cod IBAN: {iban}"]

@@ -312,6 +312,8 @@ class Account:
     # the opening balance plus the lines it holds equals it. None when the format has none (CSV, the bank feed).
     closing: Decimal | None = None
     closing_day: date | None = None
+    # The period the bank printed above this account's section (a BT PDF names one per section); None elsewhere.
+    period: tuple[date, date] | None = None
 
     @property
     def balanced(self) -> bool:
@@ -409,14 +411,20 @@ def parse_text(text: str, company: str) -> Statement:
         cur, cur_lines = None, []
 
     period_start, period_end, one_period = _pdf_period(text)
+    section = None  # a statement header's period since the last account opened: the next account's own
 
     lines = text.splitlines()
     for i, ln in enumerate(lines):
         s = ln.strip()
+        if not in_table and (m := re.search(_HEADER, ln)):
+            section = parse_dmy(m.group(1)), parse_dmy(m.group(2))
         if _opens_account(ln):
             close()
             nxt = lines[i + 1] if i + 1 < len(lines) else ""
-            acct = _pdf_account(nxt)
+            acct, cur_date = _pdf_account(nxt), None  # a section's lines are dated by its own rows only
+            # its own header, else the file's one period; a section under none, in a file of several, has none
+            acct.period = section or ((period_start, period_end) if one_period and period_start else None)
+            section = None
             accounts.append(acct)
             in_table = False
             continue
@@ -442,6 +450,8 @@ def parse_text(text: str, company: str) -> Statement:
                     in_table = False
                 continue
             close()
+            if cur_date is None:
+                raise StatementError("PDF line without a booking date; download a complete statement")
             a1_end = row.end("a1")
             direction = "debit" if abs(a1_end - debit_end) <= abs(a1_end - credit_end) else "credit"
             cur = Tx(
@@ -463,7 +473,9 @@ def parse_text(text: str, company: str) -> Statement:
         if cur is not None:
             cur_lines.append(s)
     close()
-    _pdf_trust(accounts, opening, final, one_period, period_end)
+    _pdf_trust(accounts, opening, final)
+    if periods := [a.period for a in accounts if a.period]:  # the sections' days, not a period printed elsewhere
+        period_start, period_end = min(p[0] for p in periods), max(p[1] for p in periods)
     return Statement(
         company=company, period_start=period_start, period_end=period_end, accounts=accounts, one_period=one_period
     )
@@ -476,14 +488,16 @@ def _pdf_columns(line: str) -> tuple[int, int] | None:
     return None
 
 
+_PERIOD = r"din (\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})"
+_HEADER = r"(?i)\bextras\b.*?" + _PERIOD  # a statement's own header ("EXTRAS CONT ... din"), not a line's text
+
+
 def _pdf_period(text: str) -> tuple[date | None, date | None, bool]:
-    pattern = r"din (\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})"
     period_start = period_end = None
-    m = re.search(pattern, text)
+    m = re.search(_PERIOD, text)
     if m:
         period_start, period_end = parse_dmy(m.group(1)), parse_dmy(m.group(2))
-    # A closing balance is dated by the statement's period: only when the whole file names one period.
-    one_period = len(set(re.findall(pattern, text))) == 1
+    one_period = len(set(re.findall(_PERIOD, text))) == 1
 
     return period_start, period_end, one_period
 
@@ -514,24 +528,21 @@ def _pdf_balance(
         acct.total_credit = parse_amount(row.group("a2"))
 
 
-def _pdf_trust(
-    accounts: list[Account],
-    opening: dict[int, Decimal],
-    final: dict[int, Decimal],
-    one_period: bool,
-    period_end: date | None,
-) -> None:
-    for a in accounts:  # the closing balance counts only when the opening one and the lines add up to it, to the cent
+def _pdf_trust(accounts: list[Account], opening: dict[int, Decimal], final: dict[int, Decimal]) -> None:
+    """The closing balance counts only when the opening one and the lines add up to it, to the cent; it is dated by
+    the period printed above its section, so a section without one, or with a line outside it, proves nothing."""
+    for a in accounts:
         start, end = opening.get(id(a)), final.get(id(a))
         a.trustworthy = bool(
-            one_period
+            a.period
+            and all(a.period[0] <= t.date <= a.period[1] for t in a.txs)
             and start is not None
             and end is not None
             and a.balanced
             and start + a.total_credit - a.total_debit == end
         )
         if a.trustworthy:
-            a.closing, a.closing_day = end, period_end
+            a.closing, a.closing_day = end, a.period[1]
 
 
 def parse_pdf(path: Path, company: str) -> Statement:
