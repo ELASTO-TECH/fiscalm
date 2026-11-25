@@ -418,6 +418,14 @@ def test_texts_and_sent_are_read_only_searches(ledger, fake):
     fake.add(two.as_bytes(), TODAY)
     got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
     assert {m["key"]: m["complete"] for m in got}["imap:two@lumen.example"] is False
+    alt = EmailMessage()  # one text in two forms, the HTML one saying more than the plain one _text reads
+    alt["From"], alt["Subject"], alt["Date"] = two["From"], "Plata", two["Date"]
+    alt["Message-ID"] = "<alt@lumen.example>"
+    alt.set_content("Lumen plata confirmata")
+    alt.add_alternative("<p>Lumen plata <b>confirmata</b></p><p>Payment reversed</p>", subtype="html")
+    fake.add(alt.as_bytes(), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    assert {m["key"]: m["complete"] for m in got}["imap:alt@lumen.example"] is False
     assert fake.verbs() <= ALLOWED
 
 

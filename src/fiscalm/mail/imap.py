@@ -567,8 +567,31 @@ def _bodies(part) -> int:
     return int(part.get_content_type() in ("text/plain", "text/html") and not part.get_filename())
 
 
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"\w+", text.lower()))
+
+
+def _alternatives_agree(msg) -> bool:
+    """Every word of each HTML alternative is in its plain one: _text reads the plain text alone, so an HTML part saying
+    more (a reversal, another firm) would go unread."""
+    for part in msg.walk():
+        if part.get_content_type() != "multipart/alternative":
+            continue
+        texts = {p.get_content_type(): p for p in part.iter_parts() if p.get_content_maintype() == "text"}
+        if "text/plain" in texts and "text/html" in texts:
+            try:
+                plain, rich = texts["text/plain"].get_content(), texts["text/html"].get_content()
+            except Exception:  # a part that can't be decoded: nothing proves they agree
+                return False
+            rich = html.unescape(re.sub(r"<(style|script)\b.*?</\1>|<[^>]+>", " ", rich, flags=re.S | re.I))
+            if not _words(rich) <= _words(plain):
+                return False
+    return True
+
+
 def _text_record(msg, mid: str, end: date, account: integrations.Instance, size: int) -> dict:
-    """complete: the whole message was fetched, it has one text (_text reads only the plain parts of several), its
+    """complete: the whole message was fetched, it has one text (_text reads only the plain parts of several, so they
+    must agree), its
     subject is not clipped and its Date readable (else the date is `end`, a guess): only a complete mail can settle an
     invoice on its own."""
     authserv = RECEIVERS.get(str(account.config.get("host") or "").lower(), "")
@@ -585,7 +608,11 @@ def _text_record(msg, mid: str, end: date, account: integrations.Instance, size:
         "text": _text(msg),
         "domain": authenticated_domain(msg, authserv),
         "firms": account.firm_scope,
-        "complete": size < TEXT_BYTES and _bodies(msg) == 1 and len(subject) < TEXT_MAX and dated,
+        "complete": size < TEXT_BYTES
+        and _bodies(msg) == 1
+        and _alternatives_agree(msg)
+        and len(subject) < TEXT_MAX
+        and dated,
     }
 
 

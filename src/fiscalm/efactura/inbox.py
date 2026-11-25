@@ -1341,13 +1341,16 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], l
 
 
 def _rivals(L: Ledger) -> list:
-    """Every invoice a payment mail may be about, by what is left to pay of it: open, marked or proved by another mail
-    (net of credits and the user's links, as the statement matcher sees them), approved and paid ones. Only an open or
-    marked whole invoice is ever settled (confirm_by_mail); the others are doubt."""
-    # paid ones too: the mail may be the receipt of a purchase a debit already proved
-    out = [r for s in ("linked", "paid") for r in L.efactura_rows(status=s) if not r["parse_error"]]
+    """Every invoice a payment mail may be about: approved, paid (the receipt of a purchase a debit proved), skipped
+    and history ones, and the open, marked or mail-proved ones both by their whole total (a receipt older than a
+    credit) and by what is left of it (net of credits and the user's links, as the statement matcher sees them).
+    Rows repeat an invoice: callers count distinct ids. Only an open or marked whole invoice is ever settled."""
+    from fiscalm import history  # as rivals does: history imports this module
+
+    out = [r for s in ("linked", "paid", "skipped") for r in L.efactura_rows(status=s) if not r["parse_error"]]
     for co in companies.all(L):
         _, rows, have, _ = _open_invoices(L, co)
+        out += [r | {"total": r["gross_total"]} for r in rows] + history.rivals(L, co, "received")
         out += [r | {"total": f"{Decimal(r['total']) - have.get(r['message_id'], Decimal(0)):.2f}"} for r in rows]
     return out
 
@@ -1357,7 +1360,7 @@ def _sure(d: dict, fits: list, mail: dict) -> bool:
     provider authenticated a payment processor as the sender."""
     return (
         d["confidence"] == "high"
-        and [r["message_id"] for r in fits] == [d["message_id"]]
+        and {r["message_id"] for r in fits} == {d["message_id"]}
         and mail["whole"]
         and _names_supplier(fits[0], mail)
         and _trusted(mail)

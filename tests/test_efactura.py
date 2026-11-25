@@ -1010,23 +1010,27 @@ def test_judge_settles_only_a_sure_unique_authenticated_mail(
     assert _judge(ledger, [mail], ("3001", 0, confidence))[1] == []  # the pair is never sent again
 
 
-@pytest.mark.parametrize("case", ["short name word", "credited twin", "twin paid by a debit"])
+@pytest.mark.parametrize(
+    "case", ["short name word", "credited twin", "credited after the receipt", "twin paid by a debit", "skipped twin"]
+)
 def test_judge_settles_nothing_another_firm_or_balance_may_explain(ledger, home, sec, monkeypatch, case):
     supplier = "Q7 AMBIENT SRL" if case == "short name word" else "LUMEN AMBIENT SRL"
     _stored(ledger, monkeypatch, **{"3001": ubl(supplier=supplier, total="240.00", number="F-LUM 1")})
     text = "Z9 Ambient: plata de 240,00 RON acceptata"  # names another firm sharing a word
-    if case == "credited twin":  # 300.00 less a 60.00 credit: 240.00 left of it too
+    if case.startswith("credited"):  # 300.00 less a 60.00 credit leaves 240.00; 240.00 was 240.00 before its credit
         storno = (
             b"<cbc:Note>Storno factura seria TEST nr. 0002 din data 20/10/2026</cbc:Note><cbc:DocumentCurrencyCode>"
         )
         credit = ubl(supplier=supplier, number="COR 2", total="-60.00").replace(b"<cbc:DocumentCurrencyCode>", storno)
-        _stored(
-            ledger, monkeypatch, **{"3002": ubl(supplier=supplier, number="TEST 2", total="300.00"), "3003": credit}
-        )
+        total = "300.00" if case == "credited twin" else "240.00"
+        _stored(ledger, monkeypatch, **{"3002": ubl(supplier=supplier, number="TEST 2", total=total), "3003": credit})
         text = PAID
-    if case == "twin paid by a debit":  # the receipt may be that purchase's
+    if case in ("twin paid by a debit", "skipped twin"):  # the receipt may be that purchase's
         _stored(ledger, monkeypatch, **{"3002": ubl(supplier=supplier, number="F-LUM 2", total="240.00")})
-        assert ledger.mark_efactura_paid("3002", "statement", "a" * 20)
+        if case == "skipped twin":
+            assert ledger.mark_efactura_skipped("3002", "platita din alt cont")
+        else:
+            assert ledger.mark_efactura_paid("3002", "statement", "a" * 20)
         text = PAID
     mail = _mail(NETOPIA, "Plata confirmata", text) | {"domain": "netopia-payments.com", "complete": True}
     assert _judge(ledger, [mail], ("3001", 0, "high"))[0]["settled"] == []
