@@ -134,6 +134,7 @@ class Doc:
     evidence: docs.Evidence | None = None
     fiscal_type: str = ""  # A verified UBL also establishes the type of its PDF copy.
     text: str = field(default="", repr=False)  # the PDF's text, for the AI helper only
+    number_read: str = ""  # a number the AI read in doubt: shown in the question, never grounds for a decision
 
 
 # ------------------------------------------------------------------ reading a document
@@ -783,7 +784,7 @@ def ask_user(L: Ledger, msg: imapread.Message, att: imapread.Attachment, doc: Do
         "company": out.company or None,
         "totals": [list(t) for t in ([out.total] if out.total else doc.totals[:TOTALS_ASKED])],
         "firms": doc.firms,
-        "number": doc.number,
+        "number": doc.number or doc.number_read,
         "date": doc.date or msg.date,
         "supplier": doc.supplier or _vendor(msg),
         "card_last4": doc.card_last4,
@@ -829,13 +830,13 @@ def _ai_would_refuse(L: Ledger, x: ai_extract.Extraction) -> bool:
 
 
 def _printed(text: str, amount: str, currency: str) -> bool:
-    """The amount stands positive on a line of the text in this currency: the line's only one, or none on the line
-    and none other on the document."""
+    """The amount stands positive on a line of the text in this currency, not on a subtotal, tax or discount line:
+    the line's only currency, or none on the line and the document's only one."""
     shown = {_currency(m.group(0)) for m in _CUR.finditer(text)}
     for line in text.splitlines():
         curs = {_currency(m.group(0)) for m in _CUR.finditer(line)}
-        if curs != {currency} and (curs or not shown <= {currency}):
-            continue
+        if (curs or shown) != {currency} or NOT_TOTAL.search(line) or _vat_recap(line):
+            continue  # another currency, none shown at all, or a subtotal, tax or discount line
         for m in ai_extract.AMOUNT.finditer(line):
             if ai_extract.money(m.group(1), m.group(2)) == Decimal(amount) and not _negative(line, m):
                 return True
@@ -873,16 +874,16 @@ def ai_reading(L: Ledger, doc: Doc, data: bytes, *, ask: Callable | None = None)
         return None
     out = replace(
         doc,
-        number=doc.number or x.number,
+        number_read=x.number,
         date=doc.date or x.issue_date,
         supplier=doc.supplier or x.seller_name,
         card_last4=doc.card_last4 or x.card_last4,
     )
     out.refused = ""  # read now: a scan without text waits as a question, never as a silent refusal
     totals = _agreed_totals(doc, x)
-    if not x.confident or _ai_would_refuse(L, x) or totals is None:
+    if not x.confident or x.rejected or _ai_would_refuse(L, x) or totals is None:
         return out  # in doubt: the question stays, with the fields read
-    out.totals = totals
+    out.number, out.totals = doc.number or x.number, totals
     if x.buyer and (not doc.firms or x.buyer in doc.firms):
         out.firms = doc.firms or [x.buyer]
         out.roles = doc.roles | {x.buyer: "buyer"}

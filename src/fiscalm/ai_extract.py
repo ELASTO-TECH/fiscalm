@@ -8,7 +8,9 @@ fails (an unknown field is empty, never guessed):
 - with the document's text at hand, the total, the number and each firm must stand in that text: the AI reads, it
   never adds a value the document doesn't carry;
 - the buyer and the seller are matched to the given firms by the engine (CUI first, then legal name or alias), never
-  taken from the AI's choice; an id and a name naming two different firms leave the party unknown.
+  taken from the AI's choice; an id and a name that disagree leave the party unknown.
+
+A value the AI filled that fails its rule is named in `rejected`: a contradiction, not a gap, so callers stay in doubt.
 
 Reading a local document has no outward effect, so this runs in Sandbox and Live alike, whenever an AI integration is
 configured (AGENTS.md rule 8). The document is untrusted data (rule 5): the prompt says so, and nothing it says
@@ -87,6 +89,7 @@ class Extraction:
     currency: str
     card_last4: str
     confident: bool
+    rejected: tuple[str, ...] = ()  # fields the AI filled that failed their rule: its reading contradicts the document
 
 
 def money(whole: str, cents: str) -> Decimal | None:
@@ -122,45 +125,51 @@ def _number(value: str, text: str) -> str:
     return value if not text or re.search(rf"(?<![\w]){re.escape(value)}(?![\w])", text) else ""
 
 
-def _firm(name: str, tax_id: str, firms: dict[str, companies.Company], text: str) -> str:
-    """The one firm the party's id or name names, matched by fixed rules; standing in the text when there is one."""
+def _firm(name: str, tax_id: str, firms: dict[str, companies.Company], text: str) -> str | None:
+    """The one firm the party's id or name names, matched by fixed rules and standing in the text when there is one;
+    "" for a party that names none of the firms; None when it names one but the evidence disagrees."""
     digits = re.fullmatch(r"(?:RO)?\s*(\d{2,10})", tax_id.strip().upper())
     by_id = {k for k, co in firms.items() if digits and digits.group(1) == co.cui}
     by_name = {k for k, co in firms.items() if name.strip() and co.named_in(name)}
-    if tax_id.strip() and by_name and not by_id:
-        return ""  # an id that is none of the firms' beside a firm's name: not clear
-    found = by_id or by_name
-    if len(found) != 1 or (by_id and by_name and by_id != by_name):
+    if not by_id and not by_name:
         return ""
-    key = found.pop()
+    if (tax_id.strip() and not by_id) or (by_id and by_name and by_id != by_name) or len(by_id or by_name) != 1:
+        return None  # an id that is none of the firms' beside a firm's name, or two firms: not clear
+    key = next(iter(by_id or by_name))
     co = firms[key]
-    return key if not text or co.named_in(text) or co.tax_id_match(text) else ""
+    return key if not text or co.named_in(text) or co.tax_id_match(text) else None
 
 
 def check(raw: dict, firms: dict[str, companies.Company], text: str = "") -> Extraction:
-    """The answer's fields that pass their rule; the others empty. `text` is the document's own text, when read."""
+    """The answer's fields that pass their rule; the others empty and named in `rejected`. `text` is the document's
+    own text, when read."""
     s: dict[str, str] = {k: v if isinstance(v := raw.get(k), str) else "" for k in SCHEMA["properties"]}
     buyer = _firm(s["buyer_name"], s["buyer_tax_id"], firms, text)
     seller = _firm(s["seller_name"], s["seller_tax_id"], firms, text)
     if buyer and buyer == seller:
-        buyer = seller = ""
+        buyer = seller = None
     currency = s["currency"].strip().upper()
+    card = s["card_last4"]
+    checked = {
+        "number": _number(s["number"], text),
+        "issue_date": _day(s["issue_date"].strip()),
+        "total": _total(s["total"].strip(), text),
+        "currency": currency if currency in docs.CURRENCIES else "",
+        "card_last4": card if re.fullmatch(r"\d{4}", card) and card in (text or card) else "",
+    }
+    rejected = [k for k, v in checked.items() if s[k].strip() and not v]
+    rejected += [k for k, v in (("buyer", buyer), ("seller", seller)) if v is None]
     return Extraction(
         doc_type=s["doc_type"] if s["doc_type"] in DOC_TYPES else "other",
-        buyer=buyer,
-        seller=seller,
+        buyer=buyer or "",
+        seller=seller or "",
         buyer_name=s["buyer_name"].strip()[:200],
         buyer_tax_id=re.sub(r"\s+", "", s["buyer_tax_id"]).upper()[:20],
         seller_name=s["seller_name"].strip()[:200],
         seller_tax_id=re.sub(r"\s+", "", s["seller_tax_id"]).upper()[:20],
-        number=_number(s["number"], text),
-        issue_date=_day(s["issue_date"].strip()),
-        total=_total(s["total"].strip(), text),
-        currency=currency if currency in docs.CURRENCIES else "",
-        card_last4=s["card_last4"]
-        if re.fullmatch(r"\d{4}", s["card_last4"]) and s["card_last4"] in (text or s["card_last4"])
-        else "",
+        **checked,
         confident=s["confidence"] == "high",
+        rejected=tuple(rejected),
     )
 
 
