@@ -136,7 +136,8 @@ def _cui_named(cui: str, party: str) -> bool:
     words = re.split(r"[\s,;()]+", party)
     for n, word in enumerate(words):
         bare = word[_TAX_LABEL.match(word).end() :] if _TAX_LABEL.match(word) else word
-        before = words[n - 1].upper() if n else ""
+        # The word before, past lone punctuation and without its own (`DE:`, `DE -`): a country code or a label.
+        before = next((w.strip(":.-/").upper() for w in reversed(words[:n]) if w.strip(":.-/")), "")
         if bare.upper().removeprefix("RO") == cui and not (
             re.fullmatch(r"[A-Z]{2}", before) and before not in {"RO"} | companies.LEGAL_FORMS
         ):

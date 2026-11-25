@@ -285,6 +285,8 @@ def test_payer_iban_never_falls_back_to_name(ledger, identity, right):
         ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE123456789"}, "Other RO123456789"),
         ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH VAT DE\xa0123456789"}, "Other SA 123456789"),
         ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE-123456789"}, "Other, RO 123456789"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH VAT DE: 123456789"}, "Other CUI: 123456789"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE - 123456789"}, "Other - 123456789"),
         ({"payer_cui": "12345678"}, {"counterparty": "Other Kft 12345678-2-41"}, "Other (12345678)"),
         ({"payer_cui": "123456"}, {"counterparty": "Other SRL J40/123456/2026"}, "Other SRL 123456"),
         ({"payer_cui": "12345678"}, {"counterparty": "Other Firm 12345678ă"}, "Other Firm 12345678"),
@@ -299,6 +301,8 @@ def test_payer_iban_never_falls_back_to_name(ledger, identity, right):
         "foreign_vat",
         "spaced_vat",
         "dashed_vat",
+        "colon_vat",
+        "spaced_dash_vat",
         "compound_id",
         "register_no",
         "letter_after",
@@ -344,8 +348,10 @@ def test_a_second_plausible_credit_makes_the_batch_wait(ledger):
     assert not ledger.used_txs() and {r["status"] for r in ledger.issued_rows()} == {"open"}
 
 
-def test_refused_batch_credit_stays_out_of_single_invoice_matching(ledger):
-    """A credit the batch refuses (its CUI only in the memo) is still its payer's: no single invoice takes it."""
+@pytest.mark.parametrize("memo", ["CUI 12345678", "Payout"], ids=["cui_in_memo", "name_only"])
+def test_refused_batch_credit_stays_out_of_single_invoice_matching(ledger, memo):
+    """A credit the batch refuses (its CUI only in the memo, or the payer's name alone) is still its payer's: no
+    single invoice takes it."""
     setup(ledger)
     edit_report(ledger, payer_cui="12345678")
     ledger.add_issued(
@@ -363,7 +369,7 @@ def test_refused_batch_credit_stays_out_of_single_invoice_matching(ledger):
             client_cui="12345678",
         )
     )
-    assert issued.match_statement(ledger, statement(description="CUI 12345678")) == []
+    assert issued.match_statement(ledger, statement(description=memo)) == []
     assert {r["status"] for r in ledger.issued_rows()} == {"open"} and not ledger.used_txs()
 
 
