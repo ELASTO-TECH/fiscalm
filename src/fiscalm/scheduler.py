@@ -37,7 +37,8 @@ STOP_GRACE = 10.0  # seconds a stopped step's process group gets after SIGTERM, 
 RELEASE_AND_PAYMENTS = ((10, ("update-check",), "release check"), (120, ("pay", "redate"), "pay redate"))
 EFACTURA = ((600, ("efactura", "sync"), "efactura sync"), (600, ("efactura", "sync-issued"), "efactura sync-issued"))
 # Only after every matcher ran (sync, EFACTURA): a rule explains what they left, never what a failed one would take.
-RULES = ((120, ("tx-rules",), "saved rules"),)
+# The AI integration then reads what the rules left (ai_explain), with ai.TIMEOUT for its one request.
+RULES = ((660, ("tx-rules",), "saved rules"),)
 SHOPS_AND_UPLOADS = (
     (600, ("shopify-sync",), "Shopify sync"),
     (600, ("invoice", "tick"), "invoice tick"),

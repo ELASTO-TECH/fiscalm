@@ -232,11 +232,13 @@ between them. The transaction list and sheets show those explanations.
 | **Bon** | a card debit: the receipt that proves it | fiscalm (the receipt's amount and day) |
 | **Transfer între conturi** | money between two of the firm's own accounts | fiscalm (both ends seen, one naming the other's account), or the user |
 | **Avans de trezorerie** | the owner's money in or out | the user, or an association the user made |
-| **Fără document** | a bank fee, interest, a personal card spend: a label the user picks, kept for the accountant | the user, or an association the user made |
+| **Fără document** | a bank fee, interest, a personal card spend: a label the user picks, kept for the accountant | the user, an association the user made, or the AI integration when sure and no open document fits the amount |
 
 A transaction without one is **de explicat**. That list is the work: Acasă counts it and Tranzacții
 opens on it. fiscalm proposes an explanation when it has one and never applies on its own a proposal that could be
-wrong (AGENTS.md non-negotiables 2 and 3); the user confirms it or picks something else.
+wrong (AGENTS.md non-negotiables 2 and 3); the user confirms it or picks something else. With an AI integration, the
+lines left to explain get its proposal (Propunere AI: a label, an advance, a partner and the invoices that add up to
+the amount), checked by the engine and confirmed on the sheet.
 
 ### The user explains what fiscalm can't
 

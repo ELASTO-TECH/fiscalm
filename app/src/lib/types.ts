@@ -606,7 +606,7 @@ export type TxLink = {
   note: string;
   /** Made by no person: a saved rule, the bank's own fee or interest line, or both ends of a transfer between the
    * firm's accounts. Undoing it leaves the line to people. */
-  rule: "saved" | "bank" | "transfer" | null;
+  rule: "saved" | "bank" | "transfer" | "ai" | null;
   by: string;
   at: string;
 };
@@ -615,7 +615,9 @@ export type Proposal =
   | { kind: "invoices"; invoices: string[] }
   | { kind: "receipt"; document: string }
   | { kind: "settlement"; settlement: string }
-  | { kind: "remembered"; memory: string; as: { kind: LinkKind; partner: string | null; reason: string | null; note: string | null } };
+  | { kind: "remembered"; memory: string; as: { kind: LinkKind; partner: string | null; reason: string | null; note: string | null } }
+  /** The AI integration's checked proposal (ai_explain): never applied by the app; `invoices` only when they add up. */
+  | { kind: "ai"; as: { kind: LinkKind; partner: string | null; reason: string | null; note: string | null }; invoices: string[] };
 /** What the user asked to be remembered (Ține minte): kept for an account, a card or a merchant. */
 export type Remembered = {
   id: string; by: MemoryKey; shown: string; kind: LinkKind; partner: string | null; reason: string | null; note: string;

@@ -44,7 +44,7 @@ def test_fresh_schema_matches_dev_before_migrations(ledger):
     )
     # Core product schema, including removal of legacy mappings and per-firm account permissions; upgrades are checked separately.
     assert hashlib.sha256(json.dumps(rows).encode()).hexdigest() == (
-        "bb15c5174ccfd3d421582cb6e2c0f577a12b62a912bd1f209dcde6beefc4bb46"
+        "0efc028f84339423e71d4f25e4a334187577c90d5b9d6a8c75e1f36a9702fe73"
     )
     assert not ledger.db.execute("SELECT 1 FROM sqlite_master WHERE name='user_firms'").fetchone()
     assert m.read_version(ledger.path) == m.SCHEMA_VERSION

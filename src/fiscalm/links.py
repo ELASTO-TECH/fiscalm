@@ -24,6 +24,7 @@ import json
 import re
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 
@@ -86,9 +87,10 @@ def need(L: Ledger, company: str) -> Callable[[str], Decimal]:
     """What an item asks for before any explanation: an issued invoice its total less its credit notes, a received
     invoice its total, a payment row its amount. Read when asked, so inside the caller's write transaction."""
     credited: dict[str, Decimal] | None = None
+    received: dict[str, Decimal] | None = None
 
     def of(item: str) -> Decimal:
-        nonlocal credited
+        nonlocal credited, received
         kind, _, ident = item.partition(" ")
         if kind == "receipt":  # a bon asks for nothing: the debit it explains is its amount
             return Decimal(0)
@@ -98,12 +100,10 @@ def need(L: Ledger, company: str) -> Callable[[str], Decimal]:
             r = L.issued(ident)
             return Decimal(r["total"]) - credited.get(ident, Decimal(0)) if r else Decimal(0)
         if kind == "efactura":
+            if received is None:
+                received = efactura.credited(L, company)
             r = L.efactura(ident)
-            return (
-                max(Decimal(0), Decimal(r["total"]) - efactura.credited(L, company).get(ident, Decimal(0)))
-                if r
-                else Decimal(0)
-            )
+            return max(Decimal(0), Decimal(r["total"]) - received.get(ident, Decimal(0))) if r else Decimal(0)
         p = L.payment(ident)
         return Decimal(p["amount"]) if p else Decimal(0)
 
@@ -309,15 +309,21 @@ def _advance(L: Ledger, company: str, key: str, who: str) -> Callable[[], dict]:
 
 
 def other_end(L: Ledger, company: str, key: str, t: statements.Tx, *, but: str = "") -> str | None:
-    """The other end of a transfer between the firm's accounts, when exactly one is on record and free: the opposite
+    """The one other end of a transfer (ends), or None when there is none or several."""
+    found = ends(L, company, key, t, but=but)
+    return found[0] if found and len(found) == 1 else None
+
+
+def ends(L: Ledger, company: str, key: str, t: statements.Tx, *, but: str = "") -> list[str] | None:
+    """The possible other ends of a transfer between the firm's accounts, on record and free: the opposite
     direction, the same amount and currency, on another of its accounts (the one the transfer names, when it names one
     of the firm's), naming this account or none, not a credit a Decontare waits on, at most BOUNDARY_DAYS apart. A
-    transfer to an account that isn't the firm's has none. `but`: a transaction whose reservation doesn't count (the
+    transfer to an account that isn't the firm's has none; None when a same-amount line can't be read. `but`: a transaction whose reservation doesn't count (the
     one being explained, asking from the other end). Read under the write lock (Ledger.link_tx runs the build)."""
     own = companies.get(company, L=L).own_ibans
     to = companies.normalize_iban(t.counterparty_iban)
     if to and to not in own:
-        return None
+        return []
     lo, hi = (t.date - timedelta(days=BOUNDARY_DAYS)).isoformat(), (t.date + timedelta(days=BOUNDARY_DAYS)).isoformat()
     rows = L.db.execute(
         "SELECT tx_key, tx FROM statement_txs WHERE company=? AND direction=? AND amount=? AND tx_key!=? AND day BETWEEN ? "
@@ -349,8 +355,7 @@ def other_end(L: Ledger, company: str, key: str, t: statements.Tx, *, but: str =
             and not (other["direction"] == "credit" and _awaits_settlement(L, company, r["tx_key"]))
         )
 
-    found = [r["tx_key"] for r in rows if fits(r)]
-    return found[0] if len(found) == 1 else None
+    return [r["tx_key"] for r in rows if fits(r)]
 
 
 def _transfer(L: Ledger, company: str, key: str) -> Callable[[], dict]:
@@ -519,6 +524,8 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
     invoices it fits) or waiting for its invoice is left to people. Written by Ledger.link_tx under the write lock,
     which checks again what a person may have decided since the rows were read and leaves a line naming an open
     invoice to a person (_untouched). Returns the keys explained."""
+    # the AI's proposal (ai_explain) yields to every rule
+    rows = [r | {"proposal": None} if (r["proposal"] or {}).get("kind") == "ai" else r for r in rows]
     free = {r["id"] for r in rows if not (r["explanation"] or r["proposal"] or r["awaiting"]) and r["can_link"]}
     done = []
     for r in rows:
@@ -546,6 +553,38 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
             continue
         done.append(r["id"])
     return done
+
+
+def apply_ai_label(L: Ledger, company: str, key: str, label: str, note: str) -> bool:
+    """A Fără document label the AI integration is sure of (ai_explain), written as an explanation no person made
+    (rule 'ai'): refused as a person's label would be, while anybody decided otherwise since (_untouched), and while
+    an open item is exactly the line's amount (fits_open_amount), the line names one of the firm's accounts or has a
+    transfer's other end (other_end), a receipt its amount in either currency whatever its sign, or a saved
+    rule now speaks for the line (proposals), all under the write lock."""
+    labelled = _labelled(L, company, key, label, note)
+
+    def unfit() -> dict:
+        t = _transaction(L, company, key)[0]
+        booked = replace(t, amount=abs(t.amount), orig_amount=None, orig_currency=None)
+        sizes = [booked] + ([replace(t, amount=abs(t.amount), orig_amount=abs(t.orig_amount))] if t.orig_amount else [])
+        receipts = recon._receipts(L, company) if t.direction == "debit" else []
+        own = companies.get(company, L=L).own_ibans
+        if (
+            fits_open_amount(L, company, t)
+            or companies.normalize_iban(t.counterparty_iban) in own  # money between the firm's accounts
+            or ends(L, company, key, t) != []  # any possible other end, or one fiscalm can't read
+            or any(recon.match_receipts([s], receipts) for s in sizes)
+            or proposals(company, [t], L.memories(company), L)[0]
+        ):
+            raise LinkRefused("changed")
+        return labelled()
+
+    build = _untouched(L, company, key, None, unfit)
+    try:
+        L.link_tx(company, key, "", build, need(L, company), None, "ai")
+    except LinkRefused:
+        return False
+    return True
 
 
 def _free_other_end(L: Ledger, company: str, key: str, free: set[str]) -> str | None:
@@ -631,6 +670,35 @@ def names_open_invoice(L: Ledger, company: str, t: statements.Tx) -> bool:
         "AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)"
     )
     return any(names(r["number"] or "") for r in L.db.execute(sql, (company,)))
+
+
+def fits_open_amount(L: Ledger, company: str, t: statements.Tx) -> bool:
+    """Something the line may pay or collect is left at exactly its amount, in its currency or its card's original one
+    (signs ignored): an issued invoice for a credit; a received invoice or an unpaid payment row for a debit. A label
+    would hide it. One pass over the company's open items; read under the write lock."""
+    amounts = {(t.currency, abs(t.amount))}
+    if t.orig_amount is not None and t.orig_currency:
+        amounts.add((t.orig_currency, abs(t.orig_amount)))
+    queries = (
+        [  # an invoice whose total could not be read fits no amount
+            "SELECT 'issued ' || message_id, currency FROM issued WHERE company=? AND status IN ('open','marked') "
+            "AND total IS NOT NULL AND parse_error IS NULL"
+        ]
+        if t.direction == "credit"
+        else [
+            "SELECT 'efactura ' || message_id, currency FROM efactura WHERE company=? AND total IS NOT NULL "
+            "AND parse_error IS NULL AND (status IN ('open','linked') OR status='paid' AND paid_tx IS NULL)",
+            "SELECT 'payment ' || item_id, 'RON' FROM payments WHERE company=? AND status IN ('pending','exported')",
+        ]
+    )
+    items = [tuple(r) for q in queries for r in L.db.execute(q, (company,))]
+    done: dict[str, Decimal] = defaultdict(Decimal)
+    for r in L.db.execute(
+        "SELECT item, amount FROM tx_link_items JOIN tx_links USING(tx_key) WHERE company=?", (company,)
+    ):
+        done[r["item"]] += Decimal(r["amount"])
+    left = need(L, company)
+    return any((cur or "RON", left(item) - done[item]) in amounts for item, cur in items)
 
 
 def _decided(L: Ledger, key: str) -> bool:
