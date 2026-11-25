@@ -53,6 +53,9 @@ USER = "user:"
 # An e-Factura row the user marked paid ("Marchează ca plătită", `efactura mark-paid` without a mail): paid in
 # their word, but not confirmed until a statement debit or a payment mail proves it.
 USER_MARKED = f"status='paid' AND paid_tx IS NULL AND paid_note LIKE '{USER}%'"
+# Proved paid by a payment mail (`ef-proof:<mail key>`): its bank debit, when the statement brings it, takes the mail's
+# place as the proof; the mail stays reserved for this invoice (settled_tx), so it never proves another.
+MAIL_PROVED = "status='paid' AND paid_tx LIKE 'ef-proof:%'"
 
 
 # The display name of the account recorded as having done something (`by_name`), never its id; "" for none or the CLI.
@@ -1768,10 +1771,12 @@ class Ledger:
         how: tuple[str, str] | None = None,
     ) -> bool:
         """Open or skipped -> paid; a row the user marked paid (still unconfirmed) takes the proof (a debit or a mail),
-        never a second the user mark. `how`: the person's (paid_method, paid_detail), checked by efactura.paid_method;
-        a fact kept on the row, never proof. A proof closing a marked row keeps how the person said they paid."""
+        never a second the user mark; a row a mail proved (MAIL_PROVED) takes its statement debit. `how`: the person's
+        (paid_method, paid_detail), checked by efactura.paid_method; a fact kept on the row, never proof. A proof
+        closing a marked row keeps how the person said they paid."""
         note = audit.note(note)
         method, detail = how or (None, None)
+        debit = statement_tx(tx) is not None
         with self.tx() as db:
             if not self._card_proof("efactura", message_id, tx):
                 return False
@@ -1780,9 +1785,9 @@ class Ledger:
             cur = db.execute(
                 "UPDATE efactura SET status='paid', paid_at=?, paid_note=?, paid_tx=?, "
                 "paid_method=COALESCE(?,paid_method), paid_detail=COALESCE(?,paid_detail) WHERE message_id=? "
-                f"AND (status IN ('open','skipped') OR ({USER_MARKED} AND ? NOT LIKE '{USER}%')) "
+                f"AND (status IN ('open','skipped') OR ({USER_MARKED} AND ? NOT LIKE '{USER}%') OR ({MAIL_PROVED} AND ?)) "
                 f"AND (? IS NULL OR {unlinked('efactura')})",  # a proof never closes one paid in part
-                (now(), note, tx, method, detail, message_id, note, tx),
+                (now(), note, tx, method, detail, message_id, note, debit, tx),
             )
             if cur.rowcount and tx and not tx.startswith(("bon:", "ef-proof:")) and to_iban:
                 db.execute(

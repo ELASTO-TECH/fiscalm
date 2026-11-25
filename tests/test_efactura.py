@@ -345,6 +345,42 @@ def test_user_mark_never_takes_the_debit_of_an_open_invoice(ledger, home, sec, m
     assert efactura.match_statement(ledger, _debit_st(plain, named)) == ["3001"]
 
 
+def test_a_mail_proof_is_confirmed_by_its_later_debit_once(ledger, home, sec, monkeypatch):
+    import threading
+
+    from fiscalm.ledger import Ledger
+
+    _stored(ledger, monkeypatch, **{"3001": ubl(), "3002": ubl(number="RMBU 2222603", issue="2026-10-21")})
+    efactura.judged(ledger, "3001", ["imap:proof"])
+    assert efactura.confirm_by_mail(ledger, "3001", "imap:proof", "mail: plata confirmata")
+    plain = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
+    assert efactura.match_statement(ledger, _debit_st(plain)) == []  # fits the proved one and the open one
+    assert ledger.efactura("3001")["paid_tx"] == "ef-proof:imap:proof" and ledger.ambiguous("NORD")
+    assert ledger.mark_efactura_skipped("3002", "nu e de plata")
+    twins = [plain, _tx("250.00", date(2026, 10, 31), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata 2")]
+    ledger.record_statement(_debit_st(*twins))
+    gate, won = threading.Barrier(2), []
+
+    def caller(t):  # two connections, each sure its debit is the invoice's
+        L = Ledger()
+        gate.wait()
+        won.append(L.mark_efactura_paid("3001", f"statement {t.date}", statements.tx_key(t), to_iban=SUPPLIER_IBAN))
+        L.close()
+
+    threads = [threading.Thread(target=caller, args=(t,)) for t in twins]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(won) == [False, True]
+    paid_tx = ledger.efactura("3001")["paid_tx"]
+    assert paid_tx in {statements.tx_key(t) for t in twins}
+    assert {"ef-proof:imap:proof", paid_tx} <= ledger.used_txs()  # the mail still proves nothing else
+    assert ledger.paid_proofs("NORD")["efactura 3001"] == paid_tx
+    assert efactura.match_statement(ledger, _debit_st(*twins)) == [] and ledger.efactura("3001")["paid_tx"] == paid_tx
+    assert not efactura.confirm_by_mail(ledger, "3002", "imap:proof", "mail: plata confirmata")
+
+
 def test_withdrawn_invoice_is_confirmed_by_its_debit(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"3001": ubl()})
     item_id = efactura.approve(ledger, "3001", origin="person")["item_id"]

@@ -36,7 +36,7 @@ from fiscalm.bank import statements
 from fiscalm.efactura import client as anaf, partners as partner_anaf
 from fiscalm.efactura.credits import credited, net_invoices
 from fiscalm.identity import partner_id, tax_token
-from fiscalm.ledger import BON_PAID, USER_MARKED, Ledger, covered, finance_home, now, unlinked, user_note
+from fiscalm.ledger import BON_PAID, MAIL_PROVED, USER_MARKED, Ledger, covered, finance_home, now, unlinked, user_note
 from fiscalm.mail import imap as imapread
 from fiscalm.payments import engine as pay
 from fiscalm.payments.orders import PaymentItem
@@ -82,6 +82,13 @@ def awaiting(L: Ledger, company: str | None = None) -> list:
     if company:
         q, args = q + " AND company=?", [company]
     return net_invoices(L, L.db.execute(q + " ORDER BY paid_at DESC, message_id", args).fetchall())
+
+
+def mail_proved(L: Ledger, company: str) -> list:
+    """Invoices a payment mail proved paid whose bank debit hasn't been seen yet (ledger.MAIL_PROVED): a debit
+    that fits one confirms it in the mail's place, so it is never left unexplained nor taken by another invoice."""
+    rows = L.db.execute(f"SELECT * FROM efactura WHERE {MAIL_PROVED} AND company=? ORDER BY message_id", (company,))
+    return net_invoices(L, rows.fetchall())
 
 
 def bon_paid(L: Ledger, company: str) -> list:
@@ -700,7 +707,12 @@ def _named_only(L: Ledger, company: str) -> Callable[[statements.Tx, set], bool]
     supplier: it settles nothing and waits for the user (note_ambiguous), whose answer remembers the name."""
     rows = {
         r["message_id"]: r
-        for r in [*L.efactura_rows(status=OPEN, company=company), *awaiting(L, company), *bon_paid(L, company)]
+        for r in [
+            *L.efactura_rows(status=OPEN, company=company),
+            *awaiting(L, company),
+            *mail_proved(L, company),
+            *bon_paid(L, company),
+        ]
     }  # a bon's card debit is found by name too
     known = statement_partner(L, company)
 
@@ -840,9 +852,11 @@ def _reference(number: str | None) -> str:
 
 
 def _open_invoices(L: Ledger, company: str):
-    """The received invoices still to pay in full (open or marked), and what rivals needs to see the rest."""
+    """The received invoices whose debit is still to come (open, marked, or proved by a mail), and what rivals needs to
+    see the rest."""
     have = covered(L, company, "efactura")
-    rows = [r for r in [*L.efactura_rows(status=OPEN, company=company), *awaiting(L, company)] if not r["parse_error"]]
+    rows = [*L.efactura_rows(status=OPEN, company=company), *awaiting(L, company), *mail_proved(L, company)]
+    rows = [r for r in rows if not r["parse_error"]]
     credits = credited(L, company)
     rows = net_invoices(L, rows)
     invoices = [r for r in rows if r["message_id"] not in have and r["message_id"] not in credits]
@@ -908,7 +922,8 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
 
 def _settle_debits(L: Ledger, st: statements.Statement) -> list[str]:
     marked = awaiting(L, st.company)
-    open_rows = [r for r in [*L.efactura_rows(status=OPEN, company=st.company), *marked] if not r["parse_error"]]
+    open_rows = [*L.efactura_rows(status=OPEN, company=st.company), *marked, *mail_proved(L, st.company)]
+    open_rows = [r for r in open_rows if not r["parse_error"]]
     if not open_rows and not bon_paid(L, st.company):
         return []
     used = L.used_txs()
