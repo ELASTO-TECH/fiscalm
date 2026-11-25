@@ -23,6 +23,7 @@ import re
 import unicodedata
 import zipfile
 import zlib
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
@@ -1167,6 +1168,7 @@ def evidence(L: Ledger, read=None) -> list[dict]:
                     "date": str(m["date"]),
                     "subject": m["subject"],
                     "text": m["text"][:MAIL_TEXT],
+                    "whole": len(m["text"]) <= MAIL_TEXT,  # a cut mail may hide another firm or a refund
                     "domain": m.get("domain", ""),
                     "firms": m.get("firms", "all"),
                 }
@@ -1280,14 +1282,15 @@ def judge(L: Ledger, ask: Callable | None = None, read: Callable | None = None) 
     ev = evidence(L, read=read)
     if not ev:
         return {"invoices": 0, "settled": [], "review": []}
-    shown = [e | {"mails": [{k: v for k, v in m.items() if k != "firms"} for m in e["mails"]]} for e in ev]
+    shown = [e | {"mails": [{k: m[k] for k in m if k not in ("firms", "whole")} for m in e["mails"]]} for e in ev]
     data = json.dumps(shown, ensure_ascii=False, default=str)
     answer = ask(JUDGE_PROMPT + data) if ask else ai.ask_json(L, JUDGE_PROMPT, data, JUDGE_SCHEMA)
     ai.check(answer, JUDGE_SCHEMA)
+    decisions = _coherent(ev, answer["decisions"])
     with L.tx():  # every unpaid invoice read and every proof written in one view: no rival appears in between
-        settled, review = _act(L, ev, answer["decisions"])
-    answered = {d["message_id"] for d in answer["decisions"]}
-    for e in ev:  # after acting, and only what the AI answered: the rest is read again next time
+        settled, review = _act(L, ev, decisions)
+    answered = {d["message_id"] for d in decisions}
+    for e in ev:  # after acting, and only what the AI answered clearly: the rest is read again next time
         if e["message_id"] in answered:
             judged(L, e["message_id"], [m["key"] for m in e["mails"]])
     # ids only: mail text and the AI's words stay in the ledger, never in the command's output
@@ -1298,6 +1301,20 @@ def judge(L: Ledger, ask: Callable | None = None, read: Callable | None = None) 
     }
 
 
+def _coherent(ev: list[dict], decisions: list[dict]) -> list[dict]:
+    """The decisions to act on: exactly one per invoice shown, and a paid one names one of that invoice's mails. An
+    invoice answered twice, or paid by a mail it wasn't shown, is not answered: its mails are read again next time."""
+    shown = {e["message_id"]: {m["key"] for m in e["mails"]} for e in ev}
+    count = Counter(d["message_id"] for d in decisions)
+    return [
+        d
+        for d in decisions
+        if count[d["message_id"]] == 1
+        and d["message_id"] in shown
+        and (not d["paid"] or d["mail_key"] in shown[d["message_id"]])
+    ]
+
+
 def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], list[dict]]:
     """A paid decision names one of the mails shown for its invoice, else it is dropped. Its mail settles that invoice
     only when the AI is sure ("high"), names no other invoice with it, the engine finds that invoice alone fits the
@@ -1305,17 +1322,14 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], l
     otherwise the mail and every invoice of its mailbox's firms it fits wait for a person (set_review)."""
     mails = {(e["message_id"], m["key"]): m for e in ev for m in e["mails"]}
     paid = [d for d in decisions if d["paid"] and d["confidence"] in ("high", "medium") and _key(d) in mails]
-    unpaid = _unpaid(L)
+    # an approved invoice still to pay is a rival too, though only an open or marked one is settled
+    unpaid = _unpaid(L) + [r for r in L.efactura_rows(status="linked") if not r["parse_error"]]
     settled, review = [], []
     for key in dict.fromkeys(d["mail_key"] for d in paid):
         named = [d for d in paid if d["mail_key"] == key]
-        mail = mails[_key(named[0])]
+        mail, one = mails[_key(named[0])], named[0]
         fits = [r for r in unpaid if _fits_mail(r, mail)]  # any firm's: a twin elsewhere is doubt too
-        one = named[0]
-        sure = (
-            len(named) == 1 and one["confidence"] == "high" and [r["message_id"] for r in fits] == [one["message_id"]]
-        )
-        if sure and _trusted(mail) and _settle(L, one):
+        if len(named) == 1 and _sure(one, fits, mail) and _settle(L, one):
             settled.append(one["message_id"])
         elif not _mail_used(L, key):
             ids = {d["message_id"] for d in named} | {
@@ -1325,10 +1339,29 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], l
     return settled, review
 
 
+def _sure(d: dict, fits: list, mail: dict) -> bool:
+    """The AI is sure, the invoice is the only one the whole mail fits, its supplier is named in full, and the mailbox's
+    provider authenticated a payment processor as the sender."""
+    return (
+        d["confidence"] == "high"
+        and [r["message_id"] for r in fits] == [d["message_id"]]
+        and mail["whole"]
+        and _names_supplier(fits[0], mail)
+        and _trusted(mail)
+    )
+
+
+def _names_supplier(r, mail: dict) -> bool:
+    """Every word of the supplier's name in the mail: one shared word ("SERVICES") names another firm as well."""
+    words = set(_norm(mail["subject"] + " " + mail["text"]).split())
+    return set(name_words(r["supplier_name"])) <= words
+
+
 def _settle(L: Ledger, d: dict) -> bool:
-    """The proof and its record in one transaction (_act's): a stop between them would hide the mail, settle nothing."""
+    """The proof and its record in one transaction (_act's): a stop between them would hide the mail, settle nothing.
+    The note is fiscalm's own: the AI's words never reach the invoice."""
     judged(L, d["message_id"], [d["mail_key"]])  # the proof's record (ledger _PROOFS)
-    return confirm_by_mail(L, d["message_id"], d["mail_key"], f"mail: {d['reason']}")
+    return confirm_by_mail(L, d["message_id"], d["mail_key"], "mail: payment confirmation read by the AI")
 
 
 def _key(d: dict) -> tuple[str, str]:
@@ -1347,12 +1380,18 @@ def _fits_mail(r, mail: dict) -> bool:
     )
 
 
+# An amount as written: digits, grouped by spaces, dots or commas or not, then two decimals ("1 240,00", "1,240.00").
+_MONEY = re.compile(r"(?<![\d.,])(\d{1,3}(?:[ \u00a0.,]\d{3})+|\d+)[.,](\d{2})(?![\d])")
+
+
 def _shows_total(text: str, total: str, currency: str) -> bool:
-    """The whole amount (not a part of 1240,00) written next to the invoice's currency (lei for RON)."""
+    """The whole amount (never a part of 1 240,00) equals the total, written next to the invoice's currency."""
     cur = "RON|LEI|LEU" if currency == "RON" else re.escape(currency)
-    for a in _amount_texts(total):
-        num = rf"(?<![\d.,]){re.escape(a)}(?![.,]?\d)"
-        if re.search(rf"\b(?:{cur})\b\s*{num}|{num}\s*(?:{cur})\b", text, re.I):
+    for m in _MONEY.finditer(text):
+        if Decimal(re.sub(r"\D", "", m.group(1)) + "." + m.group(2)) != Decimal(total):
+            continue
+        before, after = text[max(0, m.start() - 8) : m.start()], text[m.end() : m.end() + 8]
+        if re.search(rf"\b(?:{cur})\s*$", before, re.I) or re.search(rf"^\s*(?:{cur})\b", after, re.I):
             return True
     return False
 
