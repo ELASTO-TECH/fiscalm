@@ -55,8 +55,6 @@ ACTION_FIELDS = {
     "emag-refund": (("id",), ()),
     "emag-resolve": (("id",), ()),
 }
-# Roles a bearer token never holds: their routes always answer 403, so they are not tools.
-APP_ONLY_ROLES = ("manage_rules", "manage_integrations")
 
 
 def definitions(scope: str) -> list[dict]:
@@ -82,7 +80,7 @@ def definitions(scope: str) -> list[dict]:
         specs["get_invoicing_" + kind] = ("invoicing_" + kind, fields, tuple(fields))
     if scope == "write":
         for op, spec in invoicing_api.ACTIONS.items():
-            if not spec.public or spec.role in APP_ONLY_ROLES:
+            if not spec.public or spec.role != "member":  # a bearer holds no other role: always 403, not a tool
                 continue
             body = spec.public_schema
             fields = {"co": CO, "body": body}
@@ -102,7 +100,7 @@ def definitions(scope: str) -> list[dict]:
             "annotations": {
                 "readOnlyHint": not (resource == "action" or name.startswith("invoicing_")),
                 "openWorldHint": resource == "action" or name.startswith("invoicing_"),
-                "destructiveHint": (resource == "action" and name not in ("action_check", "action_compose"))
+                "destructiveHint": (resource == "action" and name != "action_check")
                 or resource
                 in (
                     "invoicing_issue",

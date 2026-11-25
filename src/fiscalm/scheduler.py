@@ -163,7 +163,7 @@ def _pipeline(run: Run, home: Path, today: date, check: float) -> int:
         return rc
     # Anonymous release reads are allowed in shadow; the company gate still owns startup.
     _steps(run, RELEASE_AND_PAYMENTS)
-    # Mail, statements, payment files, reports (read-only and local in shadow; Drive only live).
+    # Mail, statements, payment files (read-only and local in shadow; Drive only live).
     matched = _summarised(run, ("sync",), 900, _sync_summary)
     # ANAF received and issued invoices (read-only toward ANAF), then the AI reading of payment mails.
     if _steps(run, EFACTURA) and matched:
