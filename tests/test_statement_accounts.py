@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+from contextlib import closing
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -14,7 +15,7 @@ from test_camt import complete, fake_pdf, parse, write, xml
 
 from fiscalm import companies, integrations, pack, recon
 from fiscalm.bank import banking_days, coverage, intake as statement_intake, statements, upload
-from fiscalm.ledger import finance_home
+from fiscalm.ledger import Ledger, finance_home
 from fiscalm.mail import imap as imapread, invoices as mail_invoices
 from fiscalm.payments import engine as pay
 from fiscalm.pdftext import pdf_text
@@ -56,6 +57,16 @@ def test_an_account_in_another_currency_than_the_firms_is_refused(ledger, tmp_pa
     # nor does it stand as a neighbouring month's evidence
     wrong = SimpleNamespace(st=parse(tmp_path, xml(iban=ron, currency="EUR")))
     assert recon._checked({("NORD", "2026-10"): [wrong]}, None) == []
+
+
+def test_a_months_completeness_reads_the_firms_from_the_ledger_it_is_given(tmp_path):
+    """Another install's ledger (a backup check, a second home): its own firms, never the default home's."""
+    other = companies.Company(**{**companies.get("NORD").__dict__, "key": "CUSTOM"})
+    with closing(Ledger(tmp_path / "other.db")) as L:
+        L.save_company(other)
+        L.add_document("c", "CUSTOM", "2026-10", "statement", "/x/c.xml", accounts=[other.ibans["RON"]])
+        assert statement_intake.month_missing(L, "CUSTOM", "2026-10") == ["EUR 0001"]
+        assert not pack.ready(L, "CUSTOM", "2026-10")
 
 
 def test_a_statement_learned_from_its_file_names_accounts_only_for_its_own_month(ledger, tmp_path, monkeypatch):

@@ -73,7 +73,7 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
     before accounts were recorded is read to learn its accounts; if it can't be read, nothing is imported."""
     if not st.period_start or not st.period_end:
         raise statements.StatementError("Cannot verify statement period")
-    refuse_unsound_accounts(st)
+    refuse_unsound_accounts(st, L)
     lo, hi = span(st)
     mine = set(statement_ibans(st))
     if not mine:
@@ -116,10 +116,10 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
             raise statements.StatementError("Overlapping statement already imported")
 
 
-def refuse_unsound_accounts(st: statements.Statement) -> None:
+def refuse_unsound_accounts(st: statements.Statement, L: Ledger | None = None) -> None:
     """One statement holds an account's days once, in the currency the firm keeps it in: two sections of one account
     for the same days, or an account in another currency, settle nothing."""
-    co = companies.get(st.company)
+    co = companies.get(st.company, L=L)
     seen: dict[tuple[str, str], list[tuple[date, date]]] = {}
     for a in st.accounts:
         own = co.account(a.iban)
@@ -181,7 +181,12 @@ def _section_of(L: Ledger, st: statements.Statement, a: statements.Account, mont
     own = companies.get(st.company, L=L).account(a.iban)
     lo, hi = a.period or (st.period_start, st.period_end)
     return bool(
-        own and own.currency == a.currency and lo and hi and lo.strftime("%Y-%m") == hi.strftime("%Y-%m") == month
+        own
+        and own.currency == a.currency
+        and lo
+        and hi
+        and lo <= hi
+        and lo.strftime("%Y-%m") == hi.strftime("%Y-%m") == month
     )
 
 
@@ -218,7 +223,7 @@ def _read_stored(doc, company: str) -> statements.Statement:
         ) from exc
 
 
-def missing_accounts(st: statements.Statement) -> list[str]:
+def missing_accounts(st: statements.Statement, L: Ledger | None = None) -> list[str]:
     """The company's accounts at the statement's banks that the statement leaves out: a statement covers every
     account the company held at its bank in its period, so none of them is silently skipped. An account opened after
     the period's last month (set by a person) or retired before its first day is not owed; without a period, or with
@@ -228,7 +233,7 @@ def missing_accounts(st: statements.Statement) -> list[str]:
     with one of them must carry both; a different code is another bank, with its own statements."""
     from fiscalm.bank import catalogue as banks
 
-    co = companies.get(st.company)
+    co = companies.get(st.company, L=L)
 
     def bank_of(iban: str) -> str:
         own = co.account(iban)
@@ -496,7 +501,7 @@ def month_missing(L: Ledger, company: str, month: str) -> list[str] | None:
     first = date.fromisoformat(month + "-01")
     accounts = [statements.Account(a.iban, a.currency) for a in owned]
     st = statements.Statement(company, first, _month_end(first), accounts)
-    return missing_accounts(st) if accounts else []
+    return missing_accounts(st, L) if accounts else []
 
 
 def ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: tuple[str, dict] | None = None) -> dict:

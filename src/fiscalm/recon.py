@@ -372,7 +372,7 @@ def _set_checks(st: statements.Statement, parts: list[_Opened], check) -> None:
 
 
 def _refusal(parts: list[_Opened], exc: statements.StatementError) -> dict:
-    """A refused set, with the engine's own facts for the person: the missing accounts, or the month left partial."""
+    """A refused set, with the engine's own facts for the person: the month left partial."""
     if isinstance(exc, statements.PartialMonth):
         return _refused(parts, str(exc), partial=exc.month.isoformat())
     return _refused(parts, str(exc))
