@@ -111,18 +111,18 @@ def _payer(report: dict, credit: statements.Tx, company: str) -> bool:
     if report["payer_iban"]:
         return credit.counterparty_iban == report["payer_iban"]
     if report["payer_cui"]:
-        # On the counterparty, or labelled as a tax id in the memo: a bare number there can be another firm's order.
-        tax_id = rf"(?<![A-Z0-9])(?:RO|C\.?U\.?I\.?|C\.?I\.?F\.?)[ \t:.]*{report['payer_cui']}(?!\d)"
-        return issued._cui_on(report["payer_cui"], credit.counterparty) or bool(
-            re.search(tax_id, credit.description or "", re.I)
-        )
-    named, paid = _legal_forms(report["payer_name"]), _legal_forms(credit.counterparty)
-    return issued.same_firm(report["payer_name"], credit.counterparty) and not (named and paid and named != paid)
+        # Only on the paying party: a memo can name anyone's tax id (a customer's, an order number).
+        return issued._cui_on(report["payer_cui"], credit.counterparty)
+    return same_payer(report["payer_name"], credit.counterparty)
 
 
-def _legal_forms(name: str) -> set[str]:
-    """'Curier SRL' and 'Curier S.R.L.' are one firm; 'Curier SA' is another, though the names compare equal."""
-    return {w for w in companies.name_words(name or "") if w in companies.LEGAL_FORMS - {"SC"}}
+def same_payer(named: str, paid: str) -> bool:
+    """The report's payer name is the credit's paying party: equal words in any alphabet (`identity.firm_name`), a legal
+    form missing on one side but never two different ones ('Curier SRL' = 'Curier S.R.L.' = 'Curier', != 'Curier SA')."""
+    x, y = firm_name(named).split("-"), firm_name(paid).split("-")
+    forms = [{w for w in n if w.upper() in companies.LEGAL_FORMS} for n in (x, y)]
+    core = [[w for w in n if w.upper() not in companies.LEGAL_FORMS] for n in (x, y)]
+    return len("".join(core[0])) >= 6 and core[0] == core[1] and not (all(forms) and forms[0] != forms[1])
 
 
 class Resolver:

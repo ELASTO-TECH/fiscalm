@@ -261,7 +261,7 @@ def test_competing_reports_and_reused_credit(ledger):
     "identity,right",
     [
         ({"payer_iban": "synthetic-payer-account"}, {"counterparty_iban": "synthetic-payer-account"}),
-        ({"payer_cui": "12345678"}, {"counterparty": "Renamed Payout SRL", "description": "Payout CUI 12345678"}),
+        ({"payer_cui": "12345678"}, {"counterparty": "Renamed Payout SRL CUI 12345678"}),
     ],
     ids=["iban", "cui"],
 )
@@ -276,15 +276,12 @@ def test_payer_iban_never_falls_back_to_name(ledger, identity, right):
 
 @pytest.mark.parametrize(
     "identity,wrong,right",
-    [  # same words, another legal form: another firm
+    [  # same words, another legal form or another alphabet's letters: another firm
         ({}, {"counterparty": "Synthetic Courier SA"}, "Synthetic Courier S.R.L."),
-        (
-            {"payer_cui": "12345678"},
-            {"counterparty": "Other SRL", "description": "Order 12345678"},
-            "Other CIF 12345678",
-        ),
+        ({"payer_name": "Synthetic 北京 SRL"}, {"counterparty": "Synthetic 上海 SRL"}, "SYNTHETIC 北京"),
+        ({"payer_cui": "12345678"}, {"counterparty": "Other SRL", "description": "CUI 12345678"}, "Other 12345678"),
     ],
-    ids=["legal_form", "bare_number"],
+    ids=["legal_form", "alphabet", "memo"],
 )
 def test_first_report_needs_its_own_payer(ledger, identity, wrong, right):
     """With no confirmation gate, only the payer itself can bring a batch's credit."""
