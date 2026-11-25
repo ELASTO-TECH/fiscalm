@@ -623,6 +623,26 @@ def test_a_stored_copy_ingested_again_is_its_own_duplicate(ledger, tmp_path, sha
     assert recon.ingest_files(ledger, copies[:1], password_lookup=lambda co: "synthetic")[0]["status"] == "error"
 
 
+def test_a_stored_copy_is_read_once_under_the_imports_own_home(ledger, tmp_path, monkeypatch):
+    """Review: the copy is identified by the bytes that were parsed, not by the file read again later; and an import
+    into another data directory finds its stored copies there."""
+    home, (ron, eur) = tmp_path / "home", bt_files(tmp_path)
+    assert recon.ingest_files(ledger, [ron, eur], home, lambda co: "synthetic")[0]["status"] == "added"
+    copies = []
+    for n, doc in enumerate(ledger.documents(kind="statement")):
+        copies.append(tmp_path / f"copy-{n}.pdf")
+        copies[-1].write_bytes(Path(doc["path"]).read_bytes())
+    decrypt = statements.decrypt_to
+
+    def then_swapped(path, *a, **kw):  # the source replaced right after it was read
+        out = decrypt(path, *a, **kw)
+        next(c for c in copies if c.name == Path(path).name).write_bytes(b"%PDF-1.4 another file")
+        return out
+
+    monkeypatch.setattr(statements, "decrypt_to", then_swapped)
+    assert recon.ingest_files(ledger, copies, home, lambda co: "synthetic")[0]["status"] == "duplicate"
+
+
 @pytest.mark.parametrize(
     "case,refusal",
     [

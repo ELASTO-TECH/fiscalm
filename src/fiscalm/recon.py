@@ -219,7 +219,7 @@ def ingest_statements(
                 else:
                     opened.extend(o)
             for o in list(opened):  # a stored copy read again is the document it was stored for: a duplicate
-                copy = _stored_copy(ledger, o)
+                copy = _stored_copy(ledger, o, home)
                 if isinstance(copy, dict):
                     opened.remove(o)
                     failed.append(copy)
@@ -243,9 +243,20 @@ def ingest_statements(
 
 def _open_statement(path: Path, out_dir: Path, kw: dict) -> list[_Opened] | dict:
     """The file's statement, or one per month for a statement of several months (split by month, each part its own
-    document); a dict says why the file is not read."""
+    document); a dict says why the file is not read. The file is read once, into a private snapshot: what is parsed is
+    what is identified."""
+    snapshot = out_dir / "source" / path.name
     try:
-        company, month, out = statements.decrypt_to(path, out_dir, **kw)
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, snapshot, follow_symlinks=False)
+    except OSError:
+        return {
+            "file": str(path),
+            "status": "error",
+            "errors": ["Cannot read source file; check the path and permissions"],
+        }
+    try:
+        company, month, out = statements.decrypt_to(snapshot, out_dir, **kw)
     except statements.SecretsUnavailable as e:
         return {"file": str(path), "status": "error", "errors": [str(e)]}
     except statements.StatementError as e:
@@ -267,7 +278,7 @@ def _open_statement(path: Path, out_dir: Path, kw: dict) -> list[_Opened] | dict
         return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement"]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "refused", "errors": [str(e)]}
-    return [_Opened(path, company, month, out, st, sha256(path))]
+    return [_Opened(path, company, month, out, st, sha256(snapshot))]
 
 
 def _checked(groups: dict[tuple[str, str], list[_Opened]], check) -> list[statements.Statement]:
@@ -284,14 +295,14 @@ def _checked(groups: dict[tuple[str, str], list[_Opened]], check) -> list[statem
     return out
 
 
-def _stored_copy(ledger: Ledger, o: _Opened) -> str | dict | None:
+def _stored_copy(ledger: Ledger, o: _Opened, home: Path) -> str | dict | None:
     """The statement document `o`'s bytes are the stored copy of, when they name no document of their own and that
     document's stored file, read inside its firm's storage, still has exactly these bytes; a dict when it doesn't."""
     sha = None if ledger.document(o.digest) else ledger.statement_of_copy(o.digest)
     if sha is None:
         return None
     doc = ledger.document(sha)
-    data = read_file(doc["path"], [finance_home().resolve() / doc["company"]], 32 * 1024 * 1024)
+    data = read_file(doc["path"], [home.resolve() / doc["company"]], 32 * 1024 * 1024)
     if not data or hashlib.sha256(data[1]).hexdigest() != o.digest:
         return _refused([o], "Cannot read a stored statement; restore the stored document and retry", "error")
     return sha
