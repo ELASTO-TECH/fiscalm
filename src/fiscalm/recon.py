@@ -495,7 +495,7 @@ def auto_mark_paid(ledger: Ledger, st: statements.Statement) -> list[str]:
 
     # Unambiguous debits first (one naming its invoice): once they paid theirs, a plain twin may fit a single one.
     for t in sorted(st.settlement_txs, key=lambda t: len(rivals(t)) != 1):
-        if statements.pays_nothing(t) or statements.tx_key(t) in used or advance(t):
+        if t.direction != "debit" or statements.pays_nothing(t) or statements.tx_key(t) in used or advance(t):
             continue
         left = rivals(t) - {("payment", i) for i in done}
         if len(left) == 1 and (key := left.pop())[0] == "payment":

@@ -629,9 +629,8 @@ def _norm(s: str) -> str:
 
 
 def name_words(name: str) -> list[str]:
-    """The words of a supplier's name a statement line may carry: letters only, 3+ long, not legal forms. A word
-    alone proves nothing: a debit found by it settles only once its statement name is remembered for the supplier
-    (statement_partner)."""
+    """The words of a supplier's name a statement line may carry: letters only, 3+ long, not legal forms. A debit that
+    fits one invoice by them settles it (maintainer decision, 2026-11-25); one that fits several settles none."""
     return [w for w in _norm(name).split() if len(w) >= 3 and w.isalpha() and w not in companies.LEGAL_FORMS]
 
 
@@ -679,8 +678,8 @@ def line_keys(t: statements.Tx, own: set[str] | frozenset[str]) -> dict[str, str
 
 def statement_partner(L: Ledger, company: str) -> Callable[[statements.Tx], str | None]:
     """The partner the user remembered for a line's account or name (an answer to a debit that fit several invoices,
-    or Ține minte on an explanation with invoices): its supplier's invoices arrive through e-Factura, and a debit found
-    by the supplier's name settles on its own only when the name is remembered for it."""
+    or Ține minte on an explanation with invoices): its supplier's invoices arrive through e-Factura (a card payment
+    there needs no receipt: recon.classify)."""
     kept = {
         (m["key_kind"], m["key"]): m["partner"]
         for m in L.memories(company)
@@ -783,16 +782,16 @@ def rivals(L: Ledger, company: str):
         if r["message_id"] in have or r["message_id"] in credits
     ]
     items = L.payments(status=("pending", "exported"), company=company)
-    known = _known_numbers(L, company, old)
-    cands = [(("efactura", r["message_id"]), number_of(r["number"]), lambda t, r=r: _fits(r, t)) for r in invoices]
-    cands += [(("payment", p["item_id"]), payment_number(p), lambda t, p=p: payment_fits(p, t)) for p in items]
+    known, refs = _known_numbers(L, company, old)
+    cands = [(("efactura", r["message_id"]), r["number"], lambda t, r=r: _fits(r, t)) for r in invoices]
+    cands += [(("payment", p["item_id"]), p, lambda t, p=p: payment_fits(p, t)) for p in items]
     bons = bon_paid(L, company)
     cands += [
-        (("efactura", r["message_id"]), number_of(r["number"]), lambda t, r=r: not t.counterparty_iban and _fits(r, t))
+        (("efactura", r["message_id"]), r["number"], lambda t, r=r: not t.counterparty_iban and _fits(r, t))
         for r in bons
     ]
-    cands += [(("history", r["message_id"]), number_of(r["number"]), lambda t, r=r: _fits(r, t)) for r in old]
-    cands += [(("partial", r["message_id"]), number_of(r["number"]), lambda t, r=r: _fits(r, t)) for r in partial]
+    cands += [(("history", r["message_id"]), r["number"], lambda t, r=r: _fits(r, t)) for r in old]
+    cands += [(("partial", r["message_id"]), r["number"], lambda t, r=r: _fits(r, t)) for r in partial]
     # every candidate as an amount, a date and the accounts it may be paid to (None: a card only), for `candidates`
     # (payment rows are paid on or after their date, invoices from 5 days before)
     pool = [(("efactura", r["message_id"]), r, r["total"], r["currency"], _ibans(r), -5) for r in invoices]
@@ -804,10 +803,10 @@ def rivals(L: Ledger, company: str):
     def of(t: statements.Tx) -> set[tuple[str, str]]:
         if not L.card_allows(company, t.card_last4):
             return set()
-        names = _named(known, t)
-        return {key for key, no, fits in cands if (not names or no in names) and fits(t)}
+        names = _naming(t, known, refs)
+        return {key for key, number, fits in cands if _is_named(number, names) and fits(t)}
 
-    of.known, of.pool = known, pool  # what `candidates` reads, the same lists
+    of.naming, of.pool = (lambda t: _naming(t, known, refs)), pool  # what `candidates` reads, the same lists
     return of
 
 
@@ -815,12 +814,47 @@ def _ibans(r) -> list[str]:
     return json.loads(r["ibans"] or "[]") if "ibans" in r.keys() else []  # noqa: SIM118 (sqlite3.Row)
 
 
-def _known_numbers(L: Ledger, company: str, old: list) -> set[str]:
+def _known_numbers(L: Ledger, company: str, old: list) -> tuple[set[str], set[str]]:
     """Every invoice number the firm knows (any supplier invoice, accountant's or OP item, history), whatever its
-    status: a debit naming one is that invoice's."""
-    known = {n for r in L.efactura_rows(company=company) if (n := number_of(r["number"]))}
-    known |= {n for p in L.payments(company=company) if (n := payment_number(p))}
-    return known | {n for r in old if (n := number_of(r["number"]))}
+    status, as digits and as whole references: a debit naming one is that invoice's."""
+    rows, pays = L.efactura_rows(company=company), L.payments(company=company)
+    known = {n for r in rows if (n := number_of(r["number"]))} | {n for p in pays if (n := payment_number(p))}
+    known |= {n for r in old if (n := number_of(r["number"]))}
+    numbers = [*(r["number"] for r in rows), *(p["doc_ref"] for p in pays), *(r["number"] for r in old)]
+    refs = {f for n in numbers if (f := _reference(n)) and not f.isdigit()}
+    # digits in groups ('123-456') are a reference only written so, never as a run of digits (a date is one)
+    refs |= {n.strip() for n in numbers if n and re.fullmatch(r"\d+(?:[-/. ]\d+)+", n.strip())}
+    return known, refs
+
+
+def _naming(t: statements.Tx, known: set[str], refs: set[str]) -> tuple[str, set[str]]:
+    """What a debit's text names: whole references (letters and digits, written with separators too) first, so
+    'ALFA-1234' never names 'BETA-1234'; else known numbers as digits written plainly."""
+    text = re.sub(r"[^A-Z0-9]", "", t.description.upper())
+    hits = {ref for ref in refs if not ref[0].isdigit() and ref in text}
+    hits |= {
+        f for ref in refs if ref[0].isdigit() and (f := _reference(ref)) and re.search(_grouped(ref), t.description)
+    }
+    if hits:
+        return "ref", hits
+    return "digits", _named(known, t)
+
+
+def _grouped(number: str) -> str:
+    """'123-456' written with any one separator between its groups, and no digit around it."""
+    return r"(?<!\d)" + r"[-/. ]".join(re.split(r"[-/. ]", number)) + r"(?!\d)"
+
+
+def _is_named(number, naming: tuple[str, set[str]]) -> bool:
+    """A candidate (its invoice number, or a payment row) is one the debit's text allows: any, when it names none."""
+    kind, names = naming
+    if not names:
+        return True
+    row = not isinstance(number, str) and number is not None  # a payment row
+    if kind == "digits":
+        return (payment_number(number) if row else number_of(number)) in names
+    ref = _reference(number["doc_ref"] if row else number)  # 'Factura AA 3384' is named by 'AA 3384' too
+    return bool(ref) and any(h in ref or ref in h for h in names)
 
 
 def _named(known: set[str], t: statements.Tx) -> set[str]:
@@ -859,32 +893,33 @@ def candidates(L: Ledger, company: str, fit=None) -> Callable[[statements.Tx], s
     def known() -> tuple:  # read only once a debit fits no rival
         tracked = {(p["payee_iban"], Decimal(p["amount"])) for p in L.payments(company=company)}
         own = companies.get(company, L=L).own_ibans
-        refs = {ref for r in L.efactura_rows(company=company) if (ref := _reference(r["number"]))}
-        return remembered_advance(L, company), tracked, refs, own
+        return remembered_advance(L, company), tracked, own
 
     def fits(t: statements.Tx, row, total, currency: str, ibans, early: int) -> bool:
-        if ibans is None and t.counterparty_iban:  # paid at the till: only a card debit
-            return False
-        if t.counterparty_iban and ibans and t.counterparty_iban not in ibans:
+        if ibans is None:  # paid at the till: only a card payment
+            card = t.card_last4 or "POS" in t.description.upper().split()
+            if t.counterparty_iban or not card:
+                return False
+        elif t.counterparty_iban and t.counterparty_iban not in ibans:  # an account the invoice doesn't list
             return False
         return _amount_matches(t, Decimal(total), currency or "RON") and (
             early <= (t.date - date.fromisoformat(row["issue_date"][:10])).days <= AMOUNT_DAYS
         )
 
     def alone(t: statements.Tx) -> set[tuple[str, str]]:
+        if t.direction != "debit":
+            return set()
         statements.classify_tx(t)
         if t.category in (statements.TAX, statements.OWNER_ADVANCE) or not L.card_allows(company, t.card_last4):
             return set()
-        advance, tracked, refs, own = known()
+        advance, tracked, own = known()
         if advance(t) or t.counterparty_iban in own or (t.counterparty_iban, t.amount) in tracked:
             return set()
-        text = re.sub(r"[^A-Z0-9]", "", t.description.upper())  # a whole reference, written with separators too
-        names = _named(fit.known, t) | {ref for ref in refs if ref in text}
-        number = lambda row: row["doc_ref"] if "doc_ref" in row.keys() else row["number"]  # noqa: E731, SIM118
+        names = fit.naming(t)
         return {
             key
             for key, row, total, currency, ibans, early in fit.pool
-            if (not names or {number_of(number(row)), _reference(number(row))} & names)
+            if _is_named(row if key[0] == "payment" else row["number"], names)
             and fits(t, row, total, currency, ibans, early)
         }
 
@@ -895,7 +930,8 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
     """Mark open e-Factura invoices paid from statement debits. Wrongly "paid" hides a debt, so every
     doubt leaves the invoice open:
       - same amount, and the supplier's IBAN (a transfer to any other IBAN never matches) or, without
-        an IBAN on the debit, the supplier's name as a phrase (card payments);
+        an IBAN on the debit, the supplier's name (card payments); or, fitting none so, the exact amount of exactly one
+        candidate across all rivals (candidates; maintainer decision, 2026-11-25);
       - a debit that names a known invoice number (any supplier invoice or accountant's/OP item, whatever its
         status) settles only that invoice;
       - a debit to an IBAN and amount the payments path tracks (approved e-Factura, accountant's invoice) is left to it;
@@ -940,12 +976,16 @@ def _settle_debits(L: Ledger, st: statements.Statement) -> list[str]:
             debits.append(t)
 
     done: list[str] = []
+    settled: set[tuple[str, str]] = set()
     # Unambiguous debits first (one naming its invoice): once they settled theirs, a plain twin may fit a single one.
     for t in sorted(debits, key=lambda t: len(fit(t)) != 1):
-        left = cands(t) - {("efactura", m) for m in done}
-        if len(left) != 1 or (key := left.pop())[0] != "efactura":
+        left = cands(t) - settled
+        if len(left) != 1 or (key := left.pop())[0] not in ("efactura", "payment"):
             continue
-        if key[1] in bons:
+        if key[0] == "payment":  # the one left once the invoices before it settled (recon.auto_mark_paid ran first)
+            if L.mark_paid(key[1], f"statement {t.date} REF {t.ref}", tx_key(t)):
+                settled.add(key)
+        elif key[1] in bons:
             if L.settle_bon_card(key[1], tx_key(t)):  # the purchase is the bon's: counted once, not reported as paid
                 bons.discard(key[1])
                 fit = rivals(L, st.company)
@@ -957,6 +997,7 @@ def _settle_debits(L: Ledger, st: statements.Statement) -> list[str]:
                 r["message_id"], f"statement {t.date} {how} REF {t.ref}", tx_key(t), to_iban=t.counterparty_iban
             ):
                 done.append(r["message_id"])
+                settled.add(key)
     return done
 
 

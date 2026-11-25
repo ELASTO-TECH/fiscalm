@@ -1,5 +1,6 @@
 """e-Factura: synthetic UBL only (fake CUIs and IBANs from synthetic ledger fixtures)."""
 
+import dataclasses
 import io
 import json
 import zipfile
@@ -626,6 +627,57 @@ def test_an_amount_alone_never_overrides_a_named_invoice_nor_teaches_a_name(ledg
     assert ledger.memories("NORD") == []
     # a date in a debit's text is never read as an invoice number (the matchers' rule is digits as written)
     assert efactura._named({"20261021"}, _tx("1.00", date(2026, 10, 21), desc="Plata din 2026-10-21")) == set()
+
+
+def _payment(ledger, amount: str, ref: str) -> str:
+    from fiscalm.payments.orders import PaymentItem
+
+    item = PaymentItem(
+        "NORD",
+        "efactura",
+        "ACCOUNTANT SRL",
+        OTHER_IBAN,
+        "BTRLRO22",
+        "",
+        Decimal(amount),
+        f"Factura {ref}",
+        date(2026, 10, 20),
+        ref,
+        "",
+        f"sha-{ref}",
+    )
+    assert ledger.add_payment(item)
+    return item.item_id
+
+
+def test_exact_amount_settling_keeps_every_other_guard(ledger, home, sec, monkeypatch):
+    """Review of #40: a credit never pays a payment row; a debit naming ALFA-1234 never settles BETA-1234; a transfer
+    to an account the invoice doesn't list, or a direct debit for an invoice paid at the till, settles nothing by its
+    amount; and a payment row left the one candidate once an invoice settled is paid, not forgotten."""
+    _stored(
+        ledger,
+        monkeypatch,
+        **{
+            "3001": ubl(number="ALFA-1234", total="40.00", iban=""),
+            "3002": ubl(number="BETA-1234", total="40.00", iban=""),
+            "3003": ubl(number="BON 1", total="99.90", iban=""),
+            "3004": ubl(number="RMBU 6", total="60.00"),
+        },
+    )
+    ledger.db.execute("UPDATE efactura SET status='paid', paid_tx='x' WHERE message_id='3001'")
+    ledger.db.execute("UPDATE efactura SET status='paid', paid_tx='bon:sha-bon' WHERE message_id='3003'")
+    ledger.db.commit()
+    paid_row, kept_row = _payment(ledger, "60.00", "AA 5555"), _payment(ledger, "77.00", "AA 7777")
+    credit = dataclasses.replace(_tx("77.00", date(2026, 10, 21), desc="Incasare"), direction="credit")
+    named = _tx("40.00", date(2026, 10, 21), desc="Plata ALFA-1234")
+    elsewhere = _tx("40.00", date(2026, 10, 22), "ALT FURNIZOR SRL", OTHER_IBAN, desc="plata")
+    direct = _tx("99.90", date(2026, 10, 21), desc="Debit direct VDF123")
+    by_iban = _tx("60.00", date(2026, 10, 21), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata")
+    anonymous = _tx("60.00", date(2026, 10, 22), desc="Plata la POS SHOPX7K2")
+    st = _debit_st(credit, named, elsewhere, direct, by_iban, anonymous)
+    assert recon.auto_mark_paid(ledger, st) == [] and efactura.match_statement(ledger, st) == ["3004"]
+    assert ledger.efactura("3002")["status"] == "open" and ledger.payment(kept_row)["status"] == "pending"
+    assert efactura.tx_key(direct) not in ledger.used_txs() and ledger.payment(paid_row)["status"] == "paid"
 
 
 def test_eur_invoice_matches_original_amount(ledger, home, sec, monkeypatch):
