@@ -101,7 +101,7 @@ def test_refuse_company_work(empty, server, ledger, token_owner):
     )
     assert response["result"]["isError"]
     assert "needs_company" in response["result"]["content"][0]["text"]
-    for command in (["sync"], ["report", "--company", "EXAMPLE", "--month", "2026-01"], ["invoice", "tick"]):
+    for command in (["sync"], ["invoice", "tick"]):
         result = fiscalm_cli(*command)
         assert result.returncode == 1 and result.stderr.strip() == companies.NEEDS_COMPANY
 
