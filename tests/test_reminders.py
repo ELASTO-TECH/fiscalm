@@ -121,12 +121,23 @@ def _reserve(L, tx, what):
 # whose copy explains nothing, a credit not on record yet or one without its details may still be this payment.
 @pytest.mark.parametrize(
     "case, reminded",
-    [("unexplained", False), ("explained", True), ("conflict", False), ("not_recorded", False), ("no_details", False)],
+    [
+        ("unexplained", False),
+        ("explained", True),
+        ("conflict", False),
+        ("not_recorded", False),
+        ("recorded_blank", False),  # on record without the payer the stored statement names
+        ("no_details", False),
+    ],
 )
 def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, case, reminded):
     L, iid = reminder
     credit = _client_credit(L, iid)
-    if case == "not_recorded":  # the statement is stored, its lines not on record yet
+    if case == "recorded_blank":
+        blank = _client_credit(L, iid, counterparty="", iban="", desc=credit.description)
+        assert statements.tx_key(blank) == statements.tx_key(credit)
+        L.record_statement(_st(blank))
+    if case in ("not_recorded", "recorded_blank"):  # the stored statement's lines are not (all) on record
         st = _st(credit)
         cover_accounts(st)
         st.period_end = TODAY
@@ -142,18 +153,28 @@ def test_only_an_unexplained_client_credit_refuses_text(reminder, monkeypatch, c
     assert [t["id"] for t in r.tasks(L, "NORD", TODAY, rows)] == ([i.import_id("local", iid)] if reminded else [])
 
 
-@pytest.mark.parametrize("copy_explained", [False, True])
-def test_a_twin_naming_the_client_counts_unless_its_copy_is_explained(reminder, copy_explained):
-    # The statement names the client; the bank feed's copy of the same payment, kept by account_lines, names nobody.
+# The statement names the client; another copy of the same payment (the bank feed's, or the original of a
+# duplicate) names nobody. Only an explained copy excuses it, and one explained payment excuses one twin, never two.
+@pytest.mark.parametrize(
+    "case, reminded",
+    [("twin", False), ("twin_of_explained", True), ("two_twins_one_explained", False), ("duplicate", False)],
+)
+def test_every_copy_of_an_unexplained_payment_counts(reminder, case, reminded):
     L, iid = reminder
     named = _client_credit(L, iid)
+    twin2 = _client_credit(L, iid, day=date(2026, 11, 12), desc="Incasare 2")
     blank = _client_credit(L, iid, day=date(2026, 11, 11), counterparty="", iban="", desc="Incasare")
-    L.record_statement(_st(named, blank))
-    _reserve(L, named, "twin feed")
-    if copy_explained:
+    L.record_statement(_st(named, blank, *([twin2] if case == "two_twins_one_explained" else [])))
+    if case == "duplicate":
+        _reserve(L, named, "duplicate:" + statements.tx_key(blank))
+    else:
+        _reserve(L, named, "twin feed")
+    if case == "two_twins_one_explained":
+        _reserve(L, twin2, "twin feed")
+    if case in ("twin_of_explained", "two_twins_one_explained"):
         _reserve(L, blank, "issued other")
     rows = api._issued(L, "NORD", TODAY, True)
-    assert bool(r.tasks(L, "NORD", TODAY, rows)) is copy_explained
+    assert bool(r.tasks(L, "NORD", TODAY, rows)) is reminded
 
 
 @pytest.mark.parametrize(
@@ -162,6 +183,7 @@ def test_a_twin_naming_the_client_counts_unless_its_copy_is_explained(reminder, 
         (dict(), False, True),
         (dict(), True, False),  # a credit note against it: no longer the full amount owed
         (dict(supplier_cui="RO12345678"), False, False),  # another supplier's invoice under this firm's SPV
+        (dict(supplier_cui=""), False, False),  # nothing says the supplier is this firm
         (dict(client="", client_cui=""), False, False),  # no buyer to tell a payment from
     ],
 )
@@ -172,6 +194,7 @@ def test_spv_synced_invoice_gets_reminder_text(reminder, sec, monkeypatch, invoi
     blobs = {"9001": ubl(**dict(number="EXT 7", issue="2026-11-01", due="2026-11-08") | invoice)}
     if storno:
         blobs["9002"] = ubl(root="CreditNote", number="EXT 9", total="190.00", ref="EXT 7", issue="2026-11-05")
+    blobs["9003"] = ubl(number="EXT 8", issue="0001-01-01", due="")  # an impossible window refuses only itself
     _stored(L, monkeypatch, **blobs)
     today = date(2026, 11, 18)
     tasks = r.tasks(L, "NORD", today, api._issued(L, "NORD", today, True))

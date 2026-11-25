@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from contextlib import suppress
 from datetime import date, timedelta
 from decimal import Decimal
 from functools import cached_property
@@ -146,40 +147,31 @@ class StatementView:
         return tuple(sorted(doc.items())), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
     def credits(self, since: date, today: date, max_age: int) -> list[statements.Tx]:
-        """Every credit from `since` to `today` that may still be this firm's client paying, once its statements
-        cover every current account. From the ledger (statements, CSV and the bank feed alike) and from the stored
-        statements just parsed, whose lines may not be on record yet. Left out only what is proved to be something
-        else: a credit reserved in `settled_tx` as collecting or explaining an item, a duplicate line, and a twin (the
-        other source's copy of a payment) when a line it could be a copy of is explained. A conflict or a twin without
-        an explained copy stays, and a credit on record without its details refuses: it could be the client's."""
+        """Every representation, from `since` to `today`, of a credit that may still be this firm's client paying,
+        once its statements cover every current account: the lines on record (statements, CSV and the bank feed
+        alike) and the lines of the stored statements just parsed, since copies of one payment may name its payer
+        differently. A payment is left out only when proved to be something else (`_explained`). A credit on record
+        without its details refuses: it could be the client's."""
         self.coverage(since, today, max_age)
         if self._lines is None or since < self._lines[0]:
             start = min(since, self.since or since)
             lo = start - timedelta(days=BOUNDARY_DAYS)  # an explained copy can sit just before
             self._lines = (start, self.L.credit_lines(self.co, lo.isoformat()))
-        rows = [r for r in self._lines[1] if not (r["what"] or "").startswith("duplicate:")]
-        explained = [r for r in rows if r["what"] and not r["what"].startswith(UNEXPLAINED)]
-        explained_keys = {r["tx_key"] for r in explained}
-        out = {}
-        for r in rows:
-            if (
-                r["tx_key"] in explained_keys
-                or (r["what"] or "").startswith("twin ")
-                and any(_copy(r, e) for e in explained)
-            ):
-                continue
-            if not since.isoformat() <= r["day"] <= today.isoformat():
+        explained = _explained(self._lines[1])
+        out = []
+        for r in self._lines[1]:
+            if r["tx_key"] in explained or not since.isoformat() <= r["day"] <= today.isoformat():
                 continue
             if not r["tx"]:
                 raise Refused(STATEMENTS)
-            out[r["tx_key"]] = statements.Tx.from_dict(json.loads(r["tx"]))
-        on_record = {r["tx_key"] for r in self._lines[1]}
+            out.append(statements.Tx.from_dict(json.loads(r["tx"])))
         for st in self.parsed.values():
-            for t in st.settlement_txs:
-                key = statements.tx_key(t)
-                if t.direction == "credit" and since <= t.date <= today and key not in on_record:
-                    out[key] = t
-        return list(out.values())
+            out += [
+                t
+                for t in st.settlement_txs
+                if t.direction == "credit" and since <= t.date <= today and statements.tx_key(t) not in explained
+            ]
+        return out
 
     def coverage(self, since: date, today: date, max_age: int) -> None:
         """Refuse (STATEMENTS) unless stored statements cover every current account from `since` to `max_age` days
@@ -231,12 +223,44 @@ class StatementView:
                 raise Refused(STATEMENTS)
 
 
+def _explained(rows: list) -> set[str]:
+    """The keys of credit lines proved to be something other than an unexplained payment: reserved in `settled_tx`
+    as collecting or explaining an item; a duplicate line whose original is; a twin (the other source's copy of a
+    payment) paired with an explained line it could be a copy of. Pairs are one to one, closest days first, like
+    Ledger.account_lines: one explained payment excuses one twin, never two. A conflict is never explained."""
+    what = {r["tx_key"]: r["what"] or "" for r in rows}
+    done = {k for k, w in what.items() if w and not w.startswith(UNEXPLAINED) and not w.startswith("duplicate:")}
+    done |= {k for k, w in what.items() if w.startswith("duplicate:") and w.removeprefix("duplicate:") in done}
+    pairs = sorted(
+        (abs((date.fromisoformat(t["day"]) - date.fromisoformat(e["day"])).days), t["tx_key"], e["tx_key"])
+        for t in rows
+        if what[t["tx_key"]].startswith("twin ")
+        for e in rows
+        if e["tx_key"] in done and _copy(t, e)
+    )
+    excused: set[str] = set()
+    used: set[str] = set()
+    for _, twin, copy in pairs:
+        if twin not in excused and copy not in used:
+            excused.add(twin)
+            used.add(copy)
+    return done | excused
+
+
 def _copy(twin, line) -> bool:
     """`line` could be the other source's copy of `twin`: same amount, same account (or one unknown), days apart at
     most BOUNDARY_DAYS (Ledger.account_lines pairs twins the same way)."""
     apart = abs((date.fromisoformat(twin["day"]) - date.fromisoformat(line["day"])).days)
     same_account = not twin["iban"] or not line["iban"] or twin["iban"] == line["iban"]
     return twin["amount"] == line["amount"] and same_account and apart <= BOUNDARY_DAYS
+
+
+def _shift(day: str, days: int) -> date:
+    """`day` (ISO) moved by `days`; an impossible one refuses that invoice alone (CLOSED)."""
+    try:
+        return date.fromisoformat(day) + timedelta(days=days)
+    except (TypeError, ValueError, OverflowError):
+        raise Refused(CLOSED) from None
 
 
 def eligible(
@@ -278,10 +302,10 @@ def eligible(
         if inv is None or inv["status"] != "issued" or inv["data"]["totals"]["total"] != row["total"]:
             raise Refused(CLOSED)
         due_date = due_date or inv["data"].get("due_date")
-    if not due_date or today < date.fromisoformat(due_date) + timedelta(days=after):
+    if not due_date or today < _shift(due_date, after):
         raise Refused(CLOSED)
     row = row | {"due_date": due_date}
-    since = date.fromisoformat(row["issue_date"]) - timedelta(days=issued.COLLECT_DAYS_BEFORE)
+    since = _shift(row["issue_date"], -issued.COLLECT_DAYS_BEFORE)
     for tx in view.credits(since, today, max_age):
         if issued.credit_from_client(
             L, co, row["client"] or "", row["client_cui"] or "", tx, accounts=view.client_accounts
@@ -291,8 +315,11 @@ def eligible(
 
 
 def tasks(L: Ledger, co: str, today: date, rows: list[dict], *, invoices: dict[str, dict] | None = None) -> list[dict]:
-    issue_days = [date.fromisoformat(r["issue_date"]) for r in rows if r.get("issue_date")]
-    since = min(issue_days) - timedelta(days=issued.COLLECT_DAYS_BEFORE) if issue_days else None
+    starts = []
+    for row in rows:
+        with suppress(Refused):
+            starts.append(_shift(row["issue_date"], -issued.COLLECT_DAYS_BEFORE))
+    since = min(starts, default=None)
     out, view = [], StatementView(L, co, since)
     row_index: dict = {}
     for row in rows:

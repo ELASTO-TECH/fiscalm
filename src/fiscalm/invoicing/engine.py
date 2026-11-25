@@ -1693,8 +1693,8 @@ def record_issued(L: Ledger, company: str, row: dict, inv: Invoice, sha: str) ->
     """Insert one `issued` row parsed from an invoice XML, under the caller's write lock; return its status.
     The same invoice already stored (`already_issued`) becomes a `duplicate`, never a second record."""
     issues = list(inv.issues)
-    if inv.supplier_cui and inv.supplier_cui != companies.get(company, L=L).cui:
-        issues.append(f"{NOT_OURS} {inv.supplier_cui} is not {company}")
+    if inv.supplier_cui != companies.get(company, L=L).cui:  # a missing one does not prove it ours either
+        issues.append(f"{NOT_OURS} {inv.supplier_cui or 'missing'} is not {company}")
     kind, total = kind_total(inv)
     parsed = row | {
         "doc_type": kind,
