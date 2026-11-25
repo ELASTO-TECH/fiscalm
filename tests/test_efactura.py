@@ -16,7 +16,7 @@ from firms import iban as synthetic_iban
 from payment_cases import download_batch
 from synthetic_world import ubl_lines, ubl_totals
 
-from fiscalm import companies, invoice_lines, links, recon
+from fiscalm import companies, history, invoice_lines, links, recon
 from fiscalm.api import actions, lists, state as api, tasks
 from fiscalm.bank import statements
 from fiscalm.efactura import client as anaf, credits, inbox as efactura
@@ -1011,7 +1011,16 @@ def test_judge_settles_only_a_sure_unique_authenticated_mail(
 
 
 @pytest.mark.parametrize(
-    "case", ["short name word", "credited twin", "credited after the receipt", "twin paid by a debit", "skipped twin"]
+    "case",
+    [
+        "short name word",
+        "credited twin",
+        "credited after the receipt",
+        "credited to nothing",
+        "twin paid by a debit",
+        "skipped twin",
+        "history twin",
+    ],
 )
 def test_judge_settles_nothing_another_firm_or_balance_may_explain(ledger, home, sec, monkeypatch, case):
     supplier = "Q7 AMBIENT SRL" if case == "short name word" else "LUMEN AMBIENT SRL"
@@ -1023,6 +1032,8 @@ def test_judge_settles_nothing_another_firm_or_balance_may_explain(ledger, home,
         )
         credit = ubl(supplier=supplier, number="COR 2", total="-60.00").replace(b"<cbc:DocumentCurrencyCode>", storno)
         total = "300.00" if case == "credited twin" else "240.00"
+        if case == "credited to nothing":
+            credit = credit.replace(b"-60.00", b"-240.00")
         _stored(ledger, monkeypatch, **{"3002": ubl(supplier=supplier, number="TEST 2", total=total), "3003": credit})
         text = PAID
     if case in ("twin paid by a debit", "skipped twin"):  # the receipt may be that purchase's
@@ -1032,8 +1043,14 @@ def test_judge_settles_nothing_another_firm_or_balance_may_explain(ledger, home,
         else:
             assert ledger.mark_efactura_paid("3002", "statement", "a" * 20)
         text = PAID
+    if case == "history twin":  # an invoice from before the firm's start: a rival, never anything to review
+        twin = {"message_id": "history:ab", "number": "F-LUM 0", "issue_date": "2026-10-18", "currency": "RON"}
+        twin |= {"total": "240.00", "supplier_name": supplier, "doc_type": "invoice", "status": "history"}
+        monkeypatch.setattr(history, "rivals", lambda L, co, way: [twin] if co == "NORD" else [])
+        text = PAID
     mail = _mail(NETOPIA, "Plata confirmata", text) | {"domain": "netopia-payments.com", "complete": True}
-    assert _judge(ledger, [mail], ("3001", 0, "high"))[0]["settled"] == []
+    res = _judge(ledger, [mail], ("3001", 0, "high"))[0]
+    assert res["settled"] == [] and all(i.startswith("30") for r in res["review"] for i in r["message_ids"])
     assert ledger.efactura("3001")["status"] == "open"
 
 

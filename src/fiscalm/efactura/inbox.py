@@ -1288,12 +1288,12 @@ def judge(L: Ledger, ask: Callable | None = None, read: Callable | None = None) 
     answer = ask(JUDGE_PROMPT + data) if ask else ai.ask_json(L, JUDGE_PROMPT, data, JUDGE_SCHEMA)
     ai.check(answer, JUDGE_SCHEMA)
     decisions = _coherent(ev, answer["decisions"])
-    with L.tx():  # every unpaid invoice read and every proof written in one view: no rival appears in between
-        settled, review = _act(L, ev, decisions)
     answered = {d["message_id"] for d in decisions}
-    for e in ev:  # after acting, and only what the AI answered clearly: the rest is read again next time
-        if e["message_id"] in answered:
-            judged(L, e["message_id"], [m["key"] for m in e["mails"]])
+    with L.tx():  # every rival read, every proof and record written in one view and one commit
+        settled, review = _act(L, ev, decisions)
+        for e in ev:  # only what the AI answered clearly: the rest is read again next time
+            if e["message_id"] in answered:
+                judged(L, e["message_id"], [m["key"] for m in e["mails"]])
     # ids only: mail text and the AI's words stay in the ledger, never in the command's output
     return {
         "invoices": len(ev),
@@ -1324,7 +1324,7 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], l
     otherwise the mail and every invoice of its mailbox's firms it fits wait for a person (set_review)."""
     mails = {(e["message_id"], m["key"]): m for e in ev for m in e["mails"]}
     paid = [d for d in decisions if d["paid"] and d["confidence"] in ("high", "medium") and _key(d) in mails]
-    unpaid, eligible = _rivals(L), {r["message_id"] for r in _unpaid(L)}
+    unpaid, eligible = _rivals(L), {r["message_id"]: r["company"] for r in _unpaid(L)}
     settled, review = [], []
     for key in dict.fromkeys(d["mail_key"] for d in paid):
         named = [d for d in paid if d["mail_key"] == key]
@@ -1332,11 +1332,11 @@ def _act(L: Ledger, ev: list[dict], decisions: list[dict]) -> tuple[list[str], l
         fits = [r for r in unpaid if _fits_mail(r, mail)]  # any firm's: a twin elsewhere is doubt too
         if len(named) == 1 and one["message_id"] in eligible and _sure(one, fits, mail) and _settle(L, one):
             settled.append(one["message_id"])
-        elif not _mail_used(L, key):
-            ids = {d["message_id"] for d in named} | {
-                r["message_id"] for r in fits if _covers(mail["firms"], r["company"])
-            }
-            review.append(set_review(L, mail, sorted(ids), one["reason"]))
+        elif not _mail_used(L, key):  # a person answers for the invoices still to pay of the mailbox's firms
+            ids = {d["message_id"] for d in named} | {r["message_id"] for r in fits}
+            ids = {i for i in ids if i in eligible and _covers(mail["firms"], eligible[i])}
+            if ids:
+                review.append(set_review(L, mail, sorted(ids), one["reason"]))
     return settled, review
 
 
@@ -1347,7 +1347,8 @@ def _rivals(L: Ledger) -> list:
     Rows repeat an invoice: callers count distinct ids. Only an open or marked whole invoice is ever settled."""
     from fiscalm import history  # as rivals does: history imports this module
 
-    out = [r for s in ("linked", "paid", "skipped") for r in L.efactura_rows(status=s) if not r["parse_error"]]
+    statuses = (OPEN, "linked", "paid", "skipped")  # open ones whole too: one credited to nothing has no balance row
+    out = [r for s in statuses for r in L.efactura_rows(status=s) if not r["parse_error"]]
     for co in companies.all(L):
         _, rows, have, _ = _open_invoices(L, co)
         out += [r | {"total": r["gross_total"]} for r in rows] + history.rivals(L, co, "received")

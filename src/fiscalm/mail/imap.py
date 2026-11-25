@@ -549,21 +549,31 @@ RECEIVERS = {"imap.gmail.com": "mx.google.com", "imap.googlemail.com": "mx.googl
 
 def authenticated_domain(msg, authserv: str) -> str:
     """The From domain when the receiving service `authserv` says DMARC passed for exactly that domain; else "".
-    Any other Authentication-Results header is the sender's to write, as is the display name: never trusted."""
-    addresses = email.utils.getaddresses([str(msg.get("From") or "")])
+    Any other Authentication-Results header is the sender's to write, as is the display name: never trusted. Its
+    comments and quoted strings (where a sender's own address or text lands) are dropped before the clauses are read."""
+    froms = msg.get_all("From") or []
+    addresses = email.utils.getaddresses([str(f) for f in froms])
     own = [r for r in msg.get_all("Authentication-Results") or [] if str(r).split(";")[0].strip().lower() == authserv]
-    if not authserv or len(addresses) != 1 or not own:
+    if not authserv or len(froms) != 1 or len(addresses) != 1 or not own:
         return ""
-    domain = addresses[0][1].rpartition("@")[2].lower()
-    verdict = re.search(r"\bdmarc=(\w+)\b[^;]*?\bheader\.from=([\w.-]+)", str(own[0]), re.I)
-    ok = verdict and verdict.group(1).lower() == "pass" and verdict.group(2).lower() == domain
-    return domain if ok and domain else ""
+    local, at, domain = addresses[0][1].rpartition("@")
+    if not (local and at and re.fullmatch(r"[a-z0-9.-]+", domain := domain.lower())):
+        return ""
+    plain = re.sub(r'"(?:[^"\\]|\\.)*"|\([^()]*\)', " ", str(own[0]))
+    clauses = [c.split() for c in plain.split(";")[1:]]
+    dmarc = [c for c in clauses if c and c[0].lower().startswith("dmarc=")]
+    if len(dmarc) != 1 or dmarc[0][0].lower() != "dmarc=pass":
+        return ""
+    return domain if f"header.from={domain}" in (w.lower() for w in dmarc[0][1:]) else ""
 
 
 def _bodies(part) -> int:
     """How many separate texts a message carries: an alternative (plain and HTML of one text) counts once."""
+    if part.is_multipart() and part.get_content_subtype() == "alternative":  # one plain and one HTML leaf, nothing else
+        kinds = sorted(p.get_content_type() for p in part.iter_parts())
+        return 1 if kinds == ["text/html", "text/plain"] else 2
     if part.is_multipart():
-        return 1 if part.get_content_subtype() == "alternative" else sum(_bodies(p) for p in part.iter_parts())
+        return sum(_bodies(p) for p in part.iter_parts())
     return int(part.get_content_type() in ("text/plain", "text/html") and not part.get_filename())
 
 
