@@ -1437,13 +1437,15 @@ class Ledger:
         """An invoice payment built for a net (below its invoice's total) that is no longer the total minus the
         invoice's linked credits: a debit settling it would hide the difference, so no writer settles it."""
         row = db.execute(
-            "SELECT p.amount,p.company,e.message_id,e.total FROM payments p "
+            "SELECT p.amount,p.company,e.message_id,e.total,coalesce(nullif(e.supplier_tax_id,''),e.supplier_cui) "
+            "AS supplier FROM payments p "
             "JOIN efactura e ON e.item_id=p.item_id WHERE p.item_id=?",
             (item_id,),
         ).fetchone()
         if not row or Decimal(row["amount"]) == Decimal(row["total"]):
             return False
-        net = Decimal(row["total"]) - credits.credited(self, row["company"]).get(row["message_id"], Decimal(0))
+        credited = credits.credited(self, row["company"])
+        net = Decimal(row["total"]) - credited.get(row["message_id"], Decimal(0))
         return Decimal(row["amount"]) != net
 
     def sent_invoice_links(self, company: str, environment: str) -> dict[str, str]:
@@ -1922,7 +1924,9 @@ class Ledger:
 
             if origin == "auto" and self.get_meta(f"payment_file_removed:{message_id}"):
                 return None
-            row = db.execute("SELECT status FROM efactura WHERE message_id=?", (message_id,)).fetchone()
+            row = db.execute("SELECT status,total FROM efactura WHERE message_id=?", (message_id,)).fetchone()
+            if row and origin == "auto" and Decimal(item.amount) != Decimal(row["total"]):
+                return None  # autopay never queues a credited invoice's net (efactura.approve), re-checked here
             if (
                 not row
                 or row["status"] != "open"
