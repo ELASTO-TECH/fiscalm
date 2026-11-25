@@ -36,7 +36,7 @@ function Confirm({ r }: { r: Settlement }) {
 
 function details(r: Settlement, today: string) {
   if (r.status === "collected") return "Intrarea în cont apare în extras.";
-  if (r.can_confirm && r.credit) return `Așteaptă confirmarea ta: intrare de ${lei(r.credit.amount)} ${curOf(r.credit.currency)} pe ${dm(r.credit.date, today)}.`;
+  if (r.can_confirm && r.credit) return `${r.error === "mail_confirmation_required" ? "Raportul a venit pe mail: verifică-l. " : ""}Așteaptă confirmarea ta: intrare de ${lei(r.credit.amount)} ${curOf(r.credit.currency)} pe ${dm(r.credit.date, today)}.`;
   const reasons: Record<string, string> = {
     statement_unavailable: "Extrasul încărcat nu poate fi citit. Încarcă din nou extrasul corect.",
     statement_changed: "Extrasul s-a schimbat. Verifică noua intrare înainte de confirmare.",
@@ -104,7 +104,7 @@ function SettlementBody({ id, onClose }: { id: string; onClose: () => void }) {
       </ul>
     </Panel>
     {r.can_confirm && r.credit && <Actions><Confirm r={r} /></Actions>}
-    {!r.can_confirm && r.status === "pending" && <Actions><Act action="settlement-withdraw" body={{ id: r.id }}
+    {(!r.can_confirm || r.error === "mail_confirmation_required") && r.status === "pending" && <Actions><Act action="settlement-withdraw" body={{ id: r.id }}
       label="Șterge raportul" cls="btn g" confirm={{ text: "Ștergi raportul greșit? Facturile rămân neîncasate.", yes: "Șterge raportul", danger: true }} /></Actions>}
     {(r.tx_key || r.credit?.id || r.candidate?.id) && <p><L to={{ co: s.co, tx: r.tx_key || r.credit?.id || r.candidate?.id }}>Vezi tranzacția</L></p>}
     {r.status === "collected" && <p>{r.human_confirmed ? "Decontare confirmată." : "Decontare confirmată automat, pe baza raportului și a extrasului."}</p>}

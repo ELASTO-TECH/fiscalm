@@ -493,6 +493,8 @@ def _choose(
             (company, sig),
         )
     ]
+    if partner and description is not None:
+        raise Refused(400, BAD_PAYER)  # one says who sent it: a saved format, or a new description, never both
     if partner:
         described = next((k for k in known if k["partner"] == partner), None)
         if described is None:
@@ -559,18 +561,23 @@ def set_senders(L: Ledger, company: str, partner: str, signature: str, senders: 
     return addresses
 
 
-def from_mail(L: Ledger, address: str, tables: tuple, firms, today: date | None = None) -> str | None:
-    """Settlement reports attached by a sender a person named on a saved format of one of `firms()` (the mailbox's
-    firms, read again when storing). None when the sender names no format or there is no table: the mail is read the
-    invoice way. The sender must name one payer of one firm; the table's header then picks that payer's format, and its
-    payment day comes from the file. Mailed reports settle only after a person confirms them."""
-    formats = [
+def _senders(db, address: str, firms: list[str]) -> list[tuple[str, str, str]]:
+    """(company, partner, signature) of every saved format of `firms` naming `address` as a sender."""
+    return [
         (co, r["partner"], r["signature"])
-        for co in firms()
-        for r in L.db.execute("SELECT partner,signature,data FROM partner_settlement_formats WHERE company=?", (co,))
+        for co in firms
+        for r in db.execute("SELECT partner,signature,data FROM partner_settlement_formats WHERE company=?", (co,))
         if address and address in json.loads(r["data"]).get("senders", [])
     ]
-    if not formats or not tables:
+
+
+def from_mail(L: Ledger, address: str, tables: tuple, firms, today: date | None = None) -> str | None:
+    """Settlement reports attached by a sender a person named on a saved format of one of `firms()` (the mailbox's
+    firms, read again when storing). None when there is no table or the sender names no format: the mail is read the
+    invoice way. The sender must name one payer of one firm; the table's header then picks that payer's format, and its
+    payment day comes from the file. Mailed reports settle only after a person confirms them."""
+    formats = _senders(L.db, address, firms()) if tables else []
+    if not formats:
         return None
     if len({(co, partner) for co, partner, _ in formats}) != 1:
         return "settlement:ambiguous-sender"  # the attachment never chooses between firms or payers
@@ -594,12 +601,9 @@ def _mailed_table(L: Ledger, attached, formats: list, address: str, firms, today
     if not when:
         return "no-date"
 
-    def still_allowed(db) -> bool:  # under the write lock: the mailbox still covers the firm, the sender still named
-        row = db.execute(
-            "SELECT data FROM partner_settlement_formats WHERE company=? AND partner=? AND signature=?",
-            (co, partner, sig),
-        ).fetchone()
-        return bool(row) and address in json.loads(row["data"]).get("senders", []) and co in firms()
+    def still_allowed(db) -> bool:  # under the write lock: the sender names still this one payer and this format
+        now = _senders(db, address, firms())
+        return {(c, p) for c, p, _ in now} == {(co, partner)} and sig in {s for _, _, s in now}
 
     try:
         content = MAIL_CONTENT[attached.kind]

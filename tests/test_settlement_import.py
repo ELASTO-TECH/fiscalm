@@ -747,3 +747,61 @@ def test_a_sender_naming_two_payers_imports_nothing_and_invoices_still_read(ledg
     mail.add_attachment(b"%PDF-1.4 synthetic", "application", "pdf", filename="factura.pdf")
     result = invoices.handle(ledger, imap.parse(mail_account["id"], bytes(mail), date.today()))
     assert result.startswith("settlement:ambiguous-sender,") and len(result.split(",")) == 2
+
+
+def test_mailed_payer_is_decided_again_under_the_write_lock(ledger, mail_account, monkeypatch):
+    """The sender named on a second payer while a mail is read: the report is not filed under the first one. A request
+    naming a saved payer and a new description together is refused (it could write back an old sender list)."""
+    header = b"Factura;Ramburs;Comision\n"
+    for name in ("Synthetic Processor SRL", "Other Processor SRL"):
+        described = NETOPIA | dict(name=name, mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+        data = header + name.encode()[:5] + b";100,00;2,00\n"
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    (first, sig), (second, _) = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchall()
+    bank_upload.set_senders(ledger, "NORD", first, sig, "rapoarte@curier.example")
+    with pytest.raises(bank_upload.Refused):
+        bank_upload.accept_report(
+            ledger, "NORD", header + b"T;1,00;0\n", "text/csv", partner=first, description=NETOPIA
+        )
+    original = bank_upload._report_spec
+
+    def named_twice_meanwhile(*args):
+        other = Ledger()
+        try:
+            bank_upload.set_senders(other, "NORD", second, sig, "rapoarte@curier.example")
+        finally:
+            other.close()
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_report_spec", named_twice_meanwhile)
+    monkeypatch.setattr(bank_upload, "_mailed_date", lambda *args: UPLOAD["report_date"])
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<twice>"
+    mail.add_attachment(header + b"TEST-7;100,00;2,00\n", "text", "csv", filename="r.csv")
+    msg = imap.parse(mail_account["id"], bytes(mail), date.today())
+    assert settlement_from_mail(ledger, msg) == "settlement:refused:1"
+
+
+def settlement_from_mail(L, msg):
+    return bank_upload.from_mail(L, msg.address, msg.tables, lambda: ["NORD"], UPLOAD["today"])
+
+
+def test_an_unreadable_workbook_never_stops_the_mails_invoices(ledger, mail_account):
+    """A workbook zipfile can't read (another compression) is one unreadable table; the PDF beside it is still read."""
+    broken = bytearray(workbook(cells(["Ref", "Gross", "Fee"], ["T", "1", "0"])))
+    at = broken.index(b"PK\x01\x02") + 10  # the first entry's compression method, in the central directory
+    broken[at : at + 2] = (99).to_bytes(2, "little")
+    with pytest.raises(ReportError):
+        table(bytes(broken), "xlsx")
+    described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+    bank_upload.accept_report(
+        ledger, "NORD", b"Factura;Ramburs;Comision\nT;1,00;0\n", "text/csv", description=described, **UPLOAD
+    )
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<broken>"
+    mail.add_attachment(bytes(broken), "application", "octet-stream", filename="r.xlsx")
+    mail.add_attachment(b"%PDF-1.4 synthetic", "application", "pdf", filename="factura.pdf")
+    result = invoices.handle(ledger, imap.parse(mail_account["id"], bytes(mail), date.today()))
+    assert result.startswith("settlement:unreadable:1,") and len(result.split(",")) == 2
