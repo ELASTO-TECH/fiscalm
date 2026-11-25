@@ -87,7 +87,7 @@ def ingest_file(
         csv = path.suffix.lower() == ".csv"
         return {"file": str(path), "status": "refused", "errors": [_NOT_ACCOUNT_CSV if csv else _UNSUPPORTED]}
     if _bt_pdf(path):
-        return ingest_statement(ledger, path, home, password_lookup)
+        return ingest_statement(ledger, path, home, password_lookup, plain=operator)
     return ingest_op(ledger, path)
 
 
@@ -101,7 +101,7 @@ def ingest_files(ledger: Ledger, paths: list[Path], home: Path | None = None, pa
     home = home or finance_home()
     pdfs = [Path(p) for p in paths if _bt_pdf(Path(p))]
     rest = [ingest_file(ledger, Path(p), home, password_lookup, operator=True) for p in paths if Path(p) not in pdfs]
-    return rest + (ingest_statements(ledger, pdfs, home, password_lookup) if pdfs else [])
+    return rest + (ingest_statements(ledger, pdfs, home, password_lookup, plain=True) if pdfs else [])
 
 
 def _bt_pdf(path: Path) -> bool:
@@ -189,19 +189,21 @@ def ingest_statements(
     source: str | None = None,
     tmp_dir: Path | None = None,
     one_set: bool = False,
+    plain: bool = False,
 ) -> list[dict]:
     """BT PDFs, grouped by company and month: each group is one statement (one file per account, or daily ones,
     `intake.combine`), checked whole and stored whole or not at all. One result per group, and one per file that
     isn't a statement of ours. `only`: the company the files are for (an upload); no other company's password is
     tried. `check(st)`: a last refusal on a group's statement before anything is stored (raises
-    statements.StatementError). `one_set`: the files must make one group, or nothing is stored."""
+    statements.StatementError). `one_set`: the files must make one group, or nothing is stored. `plain`: a PDF without
+    a password is read too (a person brought it: the CLI or an upload, never mail)."""
     tmp = tmp_dir or home / "state" / "tmp"  # an upload's own staging is already confined (bank.upload._confined)
     tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not tmp_dir and not _inside(home, tmp):  # a symlink on the way would put decrypted copies outside the data root
         error = "Unsafe statement storage directory; remove symlinks and retry"
         return [{"file": str(path), "status": "error", "errors": [error]} for path in paths]
     work = tmp / f"set-{secrets.token_hex(8)}"
-    kw = {"password_lookup": password_lookup} if password_lookup else {}
+    kw = ({"password_lookup": password_lookup} if password_lookup else {}) | {"plain": plain}
     if only is not None:
         kw["only"] = only
     with import_lock():
@@ -227,10 +229,14 @@ def _open_statement(path: Path, out_dir: Path, kw: dict) -> _Opened | dict:
         return {"file": str(path), "status": "error", "errors": [str(e)]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "not_ours", "errors": [str(e)]}
+    except ValueError:  # a date that isn't one, in the printed period
+        return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement period"]}
     try:
         st = statements.parse(out, company)
         if st.month and st.month != month:  # the month comes from what the bank printed, never from a file name
             raise statements.StatementError("Statement file name names another month than its period")
+    except ValueError:
+        return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement period"]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "refused", "errors": [str(e)]}
     return _Opened(path, company, month, out, st, sha256(path))

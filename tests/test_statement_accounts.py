@@ -310,10 +310,24 @@ def test_the_operator_imports_a_plain_bt_pdf_under_any_name_and_a_csv_is_refused
     def no_password(key):
         raise AssertionError("a plain PDF needs no password")
 
-    csv, pdf = recon.ingest_files(ledger, [wise, plain], password_lookup=no_password)
+    bad = bt_statement(tmp_path / "Extras.pdf", co.cui, ("31/02/2026", "31/03/2026"), accounts, password=None)
+    csv, damaged, pdf = recon.ingest_files(ledger, [wise, bad, plain], password_lookup=no_password)
     assert (csv["status"], csv["errors"]) == ("refused", [recon._NOT_ACCOUNT_CSV])
+    assert damaged["status"] == "refused"  # an impossible date: that file alone
     assert (pdf["status"], pdf["company"], pdf["month"]) == ("added", firm, "2026-10")
     assert not ledger.payments()  # never read as a payment order
+
+
+def test_mail_never_imports_an_unprotected_pdf(ledger, sec, tmp_path, monkeypatch):
+    """A statement mail proves its sender only by the password its PDF needs: a plain one is nobody's."""
+    integrations.set_statement_password(ledger, "NORD", "bt", "synthetic")
+    inbox = {"host": "imap.example.test", "username": "u", "password": "x", "from_address": "books@example.com"}
+    account = integrations.add(ledger, "mail", "Synthetic inbox", inbox)["id"]
+    nord = companies.get("NORD")
+    accounts = [(c, i, Decimal("100.00"), []) for c, i in nord.ibans.items()]
+    plain = bt_statement(tmp_path / "p.pdf", nord.cui, ("01/10/2026", "31/10/2026"), accounts, password=None)
+    assert bring(ledger, "mail", [plain], monkeypatch, account) == "not_ours"
+    assert not ledger.documents(kind="statement")
 
 
 @pytest.mark.parametrize(
