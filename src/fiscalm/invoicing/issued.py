@@ -389,10 +389,11 @@ def match_statement(L: Ledger, st: statements.Statement) -> list[str]:
     from fiscalm.settlements import engine as settlements
 
     batch_done = settlements.match_statement(L, st)
-    pool = _Pool(L, st.company, {statements.tx_key(t) for t in st.settlement_txs})
-    if not pool.open:
-        return batch_done
-    return batch_done + _collect_singles(L, pool, st, _open_credits(L, st))
+    with L.tx():  # decide and write under one write lock: no invoice or credit arrives in between
+        pool = _Pool(L, st.company, {statements.tx_key(t) for t in st.settlement_txs})
+        if not pool.open:
+            return batch_done
+        return batch_done + _collect_singles(L, pool, st, _open_credits(L, st))
 
 
 def _open_credits(L: Ledger, st: statements.Statement) -> list[statements.Tx]:
@@ -452,11 +453,15 @@ def _collect(L: Ledger, pool: _Pool, t: statements.Tx, rows: tuple, how: str, no
     return True
 
 
+_REFUND_WORDS = {"POS", "CARD", "REFUND"}
+
+
 def _not_a_payment(t: statements.Tx) -> bool:
-    """A card refund (a card number, or POS in the bank's text or booking title when the format drops the card) or the bank's own
+    """A card refund (a card number, or POS, card or refund in the bank's text or booking title when the format drops
+    the card) or the bank's own
     money: never a client's payment."""
     statements.classify_tx(t)
-    card = t.card_last4 or "POS" in re.split(r"[^A-Z]+", f"{t.title} {t.description}".upper())
+    card = t.card_last4 or _REFUND_WORDS & set(re.split(r"[^A-Z]+", f"{t.title} {t.description}".upper()))
     return bool(card) or t.category in (statements.BANK_FEE, statements.INTEREST)
 
 
@@ -559,11 +564,14 @@ class _Pool:
         cands = [(r, how) for r in self.rows if r["message_id"] not in done and (how := self.fits(r, t))]
         names, full = self.named(t)
         if names:
+            fit = [c for c in cands if c[1] in CLIENT_PROOF]
             cands = [(r, how) for r, how in cands if r["message_id"] in names]
             if full and len(names) == 1:  # one whole invoice identifier: the credit says which it pays
                 cands = [(r, "ref" if how in ("amount", "other") else how) for r, how in cands]
             else:  # digits, or several invoices named: without its client the credit proves none of them
-                cands = [(r, how) for r, how in cands if how in CLIENT_PROOF]
+                kept = [(r, how) for r, how in cands if how in CLIENT_PROOF]
+                # a number without a series ('10' in a date) may refuse, never choose among the client's invoices
+                cands = kept if full or len(kept) == len(fit) or len(kept) <= 1 and len(fit) <= 1 else []
         cands = [c for c in cands if c[1] != "other"]
         return [c for c in cands if c[1] in CLIENT_PROOF] or cands
 

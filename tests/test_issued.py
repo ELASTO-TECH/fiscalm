@@ -354,6 +354,22 @@ def test_only_one_whole_identifier_picks_among_amount_twins(ledger, home, sec, m
     assert issued.match_statement(ledger, _st(anonymous, named)) == []  # the same statement again: the same answer
 
 
+def test_a_number_without_series_never_chooses_between_a_clients_invoices(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"7001": ubl(number="10", client="ION POPESCU", client_cui="")})
+    _stored(ledger, monkeypatch, **{"7002": ubl(number="99", client="ION POPESCU", client_cui="")})
+    t = _credit("1190.00", date(2026, 10, 20), counterparty="ION POPESCU", iban="", desc="servicii 2026-10-20")
+    assert issued.match_statement(ledger, _st(t)) == []
+
+
+def test_the_choice_and_the_write_hold_one_write_lock(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"7001": ubl()})
+    seen, build = [], issued._Pool.__init__
+    monkeypatch.setattr(
+        issued._Pool, "__init__", lambda self, L, *a: seen.append(L.db.in_transaction) or build(self, L, *a)
+    )
+    assert issued.match_statement(ledger, _st(_credit("1190.00", date(2026, 10, 20)))) == ["7001"] and seen == [True]
+
+
 def test_a_private_name_from_a_client_account_collects_nothing(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"7001": ubl(client="GAMMA LABS SRL", client_cui="RO77777777", total="50.00")})
     _stored(ledger, monkeypatch, **{"7002": ubl(number="NRD 0043", client="ION POPESCU", client_cui="")})
@@ -396,12 +412,14 @@ def test_wrong_client_amount_debit_or_own_transfer_never_collects(ledger, home, 
     card_refund.card_last4 = "4242"
     pos = _credit("1190.00", date(2026, 10, 20), counterparty="", iban="", desc="Merchant refund")  # MT940: no card
     pos.title = "POS refund"  # its ?00 booking text
+    card = _credit("1190.00", date(2026, 10, 20), counterparty="", iban="", desc="Merchant refund")
+    card.title = "Card refund"
     amount = _credit("1189.99", date(2026, 10, 20))
     early = _credit("1190.00", date(2026, 9, 1))
     debit = _credit("1190.00", date(2026, 10, 20))
     debit.direction = "debit"
     own = _credit("1190.00", date(2026, 10, 20), iban="RO71BTRLEURCRT0000000001")
-    for t in (other, card_refund, pos, amount, early, debit, own):
+    for t in (other, card_refund, pos, card, amount, early, debit, own):
         assert issued.match_statement(ledger, _st(t)) == []
     assert ledger.issued("7001")["status"] == "open"
 
