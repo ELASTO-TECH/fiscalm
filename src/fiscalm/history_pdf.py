@@ -91,6 +91,7 @@ def _with_ai(L: Ledger, raw: bytes, company: str, doc: reader.Doc, rules: dict) 
     else:  # none the rules could read: printed positive with its currency, as for a mailed invoice
         total_open = not doc.text.strip() or reader.printed_total(doc.text, ai["total"] or "0", ai["currency"])
     party = rules["party_tax_id"] or ai["party_tax_id"]  # a partner id printed whole, as an import requires
+    party = party and company not in reader.disputed(doc.text, [company])  # never its delivery address
     certain = all((x.confident, not x.rejected, x.doc_type == "invoice", agree, number_open, total_open, party))
     return {k: rules[k] or v for k, v in ai.items()} | {"reason": "" if certain else "unsure"}
 
