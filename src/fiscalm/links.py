@@ -503,19 +503,20 @@ def proposals(company: str, txs: list[statements.Tx], kept: list) -> list[dict |
     return out
 
 
-def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
+def apply_rules(L: Ledger, company: str, rows: list[dict], named: frozenset[str] = frozenset()) -> list[str]:
     """Explain on their own, after the matchers ran, the Tranzacții rows (transactions.view) left De explicat with
     nothing else proposed for them: by a saved Fără document or Avans rule, on any line of its card, account or
     merchant still to explain, older ones too; else a line the bank's own codes or words call its fee or interest, as
     Fără document; else a debit whose other end on another of the firm's accounts is free too (_own_transfer), as a
     Transfer între conturi with both ends. A row with any other proposal (an exact or named receipt, a settlement,
     invoices it fits) or waiting for its invoice is left to people. Written by Ledger.link_tx under the write lock,
-    which checks again what a person may have decided since the rows were read (_untouched). Returns the keys
-    explained."""
-    free = {r["id"] for r in rows if not (r["explanation"] or r["proposal"] or r["awaiting"]) and r["can_link"]}
+    which checks again what a person may have decided since the rows were read (_untouched). `named`: the rows whose
+    bank details name an open invoice at exactly its amount (transaction_choices.proposed), a person's too. Returns
+    the keys explained."""
+    free = {r["id"] for r in rows if not (r["explanation"] or r["proposal"] or r["awaiting"]) and r["can_link"]} - named
     done = []
     for r in rows:
-        if r["explanation"] or not r["can_link"] or r["awaiting"]:
+        if r["explanation"] or not r["can_link"] or r["awaiting"] or r["id"] in named:
             continue
         kept = r["proposal"]["as"] if r["proposal"] and r["proposal"]["kind"] == "remembered" else None
         memory = r["proposal"]["memory"] if kept else None
@@ -592,15 +593,13 @@ def _decided(L: Ledger, key: str) -> bool:
 def _untouched(L: Ledger, company: str, key: str, memory: str | None, build: Callable[[], dict]) -> Callable[[], dict]:
     """A rule's explanation, under the write lock, only while nobody decided otherwise since the rows were read: the
     line not decided by a person (_decided), not a card debit a receipt could explain (recon.match_receipts, by
-    amount or by name), not a credit a pending settlement report claims, and the saved rule still the same one (a
-    replaced rule has a new id)."""
+    amount or by name), not a credit a pending settlement report claims, and the saved rule still the one that wins
+    for the line (proposals: a replaced rule has a new id, a card's rule comes before an account's or a merchant's)."""
 
     def build_once() -> dict:
         t, _ = _transaction(L, company, key)
-        gone = (
-            memory
-            and not L.db.execute("SELECT 1 FROM tx_memory WHERE id=? AND company=?", (memory, company)).fetchone()
-        )
+        now = proposals(company, [t], L.memories(company))[0] if memory else None
+        gone = memory and (now or {}).get("memory") != memory
         receipt = t.direction == "debit" and t.card_last4 and recon.match_receipts([t], recon._receipts(L, company))
         if (
             _decided(L, key)

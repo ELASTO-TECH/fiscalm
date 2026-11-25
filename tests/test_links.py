@@ -627,8 +627,9 @@ def test_a_debit_waits_for_its_invoice_still_to_explain_and_the_invoice_still_se
     assert not ledger.awaited("NORD") and not actions.act("tx-await", "NORD", wait | {"on": "0"})["ok"]
 
 
-def _apply(L, rows: dict | None = None) -> list[str]:
-    return sorted(links.apply_rules(L, "NORD", list((rows or _rows(L)).values())))
+def _apply(L, rows: dict | None = None) -> list[str]:  # as `fiscalm tx-rules` runs it
+    named = transaction_choices.named(api.state(L, "NORD"))
+    return sorted(links.apply_rules(L, "NORD", list((rows or _rows(L)).values()), named))
 
 
 def _saved_on(L, day: date) -> None:
@@ -767,19 +768,30 @@ EUR_ACCOUNT = "RO71BTRLEURCRT0000000001"
 
 @pytest.mark.parametrize(
     "case",
-    ["two debits, one credit", "a report claims the credit", "another firm's account", "an unreadable line", "a rule"],
+    [
+        "two debits, one credit",
+        "a report claims the credit",
+        "another firm's account",
+        "an unreadable line",
+        "a rule",
+        "an invoice the credit names",
+    ],
 )
 def test_a_transfer_rule_leaves_a_pair_it_cant_be_sure_of(ledger, live, monkeypatch, case):
     """Settled by nothing: a second debit that fits the credit too, a pending report's payer claiming the credit or a
     rule saved for it after the rows were read, a debit on another firm's account, a same-amount line fiscalm can't
-    read."""
+    read, a credit whose details name an open invoice at its amount (its sheet proposes the invoice)."""
     debit = {"iban": "RO94BTRLRONCRT0000000002"} if case == "another firm's account" else {}
     out, into = _record(
         ledger,
         "NORD",
         _tx(67, "debit", "800.00", counterparty_iban=EUR_ACCOUNT, **debit),
-        _tx(68, "credit", "800.00", iban=EUR_ACCOUNT, counterparty="Administrator Exemplu"),
+        _tx(
+            68, "credit", "800.00", iban=EUR_ACCOUNT, counterparty="Administrator Exemplu", description="Plata NRD 7031"
+        ),
     )
+    if case == "an invoice the credit names":
+        _sale(ledger, "7031", "800.00")
     if case == "two debits, one credit":
         _record(
             ledger, "NORD", _tx(66, "debit", "800.00", counterparty_iban=EUR_ACCOUNT, day=TODAY - timedelta(days=4))
@@ -850,3 +862,23 @@ def test_two_connections_explaining_the_same_transfer_explain_it_once(ledger, li
     for t in threads:
         t.join()
     assert sorted(done) == [[], [out]] and ledger.db.execute("SELECT count(*) FROM tx_links").fetchone()[0] == 1
+
+
+def test_a_stale_rule_yields_to_the_rule_that_wins_now(ledger, live):
+    """Rows read under a merchant's Avans rule, then a card rule saved: the card's rule wins, the stale one writes
+    nothing."""
+    first, later = _record(
+        ledger,
+        "NORD",
+        _tx(74, "debit", "15.00", card_last4="0007", counterparty="SHOP EXEMPLU", day=TODAY - timedelta(days=6)),
+        _tx(75, "debit", "16.00", card_last4="0007", counterparty="SHOP EXEMPLU"),
+    )
+    assert ledger.assign_card("NORD", first, "personal")
+    _link(ledger, first, kind="advance", who="Administrator Exemplu", remember="name")
+    stale = _rows(ledger)
+    assert stale[later]["proposal"]["as"]["kind"] == "advance"
+    ledger.remember(
+        "NORD", "card", "0007", {"kind": "label", "partner": None, "reason": "personal", "note": None}, None
+    )
+    assert _apply(ledger, {later: stale[later]}) == [] and _apply(ledger) == [later]
+    assert _rows(ledger)[later]["explanation"]["label"] == "personal"

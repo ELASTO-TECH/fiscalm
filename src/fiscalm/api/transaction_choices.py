@@ -149,6 +149,11 @@ def proposed(full: dict, tx: dict) -> list[dict]:
     return [pick(r, r["left"], False) | {"position": 0}] if amount and Decimal(amount) == Decimal(r["left"]) else []
 
 
+def named(full: dict) -> frozenset[str]:
+    """The transactions whose sheet proposes the invoice their details name (proposed): no rule explains them."""
+    return frozenset(t["id"] for t in full["transactions"]["rows"] if proposed(full, t))
+
+
 def invoices(full: dict, tx: dict, partner: str) -> list[dict]:
     credit = tx["direction"] == "credit"
     source = full["issued"] if credit else full["invoices"]
