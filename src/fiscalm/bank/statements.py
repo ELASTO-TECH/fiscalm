@@ -184,10 +184,10 @@ def decrypt_to(
         if not names_cui(text, company.cui):
             raise StatementError(f"decrypted with {key} password but CUI {company.cui} not in text")
         if month is None:
-            m = re.search(r"din (\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})", text)
-            if not m:
+            start = _pdf_period(text)[0]  # a monthly period, or an older daily statement's day
+            if not start:
                 raise StatementError("cannot determine statement month")
-            month = parse_dmy(m.group(1)).strftime("%Y-%m")
+            month = start.strftime("%Y-%m")
         final = out_dir / f"Extras_BT_{key}_{month}.pdf"
         tmp.replace(final)
         return key, month, final
@@ -314,6 +314,8 @@ class Account:
     closing_day: date | None = None
     # The period the bank printed above this account's section (a BT PDF names one per section); None elsewhere.
     period: tuple[date, date] | None = None
+    # An older daily statement's number (`EXTRAS CONT Numarul: N din dd/mm/yyyy`): BT numbers them one by one.
+    serial: int | None = None
 
     @property
     def balanced(self) -> bool:
@@ -411,20 +413,23 @@ def parse_text(text: str, company: str) -> Statement:
         cur, cur_lines = None, []
 
     period_start, period_end, one_period = _pdf_period(text)
-    section = None  # a statement header's period since the last account opened: the next account's own
+    section = serial = None  # a statement header's period (and a daily one's number) since the last account opened
 
     lines = text.splitlines()
     for i, ln in enumerate(lines):
         s = ln.strip()
         if not in_table and (m := re.search(_HEADER, ln)):
-            section = parse_dmy(m.group(1)), parse_dmy(m.group(2))
+            section, serial = (parse_dmy(m.group(1)), parse_dmy(m.group(2))), None
+        elif not in_table and (m := re.search(_DAILY, ln)):
+            section, serial = (parse_dmy(m.group(2)),) * 2, int(m.group(1))
         if _opens_account(ln):
             close()
             nxt = lines[i + 1] if i + 1 < len(lines) else ""
             acct, cur_date = _pdf_account(nxt), None  # a section's lines are dated by its own rows only
             # its own header, else the file's one period; a section under none, in a file of several, has none
             acct.period = section or ((period_start, period_end) if one_period and period_start else None)
-            section = None
+            acct.serial = serial if section else None
+            section = serial = None
             accounts.append(acct)
             in_table = False
             continue
@@ -492,12 +497,18 @@ _PERIOD = r"din (\d{2}/\d{2}/\d{4}) - (\d{2}/\d{2}/\d{4})"
 _HEADER = r"(?i)\bextras\b.*?" + _PERIOD  # a statement's own header ("EXTRAS CONT ... din"), not a line's text
 
 
+# An older daily statement's header names its number and its one day.
+_DAILY = r"EXTRAS CONT\s+Numarul:\s*(\d+)\s+din (\d{2}/\d{2}/\d{4})(?!\s*-\s*\d)"
+
+
 def _pdf_period(text: str) -> tuple[date | None, date | None, bool]:
     period_start = period_end = None
-    m = re.search(_PERIOD, text)
-    if m:
+    periods = set(re.findall(_PERIOD, text)) | {(d, d) for _, d in re.findall(_DAILY, text)}
+    if m := re.search(_PERIOD, text):
         period_start, period_end = parse_dmy(m.group(1)), parse_dmy(m.group(2))
-    one_period = len(set(re.findall(_PERIOD, text))) == 1
+    elif m := re.search(_DAILY, text):
+        period_start = period_end = parse_dmy(m.group(2))
+    one_period = len(periods) == 1
 
     return period_start, period_end, one_period
 
@@ -543,6 +554,65 @@ def _pdf_trust(accounts: list[Account], opening: dict[int, Decimal], final: dict
         )
         if a.trustworthy:
             a.closing, a.closing_day = end, a.period[1]
+
+
+SEVERAL_MONTHS = (
+    "Statement of several months that can't be split safely by month; download each month's statement from the bank"
+)
+
+
+def several_months(st: Statement) -> bool:
+    """A PDF whose sections name periods of different months: BT's quarterly statement."""
+    return len({d.strftime("%Y-%m") for a in st.accounts if a.period for d in a.period}) > 1
+
+
+def split_months(path: Path, company: str, st: Statement, folder: Path) -> list[tuple[str, Path, Statement]]:
+    """A statement of several months, split by its pages into one PDF per month, each read again as a statement of
+    its own: (month, file, statement). Refused unless every section covers days of one month, no page holds two
+    months, each part names the firm in its own header (a stored part is read again on its own) and the parts read
+    back to exactly the file's sections, lines and balances."""
+    if any(not a.period or a.period[0].strftime("%Y-%m") != a.period[1].strftime("%Y-%m") for a in st.accounts):
+        raise StatementError(SEVERAL_MONTHS)
+    folder.mkdir(parents=True, exist_ok=True)
+    parts = []
+    with pikepdf.open(path) as pdf:
+        for month, pages in _pages_by_month(pdf_text(path), len(pdf.pages), st).items():
+            out = folder / f"Extras_BT_{company}_{month}.pdf"
+            with pikepdf.new() as piece:
+                piece.pages.extend(pdf.pages[i] for i in pages)
+                piece.save(out, deterministic_id=True)  # the same file splits into the same bytes: a duplicate
+            text = pdf_text(out)
+            if not names_cui(text, companies.get(company).cui):
+                raise StatementError(SEVERAL_MONTHS)
+            parts.append((month, out, parse_text(text, company)))
+    if sorted(map(_section, st.accounts)) != sorted(_section(a) for *_, p in parts for a in p.accounts) or any(
+        a.period[0].strftime("%Y-%m") != month for month, _, p in parts for a in p.accounts
+    ):
+        raise StatementError(SEVERAL_MONTHS)
+    return parts
+
+
+def _pages_by_month(text: str, count: int, st: Statement) -> dict[str, list[int]]:
+    """Each page under the month of the periods it prints, a page printing none under the one before (the first
+    month for a header page)."""
+    pages = text.split("\f")
+    if len(pages) < count:
+        raise StatementError(SEVERAL_MONTHS)
+    month = min(a.period[0] for a in st.accounts).strftime("%Y-%m")
+    out: dict[str, list[int]] = {}
+    for i, page in enumerate(pages[:count]):
+        named = {parse_dmy(m.group(1)).strftime("%Y-%m") for m in re.finditer(_PERIOD, page)}
+        if len(named) > 1:
+            raise StatementError(SEVERAL_MONTHS)
+        month = named.pop() if named else month
+        out.setdefault(month, []).append(i)
+    return out
+
+
+def _section(a: Account) -> tuple:
+    return (a.iban, a.currency, a.period, a.closing, a.total_debit, a.total_credit, a.trustworthy) + tuple(
+        tx_key(t) for t in a.txs
+    )
 
 
 def parse_pdf(path: Path, company: str) -> Statement:
