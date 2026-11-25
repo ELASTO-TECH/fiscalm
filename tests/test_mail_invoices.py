@@ -385,9 +385,6 @@ def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
     got = ai_extract.check(reading(**{field: value})("", "", {}), companies.all(ledger))
     assert (getattr(got, field), got.rejected) == (kept, () if kept else (field,))
     assert ai_extract.check(reading(card_last4="2026")("", "", {}), {}, "Date 2026-10-28\nTotal 1.00").card_last4 == ""
-    assert not mi._unsure(
-        mi.Doc("pdf", ubl=True), mi.Outcome("asked", reason="buyer-unclear")
-    )  # the UBL's fields stand
 
 
 @pytest.mark.parametrize(
@@ -398,6 +395,8 @@ def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
         (invoice("Order ABC-1984", buyer="Atelier Nord SRL", number=""), {"number": "ABC-1984"}),  # our own number
         (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {}),  # a currency the document never shows
         (invoice("Ship to: Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),  # only its delivery address
+        (invoice("Ship to:  Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {}),
+        (invoice(buyer="Atelier Nord SRL", total="Total 12.10 EUR MegaCloud"), {"seller_name": "Cloud"}),
         (invoice(buyer="Atelier Nord SRL"), {"seller_name": "Invented Vendor"}),  # a supplier it doesn't print
         (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {"total": "", "currency": ""}),
         (invoice(buyer="Atelier Nord SRL"), {"total": "", "currency": "USD"}),  # another currency than the rules'
@@ -974,6 +973,14 @@ def test_ubl_tax_identities_are_compared_whole(ledger):
     assert mi.handle(ledger, message(("xml", ro.encode()), mid="ro2")) == "efactura:1"
     own = UBL.format(country="DE", supplier="RO33333333")
     assert mi.handle(ledger, message(("xml", own.encode()), mid="own")) == "issued:1"  # STUDIO9 sold it
+
+
+def test_an_ai_never_reads_over_the_ubl_of_its_pdf(ledger):
+    foreign = UBL.format(country="DE", supplier="DE123456789").replace("RO11111111", "DE11111111").encode()
+    pdf = text_pdf(["Rechnung DE-77", "Atelier Nord SRL", "Gesamtbetrag 49,00 EUR"])
+    ask = reading(total="49.00")
+    assert mi.handle(ledger, message(("xml", foreign), ("pdf", pdf)), ask=ask) == "asked:1,same-as-pdf:1"
+    assert ask.calls == []
 
 
 def test_a_pdf_that_disagrees_with_its_ubl_is_judged_on_its_own(ledger):

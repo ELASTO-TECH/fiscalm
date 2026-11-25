@@ -291,8 +291,22 @@ def roles(text: str, firms: list[str]) -> dict[str, str]:
 
 
 def disputed(text: str, firms: list[str]) -> list[str]:
-    """Firms whose labelled mentions disagree or only stand under a delivery label: never the buyer by an AI's word."""
-    return [key for key, seen in role_labels(text, firms).items() if seen and (len(seen) > 1 or seen == {""})]
+    """Firms whose labelled mentions disagree, or named on or just below a delivery label: never the buyer by an AI's
+    word, whatever the layout."""
+    lines = text.splitlines()
+
+    def delivered(co: companies.Company) -> bool:
+        return any(
+            (co.named_in(line) or co.tax_id_match(line))
+            and any(DELIVERY.search(x) for x in lines[max(0, i - ABOVE) : i + 1])
+            for i, line in enumerate(lines)
+        )
+
+    return [
+        key
+        for key, seen in role_labels(text, firms).items()
+        if (seen and (len(seen) > 1 or seen == {""})) or delivered(companies.all()[key])
+    ]
 
 
 def role_labels(text: str, firms: list[str]) -> dict[str, set[str]]:
