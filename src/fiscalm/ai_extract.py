@@ -138,7 +138,11 @@ def _firm(name: str, tax_id: str, firms: dict[str, companies.Company], text: str
         return None  # an id that is none of the firms' beside a firm's name, or two firms: not clear
     key = next(iter(by_id or by_name))
     co = firms[key]
-    return key if not text or co.named_in(text) or co.tax_id_match(text) else None
+    if by_id and name.strip() and key not in by_name:
+        return None  # its id with another name: the AI mixed two parties
+    # The evidence that chose it stands on the page: its id, or its name when the AI read the name too.
+    printed = (by_id and co.tax_id_match(text)) or (key in by_name and co.named_in(text))
+    return key if not text or printed else None
 
 
 def check(raw: dict, firms: dict[str, companies.Company], text: str = "") -> Extraction:
@@ -156,7 +160,7 @@ def check(raw: dict, firms: dict[str, companies.Company], text: str = "") -> Ext
         "issue_date": _day(s["issue_date"].strip(), text),
         "total": _total(s["total"].strip(), text),
         "currency": currency if currency in docs.CURRENCIES else "",
-        "card_last4": card if re.fullmatch(r"\d{4}", card) and card in (text or card) else "",
+        "card_last4": card if re.fullmatch(r"\d{4}", card) and (not text or docs._card(text) == card) else "",
     }
     rejected = [k for k, v in checked.items() if s[k].strip() and not v]
     rejected += [k for k, v in (("buyer", buyer), ("seller", seller)) if v is None]

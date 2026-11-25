@@ -849,8 +849,9 @@ def _printed(text: str, amount: str, currency: str) -> bool:
 def _agreed_totals(doc: Doc, x: ai_extract.Extraction) -> list[tuple[str, str]] | None:
     """The totals with the AI's reading: the rules' own when it read none; else its total when it is one of theirs or,
     when they found none, printed positive with its currency. None: they disagree."""
-    if not x.total:
-        return doc.totals
+    if not x.total:  # the rules' one total, in a currency they read and the AI doesn't contradict
+        one = len(doc.totals) == 1 and doc.totals[0][1] and x.currency in ("", doc.totals[0][1])
+        return doc.totals if one or not doc.totals else None
     if doc.totals:
         picked = [t for t in doc.totals if t == (x.total, x.currency) and x.currency]  # the rules showed its currency
         return picked if len(picked) == 1 else None
@@ -880,14 +881,13 @@ def ai_reading(L: Ledger, doc: Doc, data: bytes, *, ask: Callable | None = None)
         doc,
         number_read=x.number,
         supplier=doc.supplier or x.seller_name,
-        card_last4=doc.card_last4 or x.card_last4,
     )
     out.refused = ""  # read now: a scan without text waits as a question, never as a silent refusal
     totals = _agreed_totals(doc, x)
-    own = bool(x.number and x.buyer and _issued_by(L, x.buyer, x.number))
+    own = any(_issued_by(L, co, x.number) for co in {*doc.firms, x.buyer} - {""})
     if not x.confident or x.rejected or own or _ai_would_refuse(L, x) or totals is None:
         return out  # in doubt: the question stays, with the fields read
-    out.date, out.totals = doc.date or x.issue_date, totals
+    out.date, out.totals, out.card_last4 = doc.date or x.issue_date, totals, doc.card_last4 or x.card_last4
     if x.buyer and (not doc.firms or x.buyer in doc.firms):
         out.firms = doc.firms or [x.buyer]
         out.roles = doc.roles | {x.buyer: "buyer"}

@@ -384,6 +384,7 @@ def test_an_ai_reading_never_overrules_the_document(ledger, fields, result):
 def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
     got = ai_extract.check(reading(**{field: value})("", "", {}), companies.all(ledger))
     assert (getattr(got, field), got.rejected) == (kept, () if kept else (field,))
+    assert ai_extract.check(reading(card_last4="2026")("", "", {}), {}, "Date 2026-10-28\nTotal 1.00").card_last4 == ""
 
 
 @pytest.mark.parametrize(
@@ -393,6 +394,16 @@ def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
         (invoice("Total paid 15.00 EUR"), {"total": "15.00", "buyer_tax_id": "RO44444444"}),  # an id none of ours
         (invoice("Order ABC-1984", buyer="Atelier Nord SRL", number=""), {"number": "ABC-1984"}),  # our own number
         (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {}),  # a currency the document never shows
+        (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {"total": "", "currency": ""}),
+        (invoice(buyer="Atelier Nord SRL"), {"total": "", "currency": "USD"}),  # another currency than the rules'
+        (
+            invoice("Order ABC-1984", "Total paid 15.00 EUR", number=""),
+            {"buyer_name": "", "buyer_tax_id": "", "number": "ABC-1984", "total": "15.00"},
+        ),
+        (
+            invoice(buyer="Customer: Other Client SA", total="Ship to: Atelier Nord SRL"),
+            {"buyer_name": "Other Client SA"},
+        ),
     ],
 )
 def test_a_contradicted_or_unsure_ai_reading_keeps_the_question(ledger, doc, fields):
