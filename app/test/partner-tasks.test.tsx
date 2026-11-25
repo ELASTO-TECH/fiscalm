@@ -185,7 +185,7 @@ describe("an inactive supplier's invoice refused for the payment file", () => {
       .toEqual(["STUDIO9 plăți furnizori", "Fișier nou"]);
     await userEvent.click(within(chooser).getByRole("button", { name: "Pune în fișier" }));
     await waitFor(() => expect(api.posts()).toHaveLength(1));
-    expect(api.posts()[0].body).toEqual({ action: "payment_file_add", file_id: 5, invoice_ids: ["205"] });
+    expect(api.posts()[0].body).toEqual({ action: "payment_file_add", file_id: 5, invoice_ids: ["205"], amounts: { 205: "49.50" } });
   });
 
   it("leads the overdue card to the invoice, where its sheet says why it can't go in a file", async () => {
