@@ -11,6 +11,7 @@ import synthetic_world as scenario
 from fiscalm import cli
 from fiscalm.api import state as api
 from fiscalm.bank import statements
+from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import finance_home
 
 DAY = date(2026, 10, 1)
@@ -97,6 +98,7 @@ def test_a_key_with_nothing_behind_it_proves_nothing(ledger):
     assert invoices == dict.fromkeys(keys, False)
     assert payments == {by_key: False}
     assert ledger.paid_proofs("NORD") == {}
+    assert efactura.mail_proved(ledger, "NORD") == []  # never a rival for a debit, nor replaced by one
 
 
 def test_evidence_proves_paid(ledger):
