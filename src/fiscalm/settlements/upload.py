@@ -287,10 +287,27 @@ def _complete(mapping: dict[str, str]) -> bool:
     return {"gross", "fee"} <= mapping.keys() and bool({"reference", "order", "awb"} & mapping.keys())
 
 
+# Words a settlement table's header uses and a line of data doesn't: one of them marks the first line as a header.
+HEADER_WORDS = {w for names in (*GUESS.values(), DATE_COLUMNS) for n in names for w in n.split() if len(w) > 2} | {
+    "suma",
+    "valoare",
+    "total",
+    "comision",
+    "taxa",
+    "numar",
+    "referinta",
+    "colet",
+    "amount",
+    "reference",
+    "payout",
+}
+
+
 def _labels(header: list[str]) -> bool:
-    """A header of column names, not a first line of data (which nearly always holds an amount or an id): every cell
-    starts with a letter and holds no digit and no address. Only such a header leaves the install."""
-    return all(re.fullmatch(r"[^\W\d_][^\d@]{0,79}", c) for c in header)
+    """A header of column names, not a first line of data: every cell starts with a letter and holds no digit and no
+    address, and one names what a settlement column holds (`HEADER_WORDS`). Only such a header leaves the install."""
+    words = {w for c in header for w in _plain(c).split()}
+    return all(re.fullmatch(r"[^\W\d_][^\d@]{0,79}", c) for c in header) and bool(words & HEADER_WORDS)
 
 
 def _ai_columns(L: Ledger, rows: list[list[str]], orders: bool, known: dict[str, str]) -> dict[str, str]:

@@ -451,7 +451,7 @@ def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, e
     assert preview["currency"] == "EUR"
     assert len(asked) == 1 and "TEST-1" not in asked[0] and "xxxx-9" in asked[0]  # cells leave only as shapes
     asked.clear()
-    for first in (b"TEST-1,100.00,2.00", b"INV-12,EUR 42.50,EUR 1.25"):  # headerless: its first line is data
+    for first in (b"TEST-1,100.00,2.00", b"INV-12,EUR 42.50,EUR 1.25", b"Mara Exemplu,Cluj,Achitat"):  # data lines
         with pytest.raises(bank_upload.Refused):
             bank_upload.accept_report(ledger, "NORD", first + b"\nTEST-2,5.00,0\n", "text/csv", **UPLOAD)
     assert asked == []
