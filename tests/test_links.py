@@ -766,24 +766,42 @@ EUR_ACCOUNT = "RO71BTRLEURCRT0000000001"
 
 
 @pytest.mark.parametrize(
-    "extra,claimed",
-    [
-        ([_tx(66, "debit", "800.00", counterparty_iban=EUR_ACCOUNT, day=TODAY - timedelta(days=4))], False),
-        ([], True),  # a pending report's payer claims the credit after the rows were read
-    ],
-    ids=["two debits, one credit", "a report claims the credit"],
+    "case",
+    ["two debits, one credit", "a report claims the credit", "another firm's account", "an unreadable line", "a rule"],
 )
-def test_a_transfer_rule_leaves_a_credit_two_debits_or_a_report_could_claim(ledger, live, monkeypatch, extra, claimed):
-    out, into, *_ = _record(
+def test_a_transfer_rule_leaves_a_pair_it_cant_be_sure_of(ledger, live, monkeypatch, case):
+    """Settled by nothing: a second debit that fits the credit too, a pending report's payer claiming the credit or a
+    rule saved for it after the rows were read, a debit on another firm's account, a same-amount line fiscalm can't
+    read."""
+    debit = {"iban": "RO94BTRLRONCRT0000000002"} if case == "another firm's account" else {}
+    out, into = _record(
         ledger,
         "NORD",
-        _tx(67, "debit", "800.00", counterparty_iban=EUR_ACCOUNT),
-        _tx(68, "credit", "800.00", iban=EUR_ACCOUNT),
-        *extra,
+        _tx(67, "debit", "800.00", counterparty_iban=EUR_ACCOUNT, **debit),
+        _tx(68, "credit", "800.00", iban=EUR_ACCOUNT, counterparty="Administrator Exemplu"),
     )
+    if case == "two debits, one credit":
+        _record(
+            ledger, "NORD", _tx(66, "debit", "800.00", counterparty_iban=EUR_ACCOUNT, day=TODAY - timedelta(days=4))
+        )
+    if case == "an unreadable line":
+        ledger.db.execute(
+            "INSERT INTO statement_txs(tx_key,company,direction,tx,day,amount,iban) VALUES('x1','NORD','credit',NULL,?,"
+            "'800.00',?)",
+            ((TODAY - timedelta(days=3)).isoformat(), EUR_ACCOUNT),
+        )
+        ledger.db.commit()
     rows = _rows(ledger)
-    monkeypatch.setattr(settlements, "claimed_credit", lambda L, co, t: claimed and t.direction == "credit")
-    assert _apply(ledger, rows) == [] and ledger.db.execute("SELECT count(*) FROM settled_tx").fetchone()[0] == 0
+    if case == "a rule":
+        name = efactura.line_keys(_tx(68, "credit", "800.00", counterparty="Administrator Exemplu"), frozenset())[
+            "name"
+        ]
+        ledger.remember("NORD", "name", name, {"kind": "advance", "partner": None, "reason": None, "note": "A"}, None)
+    monkeypatch.setattr(settlements, "claimed_credit", lambda L, co, t: case == "a report claims the credit")
+    assert (
+        _apply(ledger, rows) == []
+        and not ledger.db.execute("SELECT 1 FROM settled_tx WHERE tx_key=?", (into,)).fetchone()
+    )
 
 
 def test_a_transfer_rule_skips_bank_interest_and_an_unassigned_card(ledger, live):

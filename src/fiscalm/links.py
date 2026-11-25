@@ -337,6 +337,8 @@ def other_end(L: Ledger, company: str, key: str, t: statements.Tx, *, but: str =
         ),
     ).fetchall()
     mine = companies.normalize_iban(t.iban)
+    if any(not r["tx"] for r in rows):  # a line fiscalm can't read may be the other end: none is sure
+        return None
 
     def fits(r) -> bool:  # the same currency; a counterparty it names is this account; no Decontare waits on it
         other = json.loads(r["tx"])
@@ -541,9 +543,9 @@ def apply_rules(L: Ledger, company: str, rows: list[dict]) -> list[str]:
 
 def _free_other_end(L: Ledger, company: str, key: str, free: set[str]) -> str | None:
     """The other end (other_end) of debit `key` when a rule may explain both as a Transfer între conturi: each is the
-    other's only candidate, it is one of the rows left free, nobody decided otherwise for it since (_decided), neither
-    is the bank's own fee or interest, the credit is no pending report's (settlements.claimed_credit), and one of the
-    two names the other's account. Two lines that only share an amount and a few days, naming no account, may be a
+    other's only candidate, it is one of the rows left free, nobody decided otherwise for it since (_decided), both
+    are on the firm's own accounts, neither is the bank's own fee or interest or has a saved rule now (proposals), the
+    credit is no pending report's (settlements.claimed_credit), and one of the two names the other's account. Two lines that only share an amount and a few days, naming no account, may be a
     payment and an unrelated collection: left to people. A line refused as a person's would be has none."""
     try:
         t, _ = _transaction(L, company, key)
@@ -555,8 +557,11 @@ def _free_other_end(L: Ledger, company: str, key: str, free: set[str]) -> str | 
         return None
     bank = {statements.BANK_FEE, statements.INTEREST} & {t.category, o.category}
     named = companies.normalize_iban(t.counterparty_iban) or companies.normalize_iban(o.counterparty_iban)
-    if bank or not named or settlements.claimed_credit(L, company, o):
+    own = companies.get(company, L=L).own_ibans
+    if bank or not named or not {companies.normalize_iban(t.iban), companies.normalize_iban(o.iban)} <= own:
         return None
+    if settlements.claimed_credit(L, company, o) or any(proposals(company, [t, o], L.memories(company))):
+        return None  # a pending report's credit, or a rule saved since the rows were read, is not a transfer's
     return other if other_end(L, company, other, o, but=key) == key else None
 
 
