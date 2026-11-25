@@ -680,6 +680,36 @@ def test_exact_amount_settling_keeps_every_other_guard(ledger, home, sec, monkey
     assert efactura.tx_key(direct) not in ledger.used_txs() and ledger.payment(paid_row)["status"] == "paid"
 
 
+@pytest.mark.parametrize(
+    "numbers,paid,debits,settled",
+    [  # a debit naming INV-12345 (paid) never settles INV-1234
+        ({"3001": "INV-12345", "3002": "INV-1234"}, ["3001"], ["Plata INV-12345"], []),
+        ({"3001": "ALFA-1234", "3002": "5678"}, [], ["Plata facturi ALFA-1234 si 5678"], []),  # names both: neither
+        ({"3001": "N7001", "3002": "N7002"}, [], ["Plata la POS SHOPX7K2", "Factura N7001"], ["3001", "3002"]),  # order
+    ],
+)
+def test_a_debit_naming_invoices_fits_only_those_whatever_the_order(
+    ledger, home, sec, monkeypatch, numbers, paid, debits, settled
+):
+    """Review of #40, round 2: whole references are read exactly as written, digits that belong to one name nothing
+    else, and a debit left with one candidate once another settled is settled too, whatever the statement's order."""
+    _stored(ledger, monkeypatch, **{m: ubl(total="40.00", number=n, iban="") for m, n in numbers.items()})
+    for m in paid:
+        ledger.db.execute("UPDATE efactura SET status='paid', paid_tx='x' WHERE message_id=?", (m,))
+    ledger.db.commit()
+    txs = [_tx("40.00", date(2026, 10, 21 + n), desc=d) for n, d in enumerate(debits)]
+    assert sorted(efactura.match_statement(ledger, _debit_st(*txs))) == settled
+
+
+def test_a_direct_debit_with_the_shops_name_is_not_a_till_receipts_card_payment(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="ALPHA ELECTRONIC SRL", total="99.90", iban="")})
+    ledger.db.execute("UPDATE efactura SET status='paid', paid_tx='bon:sha-bon' WHERE message_id='3001'")
+    ledger.db.commit()
+    direct = _tx("99.90", date(2026, 10, 21), "ALPHA ELECTRONIC", desc="Debit direct ALPHA ELECTRONIC")
+    efactura.match_statement(ledger, _debit_st(direct))
+    assert efactura.tx_key(direct) not in ledger.used_txs()
+
+
 def test_eur_invoice_matches_original_amount(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"3001": ubl(currency="EUR", total="20.00", supplier="FURNIZOR EXEMPLU SRL")})
     t = _tx(
