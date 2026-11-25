@@ -180,6 +180,7 @@ def test_shop_never_overwrites_saved_client(shop):
 def test_same_firm_names(saved, typed, country, same):
     assert c.same_firm(dict(name=saved, country=country), dict(name=typed)) is same
     assert not c.same_firm(dict(name=saved, country=country), dict(name=saved, private=True))
+    assert not c.same_firm(dict(name=saved, country=country, private=True), dict(name=saved))
 
 
 @pytest.mark.parametrize("name", ["S.C. FIRMA FICTIVA S.R.L.", "firma fictivă"])
@@ -190,7 +191,8 @@ def test_returning_firm_accepts_address_and_email_drift(shop, name):
     buyer = dict(type="company", name=name, cui=PARTY["cui"], email="comenzi@example.invalid")
     buyer["address"] = body["buyer"]["address"] | dict(street="Str. Exemplu 10")
     result = c.intake(L, "NORD", body | dict(buyer=buyer), "2026-10-31")
-    assert c.get(L, "NORD", result["id"])["client_id"] == cid
+    order = c.get(L, "NORD", result["id"])
+    assert order["client_id"] == cid and order["body"]["buyer"] == buyer
     client = i.invoice(L, result["draft_id"], company="NORD")["data"]["client"]
     assert (client["street"], client["email"]) == ("Strada Exemplu nr. 10", PARTY["email"])
     assert L.db.execute("SELECT data FROM invoice_clients WHERE id=?", (cid,)).fetchone()[0] == before
