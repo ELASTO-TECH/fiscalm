@@ -117,9 +117,14 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
 
 
 def _refuse_twice(st: statements.Statement) -> None:
-    """One statement holds an account's days once: two sections of one account for the same days settle nothing."""
+    """One statement holds an account's days once, in the currency the firm keeps it in: two sections of one account
+    for the same days, or an account in another currency, settle nothing."""
+    co = companies.get(st.company)
     seen: dict[tuple[str, str], list[tuple[date, date]]] = {}
     for a in st.accounts:
+        own = co.account(a.iban)
+        if own and own.currency != a.currency:
+            raise statements.StatementError("Statement account currency differs from the firm's account")
         lo, hi = a.period or (st.period_start, st.period_end)
         run = seen.setdefault((companies.normalize_iban(a.iban), a.currency), [])
         if any(lo <= theirs_hi and theirs_lo <= hi for theirs_lo, theirs_hi in run):
@@ -461,12 +466,19 @@ def _refuse_break(before: statements.Account, after: statements.Account, numbere
         raise statements.StatementError("Statement balances do not chain with the next or previous month")
 
 
-def month_missing(L: Ledger, company: str, month: str) -> list[str]:
+def month_missing(L: Ledger, company: str, month: str) -> list[str] | None:
     """The accounts the month's stored statements leave out at their banks (missing_accounts of them together); a
-    statement of one account is imported on its own, and this says which ones are still to come."""
-    co = companies.get(company)
+    statement of one account is imported on its own, and this says which ones are still to come. None when a stored
+    statement's accounts can't be learned (learn_accounts), or the firm is unknown: nobody can say the month is
+    complete."""
+    if company not in companies.all(L):
+        return None
+    co = companies.get(company, L=L)
     docs = [d for d in L.documents(company=company, month=month, kind="statement") if not d["path"].endswith(".csv")]
-    owned = [co.account(i) for d in docs for i in json.loads(d["accounts"] or "[]")]
+    learned = [learn_accounts(L, d) for d in docs]
+    if not all(learned):
+        return None
+    owned = [co.account(i) for ibans in learned for i in ibans]
     first = date.fromisoformat(month + "-01")
     accounts = [statements.Account(a.iban, a.currency) for a in owned if a]
     st = statements.Statement(company, first, _month_end(first), accounts)
@@ -583,7 +595,7 @@ def _ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: t
         "unprotected": str(dest),
         "transactions": len(st.txs),
         "balanced": not issues,
-        "missing": [] if st.partial else month_missing(L, st.company, st.month),
+        "missing": [] if st.partial else month_missing(L, st.company, st.month) or [],
         "payments_marked_paid": paid,
         "efactura_marked_paid": ef_paid,
     }

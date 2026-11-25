@@ -354,7 +354,7 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
         "unprotected": ", ".join(str(dest) for dest, _ in stored),
         "transactions": len(st.txs),
         "balanced": all(a.balanced for a in st.accounts),
-        "missing": month_missing(ledger, parts[0].company, parts[0].month),
+        "missing": month_missing(ledger, parts[0].company, parts[0].month) or [],
         "payments_marked_paid": paid,
         "efactura_marked_paid": ef_paid,
     }

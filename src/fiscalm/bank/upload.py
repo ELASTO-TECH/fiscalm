@@ -145,6 +145,7 @@ KNOWN = (
     ("several months", "Extrasul cuprinde mai multe luni. Încarcă din bancă extrasul fiecărei luni."),
     ("files of different months", "Fișierele sunt din luni diferite. Încarcă împreună extrasele unei singure luni."),
     ("appears twice", "Un cont apare de două ori pentru aceleași zile. Încarcă fiecare extras o singură dată."),
+    ("currency differs", "Un cont din extras are altă monedă decât cea trecută la firmă. Verifică extrasul și contul."),
     ("every file must name one period", RESTATE),
     ("do not chain", "Soldurile extraselor nu se leagă: lipsește un extras. Încarcă toate extrasele lunii."),
     ("Overlapping statement", "Extrasul se suprapune cu unul încărcat deja pentru același cont."),

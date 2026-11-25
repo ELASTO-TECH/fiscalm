@@ -79,10 +79,14 @@ def pending_docs(ledger: Ledger, company: str, month: str, *, left_out: bool = F
     contabilului" stay out (`left_out=True` lists those instead)."""
     held, docs = not_mailed(ledger, company), ledger.documents(company=company, up_to_month=month, unsent_only=True)
     named = ledger.linked_receipts(company, docs)
+    # an earlier month's statements don't ride along while accounts of their banks are known to be still to come
+    waiting = {d["month"] for d in docs if d["kind"] == "statement" and month_missing(ledger, company, d["month"])}
     return [
         d
         for d in docs
-        if not held_upload(d, named) and (d["kind"] == "receipt" and partner_of(company, d) in held) == left_out
+        if not held_upload(d, named)
+        and (d["kind"] == "receipt" and partner_of(company, d) in held) == left_out
+        and not (d["kind"] == "statement" and d["month"] in waiting)
     ]
 
 
@@ -98,7 +102,7 @@ def ready(ledger: Ledger, company: str, month: str) -> bool:
     has_statement = any(
         not str(d["path"]).endswith(".csv") for d in ledger.documents(company=company, month=month, kind="statement")
     )
-    complete = has_statement and not month_missing(ledger, company, month)
+    complete = has_statement and month_missing(ledger, company, month) == []
     return complete and bool(pending_docs(ledger, company, month))
 
 

@@ -48,6 +48,30 @@ def test_a_statement_of_some_accounts_is_imported_and_names_those_still_to_come(
     assert statement_intake.month_missing(ledger, "NORD", "2026-10") == ["RON 0001"]
 
 
+def test_an_account_in_another_currency_than_the_firms_is_refused(ledger, tmp_path):
+    ron = companies.get("NORD").ibans["RON"]
+    r = recon.ingest_file(ledger, write(tmp_path, xml(iban=ron, currency="EUR")), operator=True)
+    assert r["status"] == "refused" and "currency differs" in r["errors"][0] and not ledger.documents()
+
+
+def test_the_pack_takes_a_months_statements_only_with_every_account_of_their_banks(ledger, tmp_path):
+    """October's RON alone doesn't ride along with November's pack; with October's EUR both go, and a statement
+    whose accounts can't be learned leaves its month waiting."""
+    nord = companies.get("NORD")
+    ron, eur = nord.ibans["RON"], nord.ibans["EUR"]
+    ledger.add_document("oct-ron", "NORD", "2026-10", "statement", "/x/oct-ron.xml", accounts=[ron])
+    ledger.add_document("nov", "NORD", "2026-11", "statement", "/x/nov.xml", accounts=[ron, eur])
+    assert [d["sha"] for d in pack.pending_docs(ledger, "NORD", "2026-11")] == ["nov"]
+    ledger.add_document("oct-eur", "NORD", "2026-10", "statement", "/x/oct-eur.xml", accounts=[eur])
+    assert {d["sha"] for d in pack.pending_docs(ledger, "NORD", "2026-11")} == {"oct-ron", "oct-eur", "nov"}
+    ledger.add_document("dec", "NORD", "2026-12", "statement", str(tmp_path / "gone.xml"))  # accounts never recorded
+    assert statement_intake.month_missing(ledger, "NORD", "2026-12") is None and not pack.ready(
+        ledger, "NORD", "2026-12"
+    )
+    ledger.add_document("sep", "NORD", "2026-09", "statement", str(write(tmp_path, complete())))
+    assert statement_intake.month_missing(ledger, "NORD", "2026-09") == []  # read once to learn its accounts
+
+
 @pytest.mark.parametrize(
     "accounts,data,missing",
     [
