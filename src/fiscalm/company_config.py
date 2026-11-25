@@ -472,12 +472,16 @@ def set_dates(
         account = own.account(iban) if own else None
         if not account:
             raise CompanyError("Contul nu este al acestei firme.")
+        if opened is None and retired is None:
+            raise CompanyError("Lipsește data de schimbat: deschiderea sau închiderea contului.")
         opened = account.opened if opened is None else opened
         retired = account.retired if retired is None else retired
         if opened and not companies.opening(opened):
             raise CompanyError("Luna deschiderii se scrie AAAA-LL, de exemplu 2023-07, sau ziua: 2023-07-14.")
         if retired and not (len(retired) == 10 and companies.opening(retired)):
             raise CompanyError("Ziua închiderii se scrie AAAA-LL-ZZ, de exemplu 2026-10-31.")
+        if opened and opened > today.isoformat()[: len(opened)] and opened != account.opened:
+            raise CompanyError("Contul se deschide doar cu o lună sau o zi care a trecut.")  # a typo would excuse it
         if retired and retired > today.isoformat() and retired != account.retired:
             raise CompanyError("Contul se închide doar cu o zi care a trecut sau azi.")
         if retired and account.pays:

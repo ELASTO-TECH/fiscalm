@@ -183,6 +183,7 @@ def test_an_accounts_opening_month_is_set_from_the_cli(config, ledger, month, re
         ("RON", "", "2026-10-31", "Plățile pleacă din acest cont"),  # payment files debit it: replaced first
         ("STRANGER", "", "", "nu este al acestei firme"),
         ("EUR", "", "tomorrow", "o zi care a trecut"),  # a later day would stop reading the account now
+        ("EUR", "2099-01", "", "o lună sau o zi care a trecut"),  # a typo would excuse it from every statement
     ],
 )
 def test_an_accounts_dates_are_set_in_the_app(config, ledger, who, opened, retired, said):
@@ -214,6 +215,9 @@ def test_a_date_left_out_keeps_what_is_recorded(config, ledger):
         "2026-10-31",
     )
     assert not actions.act("company-account-dates", "ALL", {"key": "NORD", "account": account})["ok"]  # nothing to set
+    assert actions.act("company-account-dates", "ALL", {"key": "NORD", "account": account, "retired": ""})["ok"]
+    assert not companies.get("NORD").account(eur).retired  # open again: read and owed as before
+    assert cli.main(["company", "dates", "--company", "NORD", "--iban", eur]) == 2  # the CLI, the same rule
 
 
 def test_choosing_the_paying_account_again_keeps_its_opening_month(config, ledger):
