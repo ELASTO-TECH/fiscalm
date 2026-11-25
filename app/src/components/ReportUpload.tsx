@@ -70,19 +70,20 @@ export function ReportUpload({ co, reload }: { co: string; reload: () => void })
       const p = r.report as ReportPreview;
       setPreview(p); setDay(p.date); setPartner(p.payer); setMapping(p.guess); setCurrency(p.currency || "RON");
       // A proposed source (preset, AI) is only a suggestion: the person still picks who sent the file.
-      if (p.proposed) setSource(p.source); else pick(p, p.source, p.currency || "RON");
+      // A new file's form starts from no payer: nothing typed for the previous file is kept.
+      if (p.proposed) setSource(p.source); else pick(p, p.source, p.currency || "RON", { name: "", cui: "", courier: "" });
     }
     if (r?.ok) { setFile(null); setPreview(null); reload(); }
   };
   /** Choosing the courier or processor fills in the payer the firm already saved for it, when there is exactly one;
    * another choice clears each value the earlier fill wrote and the person left as it was, never what they typed. */
-  const pick = (p: ReportPreview, id: string, shown = currency) => {
+  const pick = (p: ReportPreview, id: string, shown = currency, typed = { name, cui, courier }) => {
     setSource(id);
     const was = filled.current, saved = p.payers.filter((x) => x.source === id), next = saved.length === 1 ? saved[0] : null;
     filled.current = next;
     const keep = (value: string, old: string | undefined, empty = "") => (was && value === old ? empty : value);
-    setName(next ? next.name : keep(name, was?.name)); setCui(next ? next.cui : keep(cui, was?.cui));
-    setCourier(next ? next.courier : keep(courier, was?.courier));
+    setName(next ? next.name : keep(typed.name, was?.name)); setCui(next ? next.cui : keep(typed.cui, was?.cui));
+    setCourier(next ? next.courier : keep(typed.courier, was?.courier));
     if (!p.currency) setCurrency(next?.currency || keep(shown, was?.currency, "RON"));
   };
   const upload = () => {

@@ -288,8 +288,9 @@ def _complete(mapping: dict[str, str]) -> bool:
 
 
 def _labels(header: list[str]) -> bool:
-    """A header of column names, not a first line of data: words, no long digit runs, no addresses."""
-    return all(re.fullmatch(r"[^\W\d_][^@]{0,79}", c) and not re.search(r"\d{3,}", c) for c in header)
+    """A header of column names, not a first line of data (which nearly always holds an amount or an id): every cell
+    starts with a letter and holds no digit and no address. Only such a header leaves the install."""
+    return all(re.fullmatch(r"[^\W\d_][^\d@]{0,79}", c) for c in header)
 
 
 def _ai_columns(L: Ledger, rows: list[list[str]], orders: bool, known: dict[str, str]) -> dict[str, str]:
