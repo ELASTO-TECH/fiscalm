@@ -615,10 +615,9 @@ def test_failed_recovery_does_not_block_sync(ledger, monkeypatch):
     monkeypatch.setattr(cli.archive, "archive_all", stage("archive", []))
     monkeypatch.setattr(cli.pay, "prepare_files", stage("payment files", []))
     monkeypatch.setattr(cli.pay, "refresh_to_pay", stage("refresh", []))
-    monkeypatch.setattr(cli.recon, "write_report", stage("report", ("fake", {})))
     monkeypatch.setattr(cli.pack, "ready", stage("pack ready", False))
     assert cli.cmd_sync(Namespace(), ledger) == 0
-    assert {"mail", "payment files", "pack ready", "report"} <= set(calls)
+    assert {"mail", "payment files", "pack ready"} <= set(calls)
     # Setări shows the last automatic check and when mail was read: the tick's sync records both (no agent run does),
     # in shadow mode too (this ledger is not live)
     assert ledger.get_meta("last_run_at") and ledger.get_meta("last_check_at")
@@ -657,5 +656,4 @@ def test_offline_scale_tick_reads_synthetic_inputs_without_money_changes(ledger,
     measured = tick_benchmark.run(ledger, datetime(2026, 10, 27, 9, 30), legacy_registry=legacy, mail_count=1)
     assert measured["mode"] == "shadow"
     assert measured["mail_messages"] == 1 and measured["receipt_extractions"] == 3
-    assert measured["statement_rows"] > 0 and measured["reports"] == 4
     assert measured["external_connections"] == 0 and measured["pdf_subprocesses"] == 4

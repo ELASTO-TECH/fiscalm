@@ -706,21 +706,15 @@ def test_temp_sweep_stays_inside_inbox(ledger, home):
     assert (day / "complete.jpg").exists() and outside.exists()
 
 
-def test_uploads_excluded_from_news_and_unsent(ledger, home, monkeypatch):
+def test_uploads_excluded_from_news_and_unsent(ledger, home):
     from datetime import datetime, timedelta
-
-    from fiscalm import recon
 
     token = upload_links.create(ledger, "NORD", "Phone")["path"][3:]
     intake.accept(ledger, token, [("jpg", JPEG)])
     assert not api._news(ledger, "NORD", datetime.now() - timedelta(days=1), [])
-    from types import SimpleNamespace
-
     month = upload_links.timestamp()[:7]
     ledger.add_document("a" * 64, "NORD", month, "statement", str(home / "statement.pdf"))
-    monkeypatch.setattr(recon.statements, "parse", lambda *args: SimpleNamespace(accounts=[], txs=[]))
-    _, summary = recon.build_report(ledger, "NORD", month)
-    assert summary["unsent_docs"] == len(pack.pending_docs(ledger, "NORD", month)) == 1
+    assert [d["sha"] for d in pack.pending_docs(ledger, "NORD", month)] == ["a" * 64]  # the statement, not the upload
 
 
 def test_shared_socket_timeout_only_limits_reads(ledger, server, monkeypatch):

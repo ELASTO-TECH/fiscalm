@@ -2,23 +2,20 @@
 
 from __future__ import annotations
 
-import calendar
 import hashlib
 import json
 import resource
 import socket
 import subprocess
 from contextlib import ExitStack
-from datetime import date, datetime, timedelta
-from decimal import Decimal
+from datetime import date, datetime
 from time import perf_counter
 from unittest.mock import patch
-from xml.sax.saxutils import escape
 
 from imap_fake import Fake, mail, plain_connect
 from pdf_fake import text_pdf
 
-from fiscalm import ai, cli, companies, integrations, receipt_items, recon
+from fiscalm import ai, cli, companies, integrations, receipt_items
 from fiscalm.ledger import Ledger, finance_home, is_live
 from fiscalm.mail import invoices
 
@@ -30,50 +27,6 @@ def money_digest(L: Ledger) -> str:
             data = {k: v for k, v in dict(row).items() if k not in ("created_at", "updated_at")}
             digest.update(json.dumps(data, sort_keys=True, default=str).encode())
     return digest.hexdigest()
-
-
-def statement_inputs(L: Ledger, now: datetime) -> int:
-    """Supported CAMT files for the two months the scheduled tick actually reports."""
-    total = 0
-    for co, firm in companies.all(L).items():
-        for month in (
-            now.strftime("%Y-%m"),
-            (now.date().replace(day=1) - timedelta(days=1)).strftime("%Y-%m"),
-        ):
-            rows = L.db.execute(
-                "SELECT * FROM statement_txs WHERE company=? AND day LIKE ? ORDER BY rowid", (co, month + "%")
-            ).fetchall()
-            closing, entries = Decimal("1000.00"), []
-            for row in rows:
-                credit = row["direction"] == "credit"
-                closing += Decimal(row["amount"]) * (1 if credit else -1)
-                tx = json.loads(row["tx"])
-                party = "Dbtr" if credit else "Cdtr"
-                entries.append(
-                    f'<Ntry><Amt Ccy="RON">{row["amount"]}</Amt><CdtDbtInd>{"CRDT" if credit else "DBIT"}</CdtDbtInd>'
-                    f"<Sts>BOOK</Sts><BookgDt><Dt>{row['day']}</Dt></BookgDt><NtryDtls><TxDtls>"
-                    f"<Refs><EndToEndId>{escape(tx['ref'])}</EndToEndId></Refs>"
-                    f"<RltdPties><{party}><Nm>Partener Sintetic</Nm></{party}></RltdPties>"
-                    "<RmtInf><Ustrd>Synthetic</Ustrd></RmtInf></TxDtls></NtryDtls></Ntry>"
-                )
-            last = calendar.monthrange(int(month[:4]), int(month[5:]))[1]
-            balances = "".join(
-                f'<Bal><Tp><CdOrPrtry><Cd>{code}</Cd></CdOrPrtry></Tp><Amt Ccy="RON">{abs(amount)}</Amt>'
-                f"<CdtDbtInd>{'CRDT' if amount >= 0 else 'DBIT'}</CdtDbtInd><Dt><Dt>{month}-{day:02d}</Dt></Dt></Bal>"
-                for code, amount, day in (("OPBD", Decimal("1000.00"), 1), ("CLBD", closing, last))
-            )
-            path = finance_home() / co / f"offline-{month}.xml"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            raw = (
-                f'<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><BkToCstmrStmt><Stmt>'
-                f"<Acct><Id><IBAN>{firm.ron_iban}</IBAN></Id><Ccy>RON</Ccy></Acct>{balances}"
-                + "".join(entries)
-                + "</Stmt></BkToCstmrStmt></Document>"
-            ).encode()
-            path.write_bytes(raw)
-            L.add_document(hashlib.sha256(raw).hexdigest(), co, month, "statement", str(path))
-            total += len(rows)
-    return total
 
 
 def receipt_inputs(L: Ledger, co: str, now: datetime) -> None:
@@ -149,7 +102,6 @@ def run(L: Ledger, now: datetime, *, legacy_registry: bool = False, mail_count: 
     """Real CLI stages, IMAP protocol and PDF extraction; remote model inference is a deterministic fake."""
     assert not is_live()
     co = next(iter(companies.all(L)))
-    statement_rows = statement_inputs(L, now)
     receipt_inputs(L, co, now)
     fake = mailbox_inputs(L, now, mail_count)
     phases, output = {}, []
@@ -210,7 +162,6 @@ def run(L: Ledger, now: datetime, *, legacy_registry: bool = False, mail_count: 
                 (cli.bank_feed, "run_all", cli.bank_feed.run_all),
                 (cli.pay, "prepare_files", cli.pay.prepare_files),
                 (cli.pay, "refresh_to_pay", cli.pay.refresh_to_pay),
-                (recon, "write_report", recon.write_report),
                 (cli.pack, "ready", cli.pack.ready),
                 (receipt_items, "extract_pending", receipt_items.extract_pending),
             ):
@@ -223,7 +174,6 @@ def run(L: Ledger, now: datetime, *, legacy_registry: bool = False, mail_count: 
                 (cli, "_out", output.append),
                 (cli, "date", Date),
                 (cli, "datetime", Datetime),
-                (recon, "datetime", Datetime),
             ):
                 stack.enter_context(patch.object(module, name, value))
             if legacy_registry:
@@ -232,8 +182,6 @@ def run(L: Ledger, now: datetime, *, legacy_registry: bool = False, mail_count: 
             start = perf_counter()
             assert cli.cmd_sync(None, L) == 0
             elapsed = perf_counter() - start
-        assert all(r["statement"] for r in output[0]["reports"].values())
-        assert sum(r["transactions"] for r in output[0]["reports"].values()) == statement_rows
         assert money_digest(L) == before
         assert not is_live() and not external_calls and inference_calls == 3
         assert not (fake.verbs() & {"STORE", "APPEND", "EXPUNGE"})
@@ -251,8 +199,6 @@ def run(L: Ledger, now: datetime, *, legacy_registry: bool = False, mail_count: 
             "mail_messages": mail_count,
             "receipt_extractions": inference_calls,
             "external_connections": external_calls,
-            "reports": len(output[0]["reports"]),
-            "statement_rows": statement_rows,
             "money_digest": before,
             "max_rss_mib": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1),
         }

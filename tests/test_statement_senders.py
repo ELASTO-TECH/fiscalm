@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 from firms import set_firm
 
-from fiscalm import accountant, companies, company_config, recon
+from fiscalm import accountant, companies, company_config
 from fiscalm.bank import catalogue as banks, upload as statement_upload
 from fiscalm.mail import imap as imapread, invoices as mail_invoices
 
@@ -72,12 +72,6 @@ def test_pdf_support_names_catalogue_readers(monkeypatch, readers, message):
     ing = replace(banks.BY_ID["ing"], statement_formats=("camt053", "example-pdf"))
     monkeypatch.setattr(banks, "CATALOGUE", tuple(ing if r == "ing" else banks.BY_ID[r] for r in readers))
     assert statement_upload.pdf_support() == message
-
-
-def test_missing_statement_report_makes_no_arrival_promise(ledger):
-    text, summary = recon.build_report(ledger, "NORD", "2026-10")
-    assert text.split("## Bank statement\n")[1] == "- No statement for this month yet\n"
-    assert summary["statement"] is False
 
 
 def test_statement_classification_precedes_accountant_sender(monkeypatch, ledger):

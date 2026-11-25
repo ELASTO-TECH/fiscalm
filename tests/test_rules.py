@@ -21,7 +21,6 @@ from test_efactura import OTHER_IBAN, _stored, ubl
 from fiscalm import companies, pack, rules
 from fiscalm.api import (
     actions,
-    mcp_tools,
     schema as api_schema,
     state as api,
     tokens,
@@ -302,8 +301,6 @@ def test_legacy_bearer_configuration_is_documented_as_forbidden():
     operation = api_schema.openapi()["paths"]["/api/v1/companies/{co}/invoicing/auto-upload"]["post"]
     assert "200" not in operation["responses"] and "403" in operation["responses"]
     assert "admin_required" in operation["description"]
-    tool = next(t for t in mcp_tools.definitions("write") if t["name"] == "invoicing_auto_upload")
-    assert "403 admin_required" in tool["description"]
 
 
 @pytest.mark.parametrize(
