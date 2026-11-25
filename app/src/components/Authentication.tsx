@@ -223,7 +223,8 @@ type ConfirmationPending = { finish: (accepted: boolean) => void; owner: string 
 function useConfirmation(identity: Identity, readIdentity: () => Promise<Identity | null>) {
   const [pending, setPending] = useState<ConfirmationPending | null>(null);
   const active = useRef<ConfirmationPending | null>(null);
-  useEffect(() => {
+  // Registered during the commit, not after paint: a refusal answered while the screen is already visible still finds its sheet.
+  useLayoutEffect(() => {
     let live = true;
     const ask = (event: Event) => {
       const request = (event as CustomEvent<Reauthentication>).detail;

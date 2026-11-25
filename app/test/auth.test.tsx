@@ -17,7 +17,7 @@ import { Sheet } from "@/components/Sheets";
 import { Codes, PasskeyEnrollment } from "@/components/Enrollment";
 import { SignOut, UserAccount } from "@/components/UserAccount";
 import { Authentication, PasswordCode } from "@/components/Authentication";
-import { base, getBootstrap, postAccess, postFile, HTTPS_REQUIRED, SESSION_CHANGED, SESSION_ENDED, postAuth } from "@/lib/api";
+import { base, getBootstrap, postAccess, postFile, HTTPS_REQUIRED, REAUTHENTICATE, SESSION_CHANGED, SESSION_ENDED, postAuth } from "@/lib/api";
 import { answer, at, deferred, fixture, fixtureIdentity, json, renderSignedIn, server } from "./helpers";
 
 const page = <Authentication bootstrap pending={<ShellSkeleton />}><App /></Authentication>;
@@ -815,6 +815,16 @@ it.each(["before", "after"])("does not repeat the operation for another account 
   expect(api.posts().filter(c => c.url === "/web/api/token-create")).toHaveLength(1);
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(screen.getByLabelText("Denumire")).toHaveValue("");
+});
+
+it("listens for a step-up from the first paint of the signed-in screen", async () => {
+  server(); const asked = new Promise<boolean>(resolve => {
+    const painted = new MutationObserver(() => {
+      if (!screen.queryByText("Conținut privat")) return; painted.disconnect();
+      resolve(!window.dispatchEvent(new CustomEvent(REAUTHENTICATE, { cancelable: true, detail: { finish: () => {} } })));
+    }); painted.observe(document.body, { childList: true, subtree: true });
+  });
+  render(privateApp); expect(await asked).toBe(true);
 });
 
 it("does not open another confirmation loop when the retried request is refused again", async () => {
