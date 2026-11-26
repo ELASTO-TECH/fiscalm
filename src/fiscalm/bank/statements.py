@@ -562,7 +562,8 @@ def _pdf_balance(
     acct: Account, row: re.Match[str], title: str, opening: dict[int, Decimal], final: dict[int, Decimal], daily=None
 ) -> None:
     if daily and title.startswith("RULAJ ZI") and row.group("a2") and daily[1]:
-        daily[0][(id(acct), daily[1])] = (parse_amount(row.group("a1")), parse_amount(row.group("a2")))
+        key, totals = (id(acct), daily[1]), (parse_amount(row.group("a1")), parse_amount(row.group("a2")))
+        daily[0][key] = totals if daily[0].get(key, totals) == totals else None  # None: two that disagree
     if title.startswith("SOLD ANTERIOR") and acct.txs == [] and id(acct) not in opening:
         opening[id(acct)] = parse_amount(row.group("a1"))
     if title.startswith("SOLD FINAL CONT") and final.get(id(acct), 0) is not None:  # None: contradicted totals
@@ -595,8 +596,9 @@ MAX_LINES = 20  # lines of one day (or section) whose assignment is checked to b
 
 
 def _only_assignment(amounts: list[Decimal], debit: Decimal) -> bool:
-    """Exactly one choice of these lines sums to `debit` (the rest being the credits)."""
-    if len(amounts) > MAX_LINES:
+    """Exactly one choice of these lines sums to `debit` (the rest being the credits). Only positive amounts are
+    counted so; any other leaves it unproven."""
+    if len(amounts) > MAX_LINES or any(a <= 0 for a in amounts):
         return False
     ways: dict[Decimal, int] = {Decimal(0): 1}
     for a in amounts:
@@ -607,16 +609,21 @@ def _only_assignment(amounts: list[Decimal], debit: Decimal) -> bool:
 
 
 def _proven(acct: Account, reading: dict[int, str], days: dict) -> bool:
-    """No other assignment of the lines gives the bank's totals: day by day when every line's day has its RULAJ ZI
-    (and the reading gives each), else over the whole section."""
+    """No other assignment of the lines gives the bank's totals. The reading gives every day's RULAJ ZI it prints (two
+    that disagree prove nothing); it is the only one per day when every line's day has one, else over the section."""
+    if None in days.values():
+        return False
+    for d in {t.date for t in acct.txs} & set(days):
+        lines = [t for t in acct.txs if t.date == d]
+        debit = sum((t.amount for t in lines if reading[id(t)] == "debit"), Decimal(0))
+        credit = sum((t.amount for t in lines if reading[id(t)] == "credit"), Decimal(0))
+        if (debit, credit) != days[d]:
+            return False
     if days and all(t.date in days for t in acct.txs):
-        for d in {t.date for t in acct.txs}:
-            lines = [t for t in acct.txs if t.date == d]
-            debit = sum((t.amount for t in lines if reading[id(t)] == "debit"), Decimal(0))
-            credit = sum((t.amount for t in lines if reading[id(t)] == "credit"), Decimal(0))
-            if (debit, credit) != days[d] or not _only_assignment([t.amount for t in lines], debit):
-                return False
-        return True
+        return all(
+            _only_assignment([t.amount for t in acct.txs if t.date == d], days[d][0])
+            for d in {t.date for t in acct.txs}
+        )
     return _only_assignment([t.amount for t in acct.txs], acct.total_debit)
 
 
