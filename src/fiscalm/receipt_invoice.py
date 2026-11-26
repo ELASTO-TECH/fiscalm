@@ -24,6 +24,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
 from fiscalm import companies, history, receipt_header
+from fiscalm.efactura import inbox
 from fiscalm.identity import tax_token
 from fiscalm.ledger import Ledger
 
@@ -47,7 +48,7 @@ def _fits(found: dict, supplier: str, invoice, *, rival: bool = False) -> bool:
         return bool(invoice["supplier_tax_id"]) and _supplier(invoice) == supplier and same_currency and payable == paid
     digits = re.sub(r"\D", "", supplier)
     maybe = _supplier(invoice) == supplier or not invoice["supplier_tax_id"] and _supplier(invoice) == digits
-    return maybe and (payable == 0 or same_currency and payable == paid)
+    return maybe and same_currency and payable in (0, paid)
 
 
 def _supplier(invoice) -> str:
@@ -55,6 +56,24 @@ def _supplier(invoice) -> str:
     if invoice["supplier_tax_id"]:
         return tax_token(invoice["supplier_tax_id"])
     return re.sub(r"\D", "", invoice["supplier_cui"] or "")
+
+
+def _nothing_prepaid(invoice) -> bool:
+    """The invoice's own UBL asks its whole total: nothing prepaid. A deposit at the till leaves the rest payable, and
+    a receipt of that deposit is no proof the invoice is paid. An unreadable file proves nothing either."""
+    try:
+        tree = inbox.stored_tree(invoice["company"], invoice["raw_path"])
+    except inbox.UblError:
+        return False
+    total = tree.find("{*}LegalMonetaryTotal") if tree is not None else None
+    if total is None:
+        return False
+    amounts = {k: (total.findtext("{*}" + k) or "").strip() for k in ("TaxInclusiveAmount", "PayableAmount")}
+    prepaid = (total.findtext("{*}PrepaidAmount") or "0").strip()
+    try:
+        return Decimal(prepaid) == 0 and Decimal(amounts["TaxInclusiveAmount"]) == Decimal(amounts["PayableAmount"])
+    except InvalidOperation:
+        return False
 
 
 def _open(invoice) -> bool:
@@ -125,7 +144,7 @@ def pairs(L: Ledger, company: str, today: date) -> list[tuple[str, str, bool]]:
         free = row["efactura_id"] is None and not row["named"] and found["doc_date"] >= since
         sure = len(mine) == 1 and _fits(found, supplier, mine[0])
         if sure and claims[mine[0]["message_id"]] == 1 and _open(mine[0]) and filled and free:
-            out.append((row["sha"], mine[0]["message_id"], pays))
+            out.append((row["sha"], mine[0]["message_id"], pays and _nothing_prepaid(mine[0])))
     return out
 
 

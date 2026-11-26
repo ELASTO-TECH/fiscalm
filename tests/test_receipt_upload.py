@@ -41,7 +41,7 @@ from fiscalm.api import (
 )
 from fiscalm.bank import statements
 from fiscalm.efactura import inbox as efactura
-from fiscalm.ledger import Ledger, LinkRefused
+from fiscalm.ledger import Ledger, LinkRefused, finance_home
 from fiscalm.mail import invoices
 
 JPEG = b"\xff\xd8\xffexample"
@@ -1370,13 +1370,29 @@ def read_receipt(ledger, monkeypatch, data=JPEG, day="2026-10-07", **fields):
     return sha
 
 
-def shop_invoice(ledger, mid="701", co="NORD", issue="2026-10-08", total="86.40", cui="RO7001", legacy=False, **kw):
-    """An invoice stored as sync stores it: the tax id's digits and the full id; `legacy`: the digits only."""
+def shop_invoice(
+    ledger, mid="701", co="NORD", issue="2026-10-08", total="86.40", cui="RO7001", legacy=False, prepaid="", **kw
+):
+    """An invoice stored as sync stores it: its ZIP, the tax id's digits and the full id; `legacy`: the digits only.
+    `prepaid`: paid before the invoice, its total then `total` + `prepaid`."""
     issues = kw.pop("issues", "[]")
     _ef(ledger, mid, co, "Benzinaria Exemplu SRL", cui, f"BE {mid}", date.fromisoformat(issue), None, total, **kw)
+    xml = ubl(number=f"BE {mid}", total=total, supplier_cui=cui, issue=issue)
+    if prepaid:
+        inclusive = '<cbc:TaxInclusiveAmount currencyID="RON">{}</cbc:TaxInclusiveAmount>'
+        xml = xml.replace(
+            inclusive.format(total).encode(),
+            (
+                inclusive.format(f"{Decimal(total) + Decimal(prepaid):.2f}")
+                + f'<cbc:PrepaidAmount currencyID="RON">{prepaid}</cbc:PrepaidAmount>'
+            ).encode(),
+        )
+    path = finance_home() / "efactura" / co / f"{mid}.zip"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(anaf_zip(xml, mid))
     ledger.db.execute(
-        "UPDATE efactura SET issues=?, supplier_cui=?, supplier_tax_id=? WHERE message_id=?",
-        (issues, re.sub(r"\D", "", cui), None if legacy else cui, mid),
+        "UPDATE efactura SET issues=?, supplier_cui=?, supplier_tax_id=?, raw_path=? WHERE message_id=?",
+        (issues, re.sub(r"\D", "", cui), None if legacy else cui, str(path), mid),
     )
     ledger.db.commit()
 
@@ -1429,6 +1445,21 @@ def test_a_receipt_that_fits_no_single_invoice_decides_nothing(ledger, monkeypat
     assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 0
     assert ledger.document(sha)["efactura_id"] is None
     assert all(r["paid_tx"] is None for r in ledger.efactura_rows())
+
+
+@pytest.mark.parametrize(
+    "mine, others, paid",
+    [
+        ({"prepaid": "86.40"}, [], False),  # a deposit at the till: the rest of the invoice is still due
+        ({}, [{"mid": "702", "total": "0.00", "currency": "EUR"}], True),  # zero due in another currency: no rival
+    ],
+)
+def test_a_receipt_proves_its_invoice_paid_only_for_the_whole_total(ledger, monkeypatch, mine, others, paid):
+    sha = read_receipt(ledger, monkeypatch)
+    for kw in [mine, *others]:
+        shop_invoice(ledger, **kw)
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 1 and ledger.document(sha)["efactura_id"] == "701"
+    assert ledger.efactura("701")["status"] == ("paid" if paid else "open")
 
 
 def test_an_invoice_two_receipts_fit_is_left_alone(ledger, monkeypatch):
