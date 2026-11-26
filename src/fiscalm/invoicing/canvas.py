@@ -22,6 +22,8 @@ BODY = "#334155"
 MUTED = "#64748B"
 RULE = "#E2E8F0"
 TINT = "#F8FAFC"
+PANEL = "#F4F6F8"
+WHITE = "#FFFFFF"
 
 
 @lru_cache(maxsize=3)
@@ -43,6 +45,11 @@ def _unshaped(weight: str) -> bytes:
 
 def color(hex_value: str) -> str:
     return " ".join(f"{int(hex_value[n : n + 2], 16) / 255:.5f}" for n in (1, 3, 5))
+
+
+def tint(hex_value: str, share: float) -> str:
+    """The colour `share` of the way from white to `hex_value`: a light wash of an accent."""
+    return "#" + "".join(f"{round(255 - (255 - int(hex_value[n : n + 2], 16)) * share):02X}" for n in (1, 3, 5))
 
 
 class Canvas:
@@ -113,6 +120,23 @@ class Canvas:
 
     def rect(self, x: float, y: float, w: float, h: float, fill: str) -> None:
         self.pages[-1].append(f"{color(fill)} rg {x} {y} {w} {h} re f")
+
+    def round_rect(
+        self, x: float, y: float, w: float, h: float, radius: float, fill: str | None = None, stroke: str | None = None
+    ) -> None:
+        """A rectangle with circular-arc corners (four Bezier quarters), filled, stroked with a hairline, or both."""
+        r = min(radius, w / 2, h / 2)
+        k = r * 0.5523  # control distance that makes a cubic Bezier a close quarter circle
+        right, top = x + w, y + h
+        path = [
+            f"{x + r:.2f} {y:.2f} m {right - r:.2f} {y:.2f} l",
+            f"{right - r + k:.2f} {y:.2f} {right:.2f} {y + r - k:.2f} {right:.2f} {y + r:.2f} c",
+            f"{right:.2f} {top - r:.2f} l {right:.2f} {top - r + k:.2f} {right - r + k:.2f} {top:.2f} {right - r:.2f} {top:.2f} c",
+            f"{x + r:.2f} {top:.2f} l {x + r - k:.2f} {top:.2f} {x:.2f} {top - r + k:.2f} {x:.2f} {top - r:.2f} c",
+            f"{x:.2f} {y + r:.2f} l {x:.2f} {y + r - k:.2f} {x + r - k:.2f} {y:.2f} {x + r:.2f} {y:.2f} c h",
+        ]
+        paint = (f"{color(fill)} rg " if fill else "") + (f"{color(stroke)} RG 0.75 w " if stroke else "")
+        self.pages[-1].append(paint + " ".join(path) + (" B" if fill and stroke else " f" if fill else " S"))
 
     def save(self, logo: Logo | None = None) -> bytes:
         pdf = pikepdf.Pdf.new()

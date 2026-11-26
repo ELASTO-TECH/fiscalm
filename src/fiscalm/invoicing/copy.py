@@ -145,11 +145,21 @@ FIELDS = dict(
     email="adresa de email",
     phone="telefonul",
     account_name="titularul contului",
+    bank="banca",
 )
 for field in ("name", "street", "city", "country"):
     SHOWN.add(f"Lipsește {FIELDS[field]}.")
 for field, limit in dict(
-    tax_id=100, name=200, street=150, city=50, postal_code=20, reg_com=1000, email=100, phone=100, account_name=200
+    tax_id=100,
+    name=200,
+    street=150,
+    city=50,
+    postal_code=20,
+    reg_com=1000,
+    email=100,
+    phone=100,
+    account_name=200,
+    bank=100,
 ).items():
     SHOWN.add(f"{FIELDS[field].capitalize()} poate avea cel mult {limit} de caractere.")
 

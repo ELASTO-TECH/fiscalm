@@ -540,6 +540,7 @@ def test_no_english_in_invoice_refusals():
         ("email", 100, "Adresa de email poate avea cel mult 100 de caractere."),
         ("phone", 100, "Telefonul poate avea cel mult 100 de caractere."),
         ("account_name", 200, "Titularul contului poate avea cel mult 200 de caractere."),
+        ("bank", 100, "Banca poate avea cel mult 100 de caractere."),
     ],
 )
 def test_length_refusals_name_the_field(setup_invoice, key, limit, expected):
