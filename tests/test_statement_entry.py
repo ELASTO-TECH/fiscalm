@@ -128,6 +128,13 @@ _WIDE = "Data".ljust(13) + "Descriere".ljust(94) + "Debit" + "Credit".rjust(18) 
             ["credit", "debit"],
         ),
         ([("13/01/2020", "Retragere de numerar de la ATM", "200.00", 122)], ("300.00", "0.00"), "700.00", None),
+        # a credit exactly under the Credit column and an equal amount elsewhere: which is the debit isn't proven
+        (
+            [("13/01/2020", "Incasare", "25.00", 130), ("", "Plata", "25.00", 147)],
+            ("25.00", "25.00"),
+            "1,000.00",
+            None,
+        ),
     ],
 )
 def test_older_bt_lines_of_another_width_are_read_by_the_accounts_own_totals(moves, totals, final, directions):
@@ -149,3 +156,4 @@ def test_older_bt_lines_of_another_width_are_read_by_the_accounts_own_totals(mov
     assert account.trustworthy is (directions is not None)
     if directions:
         assert [t.direction for t in account.txs] == directions and account.closing == parse_amount(final)
+        assert all(statements.pays_nothing(t) for t in account.txs if t.title.startswith("Comision"))

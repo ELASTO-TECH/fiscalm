@@ -389,7 +389,7 @@ def parse_text(text: str, company: str) -> Statement:
     debit_end = credit_end = 0
     opening: dict[int, Decimal] = {}  # by id(account): SOLD ANTERIOR, the first one of its section
     final: dict[int, Decimal] = {}  # SOLD FINAL CONT
-    ends: dict[int, int] = {}  # by id(tx): the column its amount ends at, on its own line
+    ends: dict[int, tuple[int, str | None]] = {}  # by id(tx): its amount's end column, the side it sits exactly under
 
     def close():
         nonlocal cur, cur_lines
@@ -464,7 +464,7 @@ def parse_text(text: str, company: str) -> Statement:
                 currency=acct.currency,
                 iban=acct.iban,
             )
-            ends[id(cur)], cur_lines = a1_end, [title]
+            ends[id(cur)], cur_lines = (a1_end, _under(a1_end, debit_end, credit_end)), [title]
             continue
         if s.startswith(_SKIP_TITLES):
             close()
@@ -569,38 +569,51 @@ def _pdf_balance(
         acct.total_credit = parse_amount(row.group("a2"))
 
 
-def _directions_by_totals(accounts: list[Account], ends: dict[int, int]) -> list[Account]:
+def _under(end: int, debit_end: int, credit_end: int) -> str | None:
+    """The column an amount sits exactly under (its end within 2 of the header's), else None."""
+    return "debit" if abs(end - debit_end) <= 2 else "credit" if abs(end - credit_end) <= 2 else None
+
+
+def _directions_by_totals(accounts: list[Account], ends: dict[int, tuple[int, str | None]]) -> list[Account]:
     """Older BT PDFs print lines of different widths, so an amount's column measured against the header's can land
     nearer the wrong one. When the lines read so don't add up to the account's own totals (RULAJ TOTAL CONT: debits,
     credits), the amounts' columns are split where they leave the widest gap, the left ones debits: that reading is
-    kept only if it is the one reading (that split, or all one side) giving both totals to the cent. Otherwise the
-    section stays as read, and unproven."""
+    kept only if it is the one reading (that split, or all one side) giving both totals to the cent, it moves no line
+    that sits exactly under a header column, and no amount stays on both sides (two equal amounts could be swapped).
+    Otherwise the section stays as read, and unproven. A moved line is read for BT's words again (a fee is a debit)."""
     for acct in accounts:
         if not (acct.balanced or acct.total_debit is None or not acct.txs):
             _redirect(acct, ends)
     return accounts
 
 
-def _redirect(acct: Account, ends: dict[int, int]) -> None:
-    cols = sorted({ends[id(t)] for t in acct.txs})
+def _redirect(acct: Account, ends: dict[int, tuple[int, str | None]]) -> None:
+    cols = sorted({ends[id(t)][0] for t in acct.txs})
     gap = max(range(1, len(cols)), key=lambda i: cols[i] - cols[i - 1], default=None)
     readings = [{id(t): side for t in acct.txs} for side in ("debit", "credit")]
     if gap is not None:
-        readings.append({id(t): "debit" if ends[id(t)] < cols[gap] else "credit" for t in acct.txs})
+        readings.append({id(t): "debit" if ends[id(t)][0] < cols[gap] else "credit" for t in acct.txs})
 
     def adds_up(reading: dict[int, str]) -> bool:
-        total = {
-            side: sum((t.amount for t in acct.txs if reading[id(t)] == side), Decimal(0)) for side in reading.values()
-        }
-        return (total.get("debit", Decimal(0)), total.get("credit", Decimal(0))) == (
-            acct.total_debit,
-            acct.total_credit,
-        )
+        total = {"debit": Decimal(0), "credit": Decimal(0)}
+        for t in acct.txs:
+            total[reading[id(t)]] += t.amount
+        return (total["debit"], total["credit"]) == (acct.total_debit, acct.total_credit)
 
     fitting = [r for r in readings if adds_up(r)]
-    if len(fitting) == 1:
-        for t in acct.txs:
-            t.direction = fitting[0][id(t)]
+    if len(fitting) != 1:
+        return
+    reading = fitting[0]
+    if any((under := ends[id(t)][1]) and under != reading[id(t)] for t in acct.txs):
+        return  # it would move a line the header's own column places
+    if {t.amount for t in acct.txs if reading[id(t)] == "debit"} & {
+        t.amount for t in acct.txs if reading[id(t)] == "credit"
+    }:
+        return  # an amount on both sides: which line is which isn't proven
+    for t in acct.txs:
+        if t.direction != reading[id(t)]:
+            t.direction, t.category = reading[id(t)], ""
+            apply_wording(t, banks.BY_ID["bt"])
 
 
 def _pdf_trust(accounts: list[Account], opening: dict[int, Decimal], final: dict[int, Decimal]) -> None:
