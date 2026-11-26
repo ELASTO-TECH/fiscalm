@@ -156,6 +156,7 @@ def accounts_out(L: Ledger, c) -> list[dict]:
             bank_name=banks.BY_ID[a.bank].name if a.bank in banks.BY_ID else "",
             pays=a.pays,
             retired=a.retired or None,
+            opened=a.opened or None,
             last_statement=months.get(a.iban) or None,
             statement_senders=list(a.statement_senders),
         )
@@ -457,25 +458,48 @@ def add_account(*, key: str, iban: str, currency: str, L: Ledger | None = None) 
     return dict(key=key, currency=account.currency, bank=account.bank, iban_last4=account.iban[-4:])
 
 
-def set_opened(*, key: str, iban: str, month: str, L: Ledger | None = None) -> dict:
-    """Record the first month a company's account existed (YYYY-MM), or its exact day (YYYY-MM-DD; "" forgets it). A
-    statement of an earlier month does not owe that account (bank.intake.missing_accounts); every later one does. Only
-    the exact day lets its first month start after the 1st (bank.intake)."""
+def set_dates(
+    *, key: str, iban: str, opened: str | None, retired: str | None, today: date, L: Ledger | None = None
+) -> dict:
+    """Record when a company's account existed: the first month (YYYY-MM) or exact day (YYYY-MM-DD) it was open, and
+    the day it was closed (YYYY-MM-DD); "" forgets either, None keeps it. A statement of a month the account wasn't open does not owe
+    it (bank.intake.missing_accounts); only the exact opening day lets its first month start after the 1st, and a
+    closed account is no longer read from the bank, so it closes only on a day already past or today (a later day
+    would stop reading it now). The account payment files debit is never closed here: another account takes its place
+    first (company-bank)."""
     with editing(L) as L:
         own = companies.all(L).get(key)
         account = own.account(iban) if own else None
         if not account:
             raise CompanyError("Contul nu este al acestei firme.")
-        if month and not companies.opening(month):
+        if opened is None and retired is None:
+            raise CompanyError("Lipsește data de schimbat: deschiderea sau închiderea contului.")
+        opened = account.opened if opened is None else opened
+        retired = account.retired if retired is None else retired
+        if opened and not companies.opening(opened):
             raise CompanyError("Luna deschiderii se scrie AAAA-LL, de exemplu 2023-07, sau ziua: 2023-07-14.")
+        if retired and not (len(retired) == 10 and companies.opening(retired)):
+            raise CompanyError("Ziua închiderii se scrie AAAA-LL-ZZ, de exemplu 2026-10-31.")
+        if opened and opened > today.isoformat()[: len(opened)] and opened != account.opened:
+            raise CompanyError("Contul se deschide doar cu o lună sau o zi care a trecut.")  # a typo would excuse it
+        if retired and retired > today.isoformat() and retired != account.retired:
+            raise CompanyError("Contul se închide doar cu o zi care a trecut sau azi.")
+        if retired and account.pays:
+            raise CompanyError("Plățile pleacă din acest cont: alege întâi alt cont pentru plăți, apoi închide-l.")
         try:
             updated = dataclasses.replace(
-                own, accounts=tuple(dataclasses.replace(a, opened=month) if a == account else a for a in own.accounts)
-            ).validated()  # the ledger writer's own check: an account cannot open after it was retired
+                own,
+                accounts=tuple(
+                    dataclasses.replace(a, opened=opened, retired=retired) if a == account else a for a in own.accounts
+                ),
+            ).validated()  # the ledger writer's own check: an account cannot open after it was closed
         except ConfigError:
-            raise CompanyError("Luna deschiderii nu poate fi după retragerea contului.") from None
+            raise CompanyError("Contul nu se poate deschide după ce a fost închis.") from None
         L.save_company(updated, expected=own)
     from fiscalm.api.actions import log
 
-    log(f"company-account-opened {key} {account.currency} iban_last4={account.iban[-4:]} opened={month or '-'}")
-    return dict(key=key, currency=account.currency, iban_last4=account.iban[-4:], opened=month or None)
+    log(
+        f"company-account-dates {key} {account.currency} iban_last4={account.iban[-4:]} "
+        f"opened={opened or '-'} retired={retired or '-'}"
+    )
+    return dict(key=key, iban_last4=account.iban[-4:], opened=opened or None, retired=retired or None)

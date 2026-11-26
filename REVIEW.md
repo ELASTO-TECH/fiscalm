@@ -15,7 +15,7 @@ Run only the items whose trigger matches the diff. AGENTS.md's non-negotiables (
   `WHERE` re-checks the state read (e.g. `ledger.unlinked`), it runs in one `BEGIN IMMEDIATE`, and a two-connection
   test proves only one wins.
 - **Bank free text (MT940/CAMT names, merchant keys) reaching a report, CSV, pack, log or projection** → it goes
-  through the shared mask (`recon._name`, `statements.masked`) on every output path, grouped and spaced numbers
+  through the shared mask (`statements.masked`) on every output path, grouped and spaced numbers
   included (NN 7).
 - **An `await` in `app/src/**` followed by state updates, or a request while the form stays editable** → an answer
   that arrives after the input, firm, route or session changed is dropped, and a test with a deferred answer proves it.

@@ -522,3 +522,24 @@ def test_return_task_projection_has_bounded_reads(channel):
     finally:
         L.db.set_trace_callback(None)
     assert len(tasks) == 20 and len(queries) <= 2
+
+
+@pytest.mark.parametrize("cancelled_meanwhile", [False, True])
+def test_zero_vat_order_has_one_task_the_vat_review(channel, monkeypatch, cancelled_meanwhile):
+    L, shop, row = channel
+    row["products"][0]["vat"] = "0"
+    intake = commerce.intake
+
+    def then_cancel(L, co, *args, **kwargs):  # a person acts on the draft before eMAG records its task
+        result = intake(L, co, *args, **kwargs)
+        commerce.command(L, co, result["id"], "orders_cancel", {}, "2026-10-31")
+        return result
+
+    if cancelled_meanwhile:
+        monkeypatch.setattr(commerce, "intake", then_cancel)
+    run(L, Fake([row]))
+    assert sync.tasks(L, "NORD") == []
+    if cancelled_meanwhile:
+        return
+    oid = L.db.execute("SELECT id FROM commerce_orders").fetchone()[0]
+    assert commerce.get(L, "NORD", oid)["reason"]["code"] == "vat_review"

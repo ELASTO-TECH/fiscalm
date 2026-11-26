@@ -21,6 +21,14 @@ it.each([false, true])("copies reminder text locally with LIVE=%s and never post
   expect(api.posts()).toEqual([]);
 });
 
+it("shows the engine's warning on a reminder whose statements are behind, the usual line otherwise", async () => {
+  const s = taskState();
+  s.reminder_tasks = [{ ...s.reminder_tasks[0], warning: "Extrasele sunt în urmă." }, { ...s.reminder_tasks[0], id: "other", warning: null }];
+  renderApp({ state: () => json(s) });
+  expect(await screen.findByText("Extrasele sunt în urmă.")).toBeInTheDocument();
+  expect(screen.getAllByText("Copiază textul și trimite-l clientului din e-mail.")).toHaveLength(1);
+});
+
 it("prepares the company ZIP then confirms exactly the displayed snapshot", async () => {
   at("?co=NORD&tab=rapoarte&month=2026-09");
   const initial = fixture(); initial.live = false;

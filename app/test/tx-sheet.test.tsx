@@ -53,7 +53,7 @@ it.each([false, true])("keeps transaction detail and choice fixtures equal to co
   const full = manyInvoices(explained), q = { kind: "transaction", id: POPESCU };
   const actual = fixtureDetailData(full, "transaction", POPESCU), expected = detailResult(full, q);
   expect(actual.transaction).toEqual(expected.transaction); expect(actual.related).toEqual(expected.related);
-  for (const collection of ["partners", "invoices", "payments", "selected"] as const) {
+  for (const collection of ["partners", "invoices", "payments", "selected", "receipts"] as const) {
     const cursor = expected.transaction.choices[collection].total > 50 ? "50" : "";
     expect(fixtureTransactionChoicesData(full, { id: POPESCU, collection, cursor })).toEqual(choicesResult(full, { id: POPESCU, collection, cursor }));
   }
@@ -156,6 +156,31 @@ it("proposes the one invoice the details name at its exact amount, confirmed in 
   // the sheet stays on the transaction and shows its explanation: no success sheet, no move to Acasă
   expect(await (await sheet()).findByRole("button", { name: "Schimbă explicația" })).toBeInTheDocument();
   expect(new URLSearchParams(location.search).get("tx")).toBe(POPESCU);
+});
+
+it("starts from the AI integration's proposal: its invoices or its label preselected, confirmed by the person", async () => {
+  const full = fixture(), t = full.transactions.rows.find((r) => r.id === POPESCU)!;
+  const open = full.issued.filter((r) => r.status === "open" && r.currency === "RON" && !r.rejected && r.local_id !== r.id);
+  const [a, b] = open.filter((r) => r.partner === open.find((x) => open.some((y) => y !== x && y.partner === x.partner))!.partner);
+  const as = { kind: "documents" as const, partner: a.partner, reason: null, note: null };
+  Object.assign(t, { details: "Plata", amount: (Number(a.left) + Number(b.left)).toFixed(2), proposal: { kind: "ai", as, invoices: [a.id, b.id] } });
+  at(`?co=NORD&tab=tranzactii&tx=${POPESCU}`);
+  const api = renderApp({ state: () => json(summaryResult(full)), detail: (url) => json(detailResult(full, query(url))),
+    transactionChoices: (url) => json(choicesResult(full, query(url))), onPost: () => json({ ok: false, message: "Refuzat" }) });
+  const s = await sheet();
+  expect(s.getByText("Propunere")).toBeInTheDocument();
+  expect(s.queryByRole("button", { name: /^Confirmă/ })).toBeNull(); // several invoices: no one-tap settlement
+  expect(s.getByRole("checkbox", { name: new RegExp(`Factura ${a.number}`) })).toBeChecked();
+  expect(s.getByRole("checkbox", { name: new RegExp(`Factura ${b.number}`) })).toBeChecked();
+  await userEvent.click(s.getByRole("button", { name: "Asociază tranzacția" }));
+  expect(api.posts()[0].body).toEqual({ co: "NORD", tx: POPESCU, invoices: `${a.id},${b.id}`, payment: "", reason: "", note: "", was: "", remember: "" });
+  cleanup();
+  Object.assign(t, { proposal: { kind: "ai", as: { kind: "label", partner: null, reason: "other", note: "Impozit" }, invoices: [] } });
+  renderApp({ state: () => json(summaryResult(full)), detail: (url) => json(detailResult(full, query(url))),
+    transactionChoices: (url) => json(choicesResult(full, query(url))) });
+  const l = await sheet();
+  expect(l.getByRole("radio", { name: "Altceva" })).toBeChecked();
+  expect(l.getByRole("textbox", { name: "Notă pentru contabil" })).toHaveValue("Impozit");
 });
 
 it("opens another firm's transaction from a metadata-only ALL view and posts for that firm", async () => {
@@ -372,6 +397,20 @@ describe("a transaction's sheet", () => {
     expect(fake.posts().at(-1)!.body).toEqual({ co: "NORD", tx: NIMBUS, ...body, was: "" });
   });
 
+  it("names a receipt already uploaded, with no data yet, as a card payment's bon", async () => {
+    const full = fixture(), d = full.documents.find((x) => x.vendor === "Benzinaria Nord")!;
+    Object.assign(d, { vendor: "", date: null, amount: null, held: true, sent: false, invoice: null });
+    at(`?co=NORD&tab=tranzactii&tx=${NIMBUS}`);
+    const fake = renderApp({ state: () => json(summaryResult(full)), detail: (url) => json(detailResult(full, query(url))),
+      transactionChoices: (url) => json(choicesResult(full, query(url))) });
+    const s = await sheet();
+    const picker = s.getByRole("region", { name: "Bonuri încărcate fără date" });
+    expect(within(picker).getAllByRole("button", { name: "Este bonul acestei plăți" })).toHaveLength(1);
+    await userEvent.click(within(picker).getByRole("button", { name: "Este bonul acestei plăți" }));
+    expect(fake.posts().at(-1)!.body).toEqual({ co: "NORD", tx: NIMBUS, id: d.id });
+    expect(fake.posts().at(-1)!.url).toContain("tx-receipt");
+  });
+
   it("starts a card payment on its invoices when the engine proposes some", async () => {
     const full = fixture(), t = full.transactions.rows.find((r) => r.id === NIMBUS)!;
     t.proposal = { kind: "invoices", invoices: [full.invoices[0].id] };
@@ -466,7 +505,7 @@ describe("a transaction's sheet", () => {
     renderApp({ state: () => json(s0) });
     const s = await sheet();
     if (direction === "debit" && card) await userEvent.click(s.getByRole("radio", { name: "Factură" }));
-    expect(s.getByRole("checkbox", { name: "Salvează regula pentru tranzacțiile viitoare" })).toHaveAccessibleDescription(
+    expect(s.getByRole("checkbox", { name: "Salvează regula" })).toHaveAccessibleDescription(
       `${noun}: regula se propune la tranzacțiile următoare.`); // an invoice stays a person's pick
   });
 
@@ -481,9 +520,9 @@ describe("a transaction's sheet", () => {
     const s = await sheet();
     await userEvent.click(s.getByRole("radio", { name: "Fără document" }));
     await userEvent.click(s.getByRole("radio", { name: "Cheltuială personală" }));
-    expect(s.getByRole("checkbox", { name: "Salvează regula pentru tranzacțiile viitoare" })).toHaveAccessibleDescription(
-      "Cardul ••••0001: regula se aplică automat tranzacțiilor următoare.");
-    expect(s.getByRole("checkbox", { name: "Salvează regula pentru tranzacțiile viitoare" })).toBeChecked();
+    expect(s.getByRole("checkbox", { name: "Salvează regula" })).toHaveAccessibleDescription(
+      "Cardul ••••0001: regula explică automat tranzacțiile următoare și pe cele încă neexplicate.");
+    expect(s.getByRole("checkbox", { name: "Salvează regula" })).toBeChecked();
     await userEvent.click(s.getByRole("button", { name: "Marchează fără document" }));
     expect(fake.posts()[0].body).toMatchObject({ kind: "label", reason: "personal", remember: "card" });
     at("?co=NORD&tab=automatizari");

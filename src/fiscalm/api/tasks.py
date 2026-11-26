@@ -37,10 +37,9 @@ def references(s: dict) -> Iterator[tuple[str, bool, dict]]:
 
 
 def credit_holds(s: dict) -> list[dict]:
-    """Existing display warnings for credited linked invoices outside the imported payment state."""
-    return [
-        r for r in s["invoices"] if r.get("credits") and r["status"] == "linked" and r["payment_state"] != "imported"
-    ]
+    """Linked invoices whose payment is no longer their net (a credit since, or one that stopped linking), imported
+    in the bank or not: the difference stays to check until a person resolves it."""
+    return [r for r in s["invoices"] if r.get("amount_changed")]
 
 
 def _invoice_references(s: dict) -> Iterator[tuple[str, bool, dict]]:
@@ -52,6 +51,12 @@ def _invoice_references(s: dict) -> Iterator[tuple[str, bool, dict]]:
             yield co + "late" + r["id"], True, {"invoices": [r]}
     for r in s["ambiguous"]:
         yield co + "amb" + r["tx"], False, {"ambiguous": [r | {"candidate_count": len(r["candidates"])}]}
+    for r in s.get("mail_proofs", []):
+        yield co + "mp" + r["id"], False, {"mail_proofs": [r]}
+    for r in s["invoices"]:
+        if r.get("credit_question"):  # a credit note naming no invoice fits several: a person says which it cancels
+            fits = [invoices[c["id"]] for c in r["credit_question"] if c["id"] in invoices]
+            yield co + "cq" + r["id"], False, {"invoices": [r, *fits]}
     for r in credit_holds(s):
         yield co + "credit" + r["id"], True, {"invoices": [r]}
     for r in s["refused"]:
@@ -103,6 +108,9 @@ def _other_references(s: dict) -> Iterator[tuple[str, bool, dict]]:
         yield co + "rec" + r["id"], True, {"recurring_refused": [r]}
     for r in s.get("emag_tasks", []):
         yield "emag" + str(r["id"]), False, {"emag_tasks": [r]}
+    for r in s.get("order_tasks", []):
+        if r["kind"] == "order_vat_review" and r["draft_id"]:
+            yield co + "ordvat" + r["order_id"], False, {"order_tasks": [r]}
     for r in s.get("bank_connections", []):
         if r["connection"] and r["connection"]["state"] != "ok":
             yield "bank" + co + r["bank"], r["connection"]["state"] == "expired", {"bank_connections": [r]}

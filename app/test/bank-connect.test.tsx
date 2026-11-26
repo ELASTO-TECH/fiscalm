@@ -14,7 +14,7 @@ const OTP: BankStatus = { bank: "otp", name: "OTP Bank", connect: "not_supported
 
 function config(banks: BankStatus[]): CompaniesConfig {
   const acc = (id: string, last4: string, bank: string, bank_name: string) =>
-    ({ id, iban_last4: last4, currency: "RON", bank, bank_name, pays: bank === "bt", retired: null, statement_senders: [], last_statement: null });
+    ({ id, iban_last4: last4, currency: "RON", bank, bank_name, pays: bank === "bt", retired: null, opened: null, statement_senders: [], last_statement: null });
   return { companies: [{ key: "NORD", name: "NORD", legal_name: "Atelier Nord SRL", cui: "11111110", palette: "amber", has_data: true,
     has_ron_account: true, iban_last4: "0001", banks,
     accounts: [acc("a1", "0001", "bt", "Banca Transilvania"), acc("a2", "0007", "ing", "ING Bank"), acc("a3", "0008", "otp", "OTP Bank")] }],

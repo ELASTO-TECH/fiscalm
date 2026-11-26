@@ -18,6 +18,7 @@ from pathlib import Path
 from fiscalm import (
     PRODUCT,
     __version__,
+    ai_explain,
     archive,
     backup,
     companies,
@@ -27,7 +28,6 @@ from fiscalm import (
     integrations as ig,
     links,
     pack,
-    receipt_items,
     recon,
     scheduler,
     setup,
@@ -39,7 +39,7 @@ from fiscalm.api.mcp import stdio
 from fiscalm.bank import connections as bank_connect, enablebanking as eb, feed as bank_feed, statements
 from fiscalm.bank.intake import recover
 from fiscalm.commerce.shopify import tick
-from fiscalm.company_config import CompanyError, bank, change, set_opened
+from fiscalm.company_config import CompanyError, bank, change, set_dates
 from fiscalm.config_errors import ConfigError
 from fiscalm.efactura import client as anaf, inbox as efactura
 from fiscalm.invoicing import issued
@@ -81,7 +81,6 @@ def cmd_sync(a, L: Ledger) -> int:
     recover(L)
     mail = mail_invoices.run(L, date.today())  # invoices, statements and the accountant's OPs by mail
     L.set_meta("last_check_at", datetime.now().isoformat(timespec="seconds"))  # Setări: when mail was last read
-    months = set()
     # Shadow (before cut-over): the Mac still archives, so only look, never upload.
     archived = [r for r in archive.archive_all(L, dry_run=not is_live()) if r["status"] != "already there"]
     try:  # the connected banks, once a day; read only, so before going live too (decided 2026-11-03)
@@ -90,13 +89,6 @@ def cmd_sync(a, L: Ledger) -> int:
         read_banks = [{"status": "error", "error": type(e).__name__}]
     files = pay.prepare_files(L, date.today())
     refreshed = pay.refresh_to_pay(L)
-    for co in companies.all(L):
-        for mo in _recent_months(1):
-            months.add((co, mo))
-    reports = {}
-    for co, mo in sorted(months):
-        path, summary = recon.write_report(L, co, mo)
-        reports[f"{co} {mo}"] = {"report": str(path), **summary}
     actions = []
     for f in files:
         actions.append(
@@ -109,7 +101,6 @@ def cmd_sync(a, L: Ledger) -> int:
                     f"PACK: {co} {mo} ready for the accountant (fiscalm pack build --company {co} --month {mo})"
                 )
     upload_assignment.process_pending(L)
-    receipt_items.extract_pending(L)
     _out(
         {
             "mode": "live" if is_live() else "shadow",
@@ -117,7 +108,6 @@ def cmd_sync(a, L: Ledger) -> int:
             "drive_archive": archived,
             "payment_files": files,
             "to_pay_refreshed": refreshed,
-            "reports": reports,
             "banks_read": read_banks,
             "actions_needed": sorted(set(actions)),
         }
@@ -698,19 +688,6 @@ def _status_data(L: Ledger, open_pay: list[dict], packs: list[dict], to_import: 
     }
 
 
-def cmd_report(a, L: Ledger) -> int:
-    cos = [a.company] if a.company else list(companies.all(L))
-    out = {}
-    for co in cos:
-        path, summary = recon.write_report(L, co, a.month)
-        out[co] = {"report": str(path), **summary}
-        if a.print:
-            print(path.read_text())
-    if not a.print:
-        _out(out)
-    return 0
-
-
 def cmd_pack_build(a, L: Ledger) -> int:
     _out(pack.build(L, a.company, a.month, summary=lambda: api.pack_summary(L, a.company, a.month)))
     return 0
@@ -889,9 +866,9 @@ def cmd_company_bank(a, L: Ledger) -> int:
     return 0
 
 
-def cmd_company_opened(a, L: Ledger) -> int:
+def cmd_company_dates(a, L: Ledger) -> int:
     try:
-        _out(set_opened(L=L, key=a.company, iban=a.iban, month=a.month))
+        _out(set_dates(L=L, key=a.company, iban=a.iban, opened=a.opened, retired=a.retired, today=date.today()))
     except (CompanyError, ConfigError) as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2
@@ -1006,11 +983,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--iban", required=True)
     s.add_argument("--replace", action="store_true")
     s.set_defaults(fn=cmd_company_bank)
-    s = c.add_parser("opened", help="the first month an account existed: its bank's earlier statements don't need it")
+    s = c.add_parser("dates", help="when an account was open: its bank's statements of other months don't need it")
     s.add_argument("--company", required=True)
     s.add_argument("--iban", required=True)
-    s.add_argument("--month", required=True, help="YYYY-MM, or the exact day YYYY-MM-DD; '' forgets it")
-    s.set_defaults(fn=cmd_company_opened)
+    s.add_argument("--opened", help="YYYY-MM, or the exact day YYYY-MM-DD; '' forgets it")
+    s.add_argument("--retired", help="the day it was closed, YYYY-MM-DD; '' forgets it")
+    s.set_defaults(fn=cmd_company_dates)
 
     b = sub.add_parser("bank", help="open banking: the install's Enable Banking application and its connections")
     b = b.add_subparsers(dest="bank_cmd", required=True)
@@ -1029,7 +1007,7 @@ def build_parser() -> argparse.ArgumentParser:
     register_settlement(sub)
     sub.add_parser(
         "sync",
-        help="read the mail accounts (invoices, statements, the accountant's OPs), build payment files, write reports",
+        help="read the mail accounts (invoices, statements, the accountant's OPs), build payment files",
     ).set_defaults(fn=cmd_sync)
     s = sub.add_parser(
         "ingest",
@@ -1210,11 +1188,6 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="what do I need to pay / send?")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
-    s = sub.add_parser("report", help="write report.md per company-month")
-    s.add_argument("--month", required=True)
-    s.add_argument("--company")
-    s.add_argument("--print", action="store_true")
-    s.set_defaults(fn=cmd_report)
 
     pk = sub.add_parser("pack", help="accountant pack").add_subparsers(dest="pack_cmd", required=True)
     s = pk.add_parser("build", help="freeze a firm's month of documents into the accountant's ZIP")
@@ -1250,12 +1223,22 @@ def build_parser() -> argparse.ArgumentParser:
         return 0
 
     sy.set_defaults(fn=shopify_sync)
-    tr = sub.add_parser("tx-rules", help="explain free statement lines by saved rules and the bank's own fee lines")
+    tr = sub.add_parser(
+        "tx-rules", help="explain free statement lines by saved rules, the bank's own fee lines, transfers and the AI"
+    )
 
     def tx_rules(a, L: Ledger) -> int:
-        # the rows as Tranzacții shows them: a rule explains only a row left with nothing else proposed
-        rows = {co: api.state(L, co)["transactions"]["rows"] for co in companies.all(L)}
-        print(json.dumps({co: len(links.apply_rules(L, co, rows[co])) for co in rows}))
+        # the rows as Tranzacții shows them: a rule explains only a row left with nothing else proposed; the AI
+        # integration is asked about what the rules left (ai_explain)
+        firms = list(companies.all(L))
+        out = {co: {"rules": len(links.apply_rules(L, co, api.state(L, co)["transactions"]["rows"]))} for co in firms}
+        for co in (
+            ai_explain.in_turn(L, firms) if ai_explain.enabled(L) else []
+        ):  # one request a run: a slow provider delays no rule and no firm's turn
+            out[co] |= ai_explain.explain(L, co, api.state(L, co))
+            if out[co]["sent"]:
+                break
+        print(json.dumps(out))
         return 0
 
     tr.set_defaults(fn=tx_rules)
@@ -1369,6 +1352,7 @@ def cmd_settlement(a, L: Ledger) -> int:
                 if len(parts) != 1 or not spec.get("attachment"):
                     raise ReportError("Exactly one named attachment required")
                 data = parts[0].get_payload(decode=True)
+                spec = spec | {"mailed_by": senders[0][1].lower()}  # a mailed report waits for a person
             result = {"id": settlements.import_report(L, a.company, data, spec)}
         print(json.dumps(result, ensure_ascii=False))
         return 0

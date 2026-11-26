@@ -14,12 +14,13 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
 from fiscalm import companies
-from fiscalm.bank import catalogue as banks, connections as bank_connect, enablebanking as eb
+from fiscalm.bank import catalogue as banks, connections as bank_connect, coverage, enablebanking as eb
 from fiscalm.bank.statements import Account, Statement, Tx, apply_wording, iso_category
 from fiscalm.ledger import Ledger
 
-OVERLAP_DAYS = 5  # a booking can land a few days late: read them again (their keys don't change)
+OVERLAP_DAYS = coverage.LATE_BOOKING_DAYS  # a booking can land a few days late: read them again (same keys)
 FIRST_DAYS = 89  # what most banks give the first time (BT gives 120)
+NOT_BOOKED = ("PDNG", "SCHD", "HOLD", "INFO", "CNCL", "RJCT")  # what the bank says isn't booked; anything else may be
 
 
 def _iban(party: dict | None) -> str:
@@ -89,8 +90,10 @@ def _country(party: dict) -> str:
     return c if re.fullmatch(r"[A-Z]{2}", c) else ""
 
 
-def read(L: Ledger, connection: dict, today: date, api: eb.Client | None = None) -> Statement:
-    """What the bank booked on the connection's accounts since the last read (with a few days' overlap)."""
+def read(L: Ledger, connection: dict, today: date, api: eb.Client | None = None) -> tuple[Statement, dict[str, date]]:
+    """What the bank booked on the connection's accounts since the last read (with a few days' overlap), and for each
+    account with a booked line fiscalm could not read (`to_tx` refused it), the latest such line's day: the feed
+    proves nothing up to it."""
     row = L.db.execute("SELECT * FROM bank_connections WHERE id=?", (connection["id"],)).fetchone()
     if not row:
         raise eb.BankError("Citirea directă a fost oprită.", "disconnected")
@@ -98,15 +101,31 @@ def read(L: Ledger, connection: dict, today: date, api: eb.Client | None = None)
     last = date.fromisoformat(row["last_read"][:10]) if row["last_read"] else None
     start = (last - timedelta(days=OVERLAP_DAYS)) if last else today - timedelta(days=FIRST_DAYS)
     api = api or bank_connect.client(L)
-    accounts = []
+    accounts, unread = [], {}
     for a in json.loads(row["accounts"]):
         own = co.account(a["iban"])
         if not own or own.retired:  # an account retired since it was connected is no longer read
             continue
         raws = api.transactions(a["uid"], start.isoformat(), today.isoformat())
-        txs = [t for t in (to_tx(r, own.iban, own.currency) for r in raws) if t]
-        accounts.append(Account(own.iban, own.currency, txs))
-    return Statement(row["company"], start, today, accounts, source="ob")
+        read_ = [(r, to_tx(r, own.iban, own.currency)) for r in raws]
+        accounts.append(Account(own.iban, own.currency, [t for _, t in read_ if t]))
+        lost = [_booked_on(r, today) for r, t in read_ if not t and _booked_on(r, today)]
+        if lost:
+            unread[companies.normalize_iban(own.iban)] = max(lost)
+    return Statement(row["company"], start, today, accounts, source="ob"), unread
+
+
+def _booked_on(raw: object, today: date) -> date | None:
+    """The day of a line the bank may have booked (any status but one in NOT_BOOKED, an empty or unknown one too):
+    its booking date, or today when it has none."""
+    if not isinstance(raw, dict):
+        return today
+    if raw.get("status") in NOT_BOOKED:
+        return None
+    try:
+        return min(date.fromisoformat(str(raw.get("booking_date"))), today)
+    except ValueError:
+        return today
 
 
 def run_all(L: Ledger, today: date, api: eb.Client | None = None) -> list[dict]:
@@ -119,7 +138,7 @@ def run_all(L: Ledger, today: date, api: eb.Client | None = None) -> list[dict]:
     out = []
     for c in bank_connect.connections(L):
         if c["valid_until"] and c["valid_until"] < today.isoformat():
-            _note(L, c["id"], "EXPIRED_SESSION", None)
+            _note(L, c["id"], "EXPIRED_SESSION")
             out.append({"connection": c["id"], "status": "expired"})
             continue
         with L.tx() as db:  # claim today's attempt first: two syncs at once never call the bank twice
@@ -129,15 +148,15 @@ def run_all(L: Ledger, today: date, api: eb.Client | None = None) -> list[dict]:
             ).rowcount:
                 continue
         try:
-            st = read(L, c, today, api)  # from the last read that worked, so a failed day loses nothing
+            st, unread = read(L, c, today, api)  # from the last read that worked, so a failed day loses nothing
         except eb.BankError as e:
-            _note(L, c["id"], e.code or "error", None)
+            _note(L, c["id"], e.code or "error")
             out.append({"connection": c["id"], "status": "error", "code": e.code})
             continue
         paid = recon.auto_mark_paid(L, st)  # records the lines first (twins reserved), then matches
         ef = efactura.match_statement(L, st)
         col = issued.match_statement(L, st)
-        _note(L, c["id"], None, today.isoformat())
+        _read(L, c["id"], today, st, unread)
         out.append(
             {
                 "connection": c["id"],
@@ -151,9 +170,24 @@ def run_all(L: Ledger, today: date, api: eb.Client | None = None) -> list[dict]:
     return out
 
 
-def _note(L: Ledger, cid: str, error: str | None, read_on: str | None) -> None:
+def _read(L: Ledger, cid: str, today: date, st: Statement, unread: dict[str, date]) -> None:
+    """Record a read that worked, after its lines were matched. It keeps, for each account read, the first day the
+    feed holds of it (`covered`, bank.coverage): an account read before keeps its day, a new one starts at this read's
+    first day, one no longer read (retired, left out on reconnecting) drops out, and one with a booked line fiscalm
+    could not read starts again the day after it."""
     with L.tx() as db:
-        if read_on:
-            db.execute("UPDATE bank_connections SET last_read=?, last_error=NULL WHERE id=?", (read_on, cid))
-        else:
-            db.execute("UPDATE bank_connections SET last_error=? WHERE id=?", (error, cid))
+        row = db.execute("SELECT covered FROM bank_connections WHERE id=?", (cid,)).fetchone()
+        was = json.loads(row["covered"]) if row else {}
+        ibans = {companies.normalize_iban(a.iban) for a in st.accounts}
+        covered = {i: was.get(i, st.period_start.isoformat()) for i in sorted(ibans)}
+        for i, day in unread.items():
+            covered[i] = max(covered[i], (day + timedelta(days=1)).isoformat())
+        db.execute(
+            "UPDATE bank_connections SET last_read=?, last_error=NULL, covered=? WHERE id=?",
+            (today.isoformat(), json.dumps(covered), cid),
+        )
+
+
+def _note(L: Ledger, cid: str, error: str) -> None:
+    with L.tx() as db:
+        db.execute("UPDATE bank_connections SET last_error=? WHERE id=?", (error, cid))

@@ -173,7 +173,7 @@ export function sumParts(s: Sums): string[] {
 export const nonzero = (s: { total: string; other: unknown[] }) => Number(s.total) !== 0 || s.other.length > 0;
 
 /** A UN/ECE unit code's Romanian name (the units the app offers); an unknown code stays as it is. */
-export const UNITS: Record<string, string> = { H87: "Bucată", KGM: "Kilogram", LTR: "Litru", MTR: "Metru", HUR: "Oră", SET: "Set", XPK: "Pachet", XBX: "Cutie" };
+const UNITS: Record<string, string> = { H87: "Bucată", KGM: "Kilogram", LTR: "Litru", MTR: "Metru", HUR: "Oră", SET: "Set", XPK: "Pachet", XBX: "Cutie" };
 /** A unit code's name, or undefined for a code the app has no name for: own keys only, since a code comes from a document
  * ("toString" names no unit). */
 export const unitName = (code: string): string | undefined => (Object.hasOwn(UNITS, code) ? UNITS[code] : undefined);

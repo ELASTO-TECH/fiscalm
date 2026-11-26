@@ -30,7 +30,6 @@ from fiscalm import (
     home_charts,
     integrations,
     pack,
-    receipt_items,
     recon,
     rules,
     secrets as secret_store,
@@ -295,9 +294,34 @@ def _redact(line: str) -> str:
     return _PATH.sub(lambda m: m.group(0).rstrip("/").rsplit("/", 1)[-1] or "…", line)
 
 
+def mail_proofs(L: Ledger, co: str) -> list[dict]:
+    """Payment mails the AI read as proof that settled nothing on their own (efactura.reviews): the mail's sender,
+    date and subject (IBANs and cards masked), and the invoices of this company it may prove, for a
+    person to pick one or dismiss it."""
+    out = []
+    for r in efactura.reviews(L, co):
+        rows = [x for m in r["message_ids"] if (x := L.efactura(m))]
+        cands = [
+            {
+                "id": x["message_id"],
+                "number": x["number"],
+                "supplier": x["supplier_name"],
+                "amount": money(x["total"]),
+                "currency": x["currency"] or "RON",
+                "date": x["issue_date"],
+            }
+            for x in rows
+        ]
+        said = {
+            k: statements.masked(r[k]) for k in ("from", "subject", "date")
+        }  # the AI's reason may name another firm's
+        out.append({"id": r["id"], **said, "candidates": cands, "candidate_count": len(cands)})
+    return out
+
+
 def ambiguous(L: Ledger, co: str, live: bool = False) -> list[dict]:
-    """Statement debits that fit several invoices and settled none (efactura.note_ambiguous), with their candidates."""
-    used, fits_of, out = L.used_txs(), efactura.rivals(L, co), []
+    """Statement debits that settled none and wait for a person (efactura.note_ambiguous), with their candidates."""
+    used, fits_of, out = L.used_txs(), efactura.candidates(L, co), []
     for a in L.ambiguous(co):
         if a["tx_key"] in used:
             continue
@@ -337,8 +361,8 @@ def ambiguous(L: Ledger, co: str, live: bool = False) -> list[dict]:
                 "date": t.date.isoformat(),
                 "amount": money(t.amount),
                 "currency": t.currency,
-                "counterparty": t.counterparty,
-                "description": t.description,
+                "counterparty": statements.masked(t.counterparty),
+                "description": statements.masked(t.description),
                 "month": t.date.isoformat()[:7],
                 "candidates": sorted(cands, key=lambda c: (c["date"] or "", c["number"] or "")),
                 "can_resolve": True,
@@ -365,11 +389,46 @@ def _refused(L: Ledger, co: str) -> tuple[list[dict], efactura.PaymentFacts]:
         refused.append(
             {
                 **x,
-                "iban_last4": (row["supplier_iban"] or "")[-4:],
+                "iban_last4": (_payee(row, facts) or "")[-4:],
                 "supplier": row["supplier_name"],
             }
         )
     return refused, facts
+
+
+def _approval(L: Ledger, r, facts: efactura.PaymentFacts, eligible: bool) -> dict:
+    """`can_approve`, and `accounts`: the invoice's IBANs a person picks from when no evidence decides which one is paid
+    (efactura.payee_choices, never one of the firms' own accounts), each named by its position in the invoice, its
+    bank code and the shortest ending of 4 to 6 characters that, with the bank, tells them apart. Never more (NN 7: bank
+    code and a long ending would rebuild the IBAN): accounts 6 characters cannot tell apart are not offered, and the
+    invoice stays one to pay by hand."""
+    refusal = efactura.payment_refusal(L, r, facts, unfiled=True) if eligible else None
+    choices = efactura.payee_choices(r, facts) if refusal and refusal.code == "several_ibans" else []
+    choices = (
+        list(dict.fromkeys(i for i in choices if not companies.company_by_iban(i))) if r["status"] == "open" else []
+    )
+    n = next((n for n in range(4, 7) if len({(i[4:8], i[-n:]) for i in choices}) == len(choices)), None)
+    ibans = json.loads(r["ibans"] or "[]")
+    accounts = [{"index": ibans.index(i), "bank": i[4:8], "ending": i[-n:]} for i in choices] if n else []
+    return {"accounts": accounts, "can_approve": eligible and (refusal is None or bool(accounts))}
+
+
+def _payee(r, facts: efactura.PaymentFacts) -> str:
+    """The account fiscalm pays for this invoice: its queued payment's, else efactura.payee_iban, else the XML's first."""
+    queued = facts.queued_payee(r)
+    if queued:
+        return queued
+    try:
+        return efactura.payee_iban(r, facts)
+    except efactura.ApproveError:
+        return r["supplier_iban"]
+
+
+def _previous_ibans(r, facts: efactura.PaymentFacts) -> list[str]:
+    """Last 4 digits of the supplier's proved accounts when the account fiscalm pays is not one of them."""
+    payee = _payee(r, facts)
+    proved = facts.proved(r)
+    return sorted(i[-4:] for i in proved if i != payee) if payee and payee not in proved else []
 
 
 def _invoices(
@@ -379,7 +438,7 @@ def _invoices(
     status: open | linked (in the payment file) | marked (paid by the user, awaiting a statement debit or a mail, can be
     undone) | paid | skipped. `proved`: paid, and evidence proves it (Ledger.paid_proofs: a statement debit, a payment
     mail or the till's bon fiscal); a payment-file payment marked paid by hand is paid but not proved. `bon`: the proving bon.
-    `can_approve` is true exactly when `approve` would pass now
+    `can_approve` is true exactly when `approve` would pass now, with one of `accounts` picked when it lists any
     (efactura.payment_refusal, the rule behind `refused[].why`); named-file preparation is local in Sandbox."""
     where = {p["item_id"]: k for k in ("held", "in_file", "lost") for p in st[k]}
     marked = {r["message_id"] for r in efactura.awaiting(L, co)}
@@ -397,7 +456,7 @@ def _invoices(
         }
     proofs = L.paid_proofs(co)
     have = covered(L, co, "efactura")
-    credits = received_credits.credit_links(L, co)
+    credits, questions = received_credits.links(L, co)
     grouped = {c["message_id"] for group in credits.values() for c in group}
     out = []
     for r in L.efactura_rows(company=co):
@@ -415,8 +474,9 @@ def _invoices(
         )
         if status == "credit" or net == 0 and corrections and status in ("open", "marked"):
             status = "skipped"
-        if status == "linked" and r["message_id"] not in unpaid:  # its payment-file row is settled: paid, or dropped
-            p = payments.get(r["item_id"]) if r["item_id"] else None
+        p = payments.get(r["item_id"]) if r["item_id"] else None
+        # Its payment-file row is settled: paid, or dropped. A credit taking it out of `unpaid` settles no payment.
+        if status == "linked" and r["message_id"] not in unpaid and not (p and p["status"] in ("pending", "exported")):
             status, r["paid_at"] = (
                 ("skipped" if p and p["status"] == "skipped" else "paid"),
                 p["paid_at"] if p else None,
@@ -446,11 +506,19 @@ def _invoices(
                     }
                     for c in corrections
                 ],
+                "credit_question": [
+                    {"id": c["message_id"], "number": c["number"], "amount": money(c["total"]), "date": c["issue_date"]}
+                    for c in questions.get(r["message_id"], [])
+                ],
                 "credit_note": r["doc_type"] == "credit_note",
                 "status": status,
                 "payment_state": ps,
                 "item_id": r["item_id"],
                 "payment_file": membership.get(r["item_id"]),
+                # its payment row is not the invoice's total minus its linked credits now: check it in the bank
+                "amount_changed": status == "linked"
+                and (p := payments.get(r["item_id"])) is not None
+                and Decimal(p["amount"]) != gross - credit_total,
                 "covered": money(part),
                 "left": money(max(Decimal(0), net - part) if status in ("open", "marked", "linked") else 0),
                 "paid_at": iso_dt(r["paid_at"]) if status in ("marked", "paid", "skipped") else None,
@@ -458,12 +526,8 @@ def _invoices(
                 "paid_method": r["paid_method"] if status in ("marked", "paid") else None,
                 "paid_detail": (r["paid_detail"] or None) if status in ("marked", "paid") else None,
                 "overdue": owed and bool(r["due_date"]) and r["due_date"] < today.isoformat(),
-                "previous_iban_last4": sorted(i[-4:] for i in facts.proved(r) if i != r["supplier_iban"])
-                if r["supplier_iban"] and r["supplier_iban"] not in facts.proved(r)
-                else [],
-                "can_approve": status in ("open", "linked")
-                and not part
-                and efactura.payment_refusal(L, r, facts, unfiled=True) is None,
+                "previous_iban_last4": _previous_ibans(r, facts),
+                **_approval(L, r, facts, status in ("open", "linked") and not part),
                 "can_mark_paid": status == "open",
                 "can_withdraw": ps in ("held", "in_file"),
                 "can_reopen": status == "marked",
@@ -573,7 +637,6 @@ def _document_metadata(L: Ledger, co: str) -> dict[str, dict]:
 def _documents(L: Ledger, co: str) -> list[dict]:
     """The firm's receipts in the accountant's pack (invoices from mail, uploaded photos and files), one row per file."""
     roots, originals = receipt_roots(L, co)
-    structured = {r[0] for r in L.db.execute("SELECT sha FROM receipt_items WHERE company=?", (co,))}
     metadata = _document_metadata(L, co)
     if hasattr(L, "_expense_intake"):
         for sha, fields in metadata.items():
@@ -603,7 +666,6 @@ def _documents(L: Ledger, co: str) -> list[dict]:
                 "card": d["card_last4"] or None,
                 "partner": pack.partner_of(co, d),
                 "files": [{"id": d["sha"], "type": "pdf" if f.suffix.lower() == ".pdf" else "image"}] if f else [],
-                "items": receipt_items.details(L, co, d["sha"]) if d["sha"] in structured else None,
             }
         )
     return sorted(out, key=lambda x: (x["date"] or x["month"], x["vendor"]), reverse=True)
@@ -1330,7 +1392,7 @@ def _to_check(L: Ledger, co: str) -> list[dict]:
                 "month": (d["date"] or q["received"] or "")[:7],
                 "date": d["date"],
                 "supplier": d["supplier"],
-                "number": d["number"] or None,
+                "number": d["number"] or d.get("number_read") or None,
                 "reason": d["reason"],
                 "companies": d["companies"],
                 "totals": [{"amount": money(a), "currency": c} for a, c in d["totals"]],
@@ -1583,6 +1645,7 @@ def _company(L: Ledger, co: str, now: datetime, registry: dict, entries: list[di
             if r["company"] == co
         ],
         "ambiguous": unclear,
+        "mail_proofs": mail_proofs(L, co),
         "transactions": txs,
     }
     for r in out["reports"]:  # a prepared pack is checked against the summary preparing it now would write
@@ -1652,6 +1715,7 @@ class _StateReads:
             "card_owners",
             "sent_invoice_links",
             "issued_client_links",
+            "meta_values",
         ):
             setattr(self, name, lru_cache(maxsize=None)(getattr(ledger, name)))
 
@@ -1956,7 +2020,7 @@ def payment_file_detail(L: Ledger, file_id: int) -> dict | None:
     open_ = summary["status"] == "open"
     path = pay.named_path(file)
     missing = bool(file["path"]) and not path.exists() and open_
-    questions = _named_file_questions(summary, file_id, rows, downloads, missing, open_, path)
+    questions = _named_file_questions(summary, rows, missing, path)
     payments = _named_file_payments(L, co, rows, downloads, downloaded, invoices, proofs, file, missing)
     active = [r for r in rows if r["status"] in ("pending", "exported")]
     _, waiting = pay.statement_waits(L, co, active, clock().date())
@@ -1974,7 +2038,7 @@ def payment_file_detail(L: Ledger, file_id: int) -> dict | None:
     }
 
 
-def _named_file_questions(summary, file_id, rows, downloads, missing, open_, path) -> list[dict]:
+def _named_file_questions(summary, rows, missing, path) -> list[dict]:
     questions = []
     if missing:
         questions.append(
@@ -1982,23 +2046,6 @@ def _named_file_questions(summary, file_id, rows, downloads, missing, open_, pat
                 "kind": "missing",
                 "count": len(rows),
                 "version": pay.version(r["item_id"] for r in rows if r["status"] in ("pending", "exported")),
-            }
-        )
-    if open_ and summary["question"] == "downloads":
-        amounts = {r["item_id"]: Decimal(r["amount"]) for r in rows}
-        questions.append(
-            {
-                "kind": "downloads",
-                "versions": [
-                    {
-                        "id": d["id"],
-                        "version": d["version"],
-                        "at": d["created_at"],
-                        "count": len(d["items"]),
-                        "total": f"{sum((amounts.get(i, Decimal(0)) for i in d['items']), Decimal(0)):.2f}",
-                    }
-                    for d in downloads
-                ],
             }
         )
     if summary["question"] == "orphan":

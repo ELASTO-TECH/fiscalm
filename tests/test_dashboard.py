@@ -771,6 +771,19 @@ def test_chart_collection_uses_proof_amount_before_later_storno(batch):
     assert charts["months"][0]["collected"] == _money("100.00")
 
 
+def test_chart_counts_a_credit_for_several_invoices_once():
+    charts = {"months": [{"month": "2026-10"}]}
+    rows = [
+        dict(id=i, currency="RON", total=t, credited="0.00", how="statement")
+        for i, t in (("i", "400.00"), ("j", "600.00"))
+    ]
+    tx = dict(
+        date="2026-10-02", currency="RON", amount="1000.00", explanation={"kind": "collection", "issued": ["i", "j"]}
+    )
+    home_charts.settlements(charts, [tx], rows, [], {}, {}, {"i": "k", "j": "k"}, [], TODAY)
+    assert charts["months"][0]["collected"] == _money("1000.00")
+
+
 @pytest.mark.parametrize("proof,paid", [("old-debit", "0.00"), ("bon:receipt", "50.00"), ("ef-proof:mail", "50.00")])
 def test_chart_missing_bank_evidence_never_uses_match_date(proof, paid):
     charts = {"months": [{"month": "2026-10"}]}

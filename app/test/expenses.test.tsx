@@ -403,6 +403,41 @@ describe("Received invoices and payment confirmation", () => {
       expect(within(sheet).queryByRole("button", { name: "Pune în fișier" })).toBeNull();
     });
 
+  it("sends the account the person picked on an invoice's sheet even when a refresh no longer asks for one", async () => {
+    at("?co=NORD&tab=cheltuieli&inv=102");
+    let s = fixture();
+    const ask = [{ index: 0, bank: "BTRL", ending: "2222" }, { index: 2, bank: "INGB", ending: "1111" }];
+    s.invoices = s.invoices.map((r) => r.id === "102" ? { ...r, accounts: ask } : r);
+    const api = renderApp({ state: () => json(s), onPost: () => json({ ok: true, message: "", state: s }) });
+    const sheet = await screen.findByRole("dialog", { busy: false });
+    await userEvent.click(within(sheet).getByRole("button", { name: "Pune în fișier" }));
+    const dialog = await screen.findByRole("dialog", { name: /^(Pune în fișier|Fișier nou)$/ });
+    await userEvent.click(within(dialog).getByRole("radio", { name: "INGB •••• 1111" }));
+    s = structuredClone(s);
+    s.invoices = s.invoices.map((r) => r.id === "102" ? { ...r, accounts: [] } : r); // a statement proved the other one
+    act(() => becomeVisible());
+    await waitFor(() => expect(within(dialog).queryByRole("radio", { name: "INGB •••• 1111" })).toBeNull());
+    await userEvent.click(within(dialog).getByRole("button", { name: "Pune în fișier" }));
+    await waitFor(() => expect(api.posts().map((c) => (c.body as { accounts?: unknown }).accounts)).toEqual([{ "102": 2 }]));
+  });
+
+  it("asks again when a refresh no longer offers the picked account among several", async () => {
+    at("?co=NORD&tab=cheltuieli&inv=102");
+    let s = fixture();
+    const ask = [{ index: 0, bank: "BTRL", ending: "2222" }, { index: 1, bank: "INGB", ending: "1111" }, { index: 2, bank: "RNCB", ending: "3333" }];
+    s.invoices = s.invoices.map((r) => r.id === "102" ? { ...r, accounts: ask } : r);
+    const api = renderApp({ state: () => json(s) });
+    await userEvent.click(within(await screen.findByRole("dialog", { busy: false })).getByRole("button", { name: "Pune în fișier" }));
+    const dialog = await screen.findByRole("dialog", { name: /^(Pune în fișier|Fișier nou)$/ });
+    await userEvent.click(within(dialog).getByRole("radio", { name: "RNCB •••• 3333" }));
+    s = structuredClone(s);
+    s.invoices = s.invoices.map((r) => r.id === "102" ? { ...r, accounts: ask.slice(0, 2) } : r);
+    act(() => becomeVisible());
+    await waitFor(() => expect(within(dialog).queryByRole("radio", { name: "RNCB •••• 3333" })).toBeNull());
+    expect(within(dialog).getByRole("button", { name: "Pune în fișier" })).toBeDisabled();
+    expect(api.posts()).toEqual([]);
+  });
+
   it.each([["102", "RON"], ["103", "EUR"]])("offers a payment file only for lei; marking %s (%s) is always there", async (id, currency) => {
     at(`?co=NORD&tab=cheltuieli&inv=${id}`);
     renderApp();
@@ -454,7 +489,7 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
     expect(dialog).toHaveTextContent("Fișierul a fost descărcat. După ce adaugi facturile, descarcă-l din nou.");
     await userEvent.click(within(dialog).getByRole("button", { name: "Pune în fișier" }));
     await waitFor(() => expect(api.posts().map((c) => [c.url, c.body])).toEqual([
-      ["/web/api/payment-files", { action: "payment_file_add", file_id: 9, invoice_ids: ["102", "101"] }]]));
+      ["/web/api/payment-files", { action: "payment_file_add", file_id: 9, invoice_ids: ["102", "101"], amounts: { 102: "120.00", 101: "386.40" } }]]));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Facturi alese" })).toBeNull());
   });
 
@@ -471,7 +506,36 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
     await userEvent.type(name, "Furnizori noiembrie");
     await userEvent.click(within(dialog).getByRole("button", { name: "Pune în fișier" }));
     await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
-      { action: "payment_file_create", co: "NORD", name: "Furnizori noiembrie", invoice_ids: ["102"] }]));
+      { action: "payment_file_create", co: "NORD", name: "Furnizori noiembrie", invoice_ids: ["102"], amounts: { 102: "120.00" } }]));
+  });
+
+  it("asks which account to pay for an invoice listing several, and sends the pick with the invoice", async () => {
+    const s = withFiles();
+    const telecom = s.invoices.find((r) => r.supplier === "Telecom Rapid SRL")!;
+    telecom.accounts = [{ index: 0, bank: "BTRL", ending: "2222" }, { index: 2, bank: "INGB", ending: "1111" }];
+    const api = await choose("open", { state: () => json(s), onPost: ok(s) });
+    await userEvent.click(box("Telecom Rapid SRL"));
+    await put();
+    const dialog = await chooser();
+    const send = within(dialog).getByRole("button", { name: "Pune în fișier" });
+    expect(send).toBeDisabled(); // nothing is guessed
+    await userEvent.click(within(dialog).getByRole("radio", { name: "INGB •••• 1111" }));
+    await userEvent.click(send);
+    await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
+      { action: "payment_file_add", file_id: 9, invoice_ids: [telecom.id], accounts: { [telecom.id]: 2 }, amounts: { [telecom.id]: telecom.left } }]));
+  });
+
+  it("sends the net amount shown for a credited invoice, so a changed amount is refused", async () => {
+    const s = withFiles();
+    const telecom = s.invoices.find((r) => r.supplier === "Telecom Rapid SRL")!;
+    telecom.credits = [{ id: "302", number: "COR 2", amount: "-50.00" }];
+    telecom.left = "200.00";
+    const api = await choose("open", { state: () => json(s), onPost: ok(s) });
+    await userEvent.click(box("Telecom Rapid SRL"));
+    await put();
+    await userEvent.click(within(await chooser()).getByRole("button", { name: "Pune în fișier" }));
+    await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
+      { action: "payment_file_add", file_id: 9, invoice_ids: [telecom.id], amounts: { [telecom.id]: "200.00" } }]));
   });
 
   it("asks again when the chosen file is imported elsewhere meanwhile, and sends nothing until then", async () => {
@@ -501,7 +565,7 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
     expect(within(dialog).queryAllByRole("radio")).toEqual([]);
     await userEvent.click(within(dialog).getByRole("button", { name: "Pune în fișier" }));
     await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([
-      { action: "payment_file_create", co: "NORD", name: "NORD plăți 27 oct 2026", invoice_ids: ["102"] }]));
+      { action: "payment_file_create", co: "NORD", name: "NORD plăți 27 oct 2026", invoice_ids: ["102"], amounts: { 102: "120.00" } }]));
   });
 
   it("marks the chosen invoices paid through Cum ai plătit?, each with its own POST", async () => {
@@ -537,7 +601,7 @@ describe("Choosing invoices to pay in Cheltuieli", () => {
     expect(screen.getByRole("region", { name: "Facturi alese" })).toHaveTextContent("O factură386,40 lei");
     await put();
     await userEvent.click(within(await chooser()).getByRole("button", { name: "Pune în fișier" }));
-    await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([{ action: "payment_file_add", file_id: 9, invoice_ids: ["101"] }]));
+    await waitFor(() => expect(api.posts().map((c) => c.body)).toEqual([{ action: "payment_file_add", file_id: 9, invoice_ids: ["101"], amounts: { 101: "386.40" } }]));
   });
 });
 
@@ -626,70 +690,6 @@ describe("Bonuri", () => {
     expect(sheet).toHaveAccessibleName("Bon din 6 oct, Sumă necunoscută");
     expect(within(sheet).getByRole("heading", { level: 2, name: "Sumă necunoscută" })).toBeInTheDocument();
   });
-});
-
-
-it("edits receipt lines and posts the exact revision without confirming payment", async () => {
-  const s = fixture();
-  const d = s.documents.find((x) => !x.invoice && !x.mail)!;
-  d.items = { lines: [{ name: "Cablu USB 2", unit: "H87", quantity: "2", net: "100.00", vat: "21" }],
-    total: "121.00", currency: "RON", payment: "cash", revision: 3, provenance: "ai", verified: false, state: "to_check", proposal: null, payment_mismatch: true };
-  at(`?co=NORD&tab=cheltuieli&doc=${d.id}`);
-  const api = renderApp({ state: () => json(s) });
-  const sheet = await screen.findByRole("dialog", { busy: false });
-  expect(within(sheet).getByRole("alert")).toHaveTextContent("numerar");
-  await userEvent.clear(within(sheet).getByRole("textbox", { name: "Denumire" }));
-  await userEvent.type(within(sheet).getByRole("textbox", { name: "Denumire" }), "Cablu USB 3");
-  await userEvent.click(within(sheet).getByRole("button", { name: "Salvează" }));
-  expect(api.posts()[0].body).toEqual({ co: "NORD", id: d.id, revision: 3, payload: JSON.stringify({ lines: [{ name: "Cablu USB 3", unit: "H87", quantity: "2", net: "100.00", vat: "21" }], total: "121.00", currency: "RON", payment: "cash" }) });
-  expect(api.posts()[0].url).toContain("receipt-lines-save");
-});
-
-it("starts from the receipt's total, currency and card, items folded away, and saves only when asked", async () => {
-  const s = fixture();
-  const d = s.documents.find((x) => x.vendor === "Hetzner")!;
-  d.items = null;
-  at(`?co=NORD&tab=cheltuieli&doc=${d.id}`);
-  const api = renderApp({ state: () => json(s) });
-  const sheet = await screen.findByRole("dialog", { busy: false });
-  expect(within(sheet).getByRole("textbox", { name: "Total cu TVA" })).toHaveValue(d.amount);
-  expect(within(sheet).getByRole("textbox", { name: "Monedă" })).toHaveValue(d.currency);
-  expect(within(sheet).getByRole("combobox", { name: "Plată" })).toHaveValue("card");
-  expect(within(sheet).queryByRole("textbox", { name: "Denumire" })).toBeNull();
-  expect(api.posts()).toEqual([]);
-  await userEvent.click(within(sheet).getByRole("button", { name: "Completează articolele (opțional)" }));
-  expect(within(sheet).getByRole("textbox", { name: "Denumire" })).toHaveFocus();
-  await userEvent.click(within(sheet).getByRole("button", { name: "Salvează" }));
-  expect(api.posts()[0].body).toEqual({ co: "NORD", id: d.id, revision: 0, payload: JSON.stringify({ lines: [], total: d.amount, currency: d.currency, payment: "card" }) });
-});
-
-it("shows a saved receipt as saved, never the receipt's own values over it", async () => {
-  const s = fixture();
-  const d = s.documents.find((x) => x.vendor === "Hetzner")!;
-  d.items = { lines: [], total: "", currency: "EUR", payment: "", revision: 1, provenance: "user", verified: true, state: "to_check", proposal: null, payment_mismatch: false };
-  at(`?co=NORD&tab=cheltuieli&doc=${d.id}`);
-  renderApp({ state: () => json(s) });
-  const sheet = await screen.findByRole("dialog", { busy: false });
-  expect(within(sheet).getByRole("textbox", { name: "Total cu TVA" })).toHaveValue("");
-  expect(within(sheet).getByRole("combobox", { name: "Plată" })).toHaveValue("");
-});
-
-it("confirms only the displayed receipt association", async () => {
-  const s = fixture();
-  const d = s.documents.find((x) => !x.invoice && !x.mail)!;
-  d.items = { lines: [{ name: "Monitor", unit: "H87", quantity: "1", net: "1239.67", vat: "21" }], total: "1500.00", currency: "RON", payment: "", revision: 2, provenance: "user", verified: true, state: "proposed", proposal: s.invoices[0].id, payment_mismatch: false };
-  at(`?co=NORD&tab=cheltuieli&doc=${d.id}`);
-  const api = renderApp({ state: () => json(s) });
-  const sheet = await screen.findByRole("dialog", { busy: false });
-  const confirm = within(sheet).getByRole("button", { name: "Confirmă asocierea" });
-  expect(within(sheet).getByText(`Corespunde facturii ${s.invoices[0].number}`)).toBeInTheDocument();
-  expect(confirm.compareDocumentPosition(within(sheet).getByRole("button", { name: "Salvează" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  await userEvent.type(within(sheet).getByRole("textbox", { name: "Total cu TVA" }), "1");
-  expect(within(sheet).queryByRole("button", { name: "Confirmă asocierea" })).toBeNull();
-  await userEvent.type(within(sheet).getByRole("textbox", { name: "Total cu TVA" }), "{Backspace}");
-  await userEvent.click(within(sheet).getByRole("button", { name: "Confirmă asocierea" }));
-  expect(api.posts()[0].body).toEqual({ co: "NORD", id: d.id, revision: 2, invoice: s.invoices[0].id });
-  expect(api.posts()[0].url).toContain("receipt-invoice-confirm");
 });
 
 

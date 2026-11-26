@@ -2,7 +2,10 @@
 
 import io
 import json
+import sys
+import threading
 import zipfile
+from contextlib import closing
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -13,11 +16,11 @@ from firms import iban as synthetic_iban
 from payment_cases import download_batch
 from synthetic_world import ubl_lines, ubl_totals
 
-from fiscalm import companies, invoice_lines, recon
-from fiscalm.api import lists, state as api
+from fiscalm import companies, history, invoice_lines, links, recon
+from fiscalm.api import actions, lists, state as api, tasks
 from fiscalm.bank import statements
-from fiscalm.efactura import client as anaf, inbox as efactura
-from fiscalm.ledger import Ledger
+from fiscalm.efactura import client as anaf, credits, inbox as efactura
+from fiscalm.ledger import Ledger, LinkRefused
 from fiscalm.payments import engine as pay
 from fiscalm.payments.orders import PaymentFileError
 
@@ -194,7 +197,7 @@ def test_sync_stores_raw_zip_and_dedupes_on_message_id(ledger, home, sec, monkey
     downloads = []
     blobs = {
         "3001": anaf_zip(ubl()),
-        "3002": anaf_zip(ubl(root="CreditNote", number="CN 1")),
+        "3002": anaf_zip(ubl(root="CreditNote", number="CN 1", total="50.00")),
         "3003": anaf_zip(ubl()),
         "3004": b"PK\x03\x04garbage",
     }
@@ -283,8 +286,7 @@ def test_transfer_to_supplier_iban_marks_paid_once(ledger, home, sec, monkeypatc
 def test_contradictory_iban_never_matches_even_with_a_name_word(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"3001": ubl()})
     t = _tx("250.00", date(2026, 10, 30), "MEDICAL OTHER SRL", OTHER_IBAN, desc="MEDICAL EXEMPLU plata")
-    card = _tx("250.00", date(2026, 10, 30), desc="Plata la POS MEDICAL OTHER")  # one shared word is not enough
-    st = _debit_st(t, card)
+    st = _debit_st(t)
     assert efactura.match_statement(ledger, st) == []
     exact = _tx("250.00", date(2026, 10, 30), "S.C. CENTRUL MEDICAL EXEMPLU S.R.L.", OTHER_IBAN, desc="plata")
     st.accounts[0].txs.append(exact)  # another account, but the transfer names exactly this firm
@@ -343,6 +345,124 @@ def test_user_mark_never_takes_the_debit_of_an_open_invoice(ledger, home, sec, m
     assert [r["message_id"] for r in efactura.awaiting(ledger)] == ["3001"]
     # with 3002 paid by its named debit, the plain one fits the user's mark alone: it confirms it
     assert efactura.match_statement(ledger, _debit_st(plain, named)) == ["3001"]
+
+
+def test_a_mail_proof_is_confirmed_by_its_later_debit_once(ledger, home, sec, monkeypatch):
+    import threading
+
+    from fiscalm.ledger import Ledger
+
+    _stored(ledger, monkeypatch, **{"3001": ubl(), "3002": ubl(number="RMBU 2222603", issue="2026-10-21")})
+    efactura.judged(ledger, "3001", ["imap:proof"])
+    assert efactura.confirm_by_mail(ledger, "3001", "imap:proof", "mail: plata confirmata")
+    plain = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
+    assert efactura.match_statement(ledger, _debit_st(plain)) == []  # fits the proved one and the open one
+    assert ledger.efactura("3001")["paid_tx"] == "ef-proof:imap:proof" and ledger.ambiguous("NORD")
+    assert ledger.mark_efactura_skipped("3002", "nu e de plata")
+    assert not ledger.mark_efactura_paid("3001", "statement", "0" * 20)  # a debit on no record never replaces a mail
+    credit, other = (_tx("250.00", date(2026, 10, d), "X", SUPPLIER_IBAN, desc="d") for d in (28, 29))
+    credit.direction = "credit"  # this firm's credit, another firm's debit: neither pays this invoice
+    ledger.record_statement(_debit_st(credit))
+    ledger.record_statement(statements.Statement("STUDIO9", None, None, [statements.Account("x", "RON", [other])]))
+    for t in (credit, other):
+        assert not ledger.mark_efactura_paid("3001", "statement", statements.tx_key(t))
+    twins = [plain, _tx("250.00", date(2026, 10, 31), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata 2")]
+    ledger.record_statement(_debit_st(*twins))
+    gate, won = threading.Barrier(2), []
+
+    def caller(t):  # two connections, each sure its debit is the invoice's
+        L = Ledger()
+        gate.wait()
+        won.append(L.mark_efactura_paid("3001", f"statement {t.date}", statements.tx_key(t), to_iban=SUPPLIER_IBAN))
+        L.close()
+
+    threads = [threading.Thread(target=caller, args=(t,)) for t in twins]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(won) == [False, True]
+    paid_tx = ledger.efactura("3001")["paid_tx"]
+    assert paid_tx in {statements.tx_key(t) for t in twins}
+    assert {"ef-proof:imap:proof", paid_tx} <= ledger.used_txs()  # the mail still proves nothing else
+    assert ledger.paid_proofs("NORD")["efactura 3001"] == paid_tx
+    assert efactura.match_statement(ledger, _debit_st(*twins)) == [] and ledger.efactura("3001")["paid_tx"] == paid_tx
+    assert not efactura.confirm_by_mail(ledger, "3002", "imap:proof", "mail: plata confirmata")
+
+
+def test_a_reopen_during_matching_never_hides_a_rival(ledger, home, sec, monkeypatch):
+    """The matcher read open invoices, another connection reopened marked B, then the matcher read marked ones: B was in
+    neither and the debit settled mail-proved A alone. It reads every candidate under the write lock now."""
+    import threading
+
+    from fiscalm.ledger import Ledger
+
+    _stored(ledger, monkeypatch, **{"3001": ubl(), "3002": ubl(number="RMBU 2222603", issue="2026-10-21")})
+    efactura.judged(ledger, "3001", ["imap:proof"])
+    assert efactura.confirm_by_mail(ledger, "3001", "imap:proof", "mail: plata confirmata")
+    assert ledger.mark_efactura_paid("3002", "user: already paid (page)")
+
+    def reopen():
+        L = Ledger()
+        efactura.reopen(L, "3002")
+        L.close()
+
+    other = threading.Thread(target=reopen)
+    marked = efactura._marked
+
+    def reopen_then_read(L, company=None, **kw):  # between rivals' read of the open rows and of the marked ones
+        if sys._getframe(1).f_code.co_name == "_open_invoices" and not other.ident:
+            other.start()
+            other.join(timeout=1)  # blocked by the matcher's lock: it stops waiting and the matcher goes on
+        return marked(L, company, **kw)
+
+    monkeypatch.setattr(efactura, "_marked", reopen_then_read)
+    t = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
+    assert efactura.match_statement(ledger, _debit_st(t)) == []
+    other.join()
+    assert ledger.efactura("3002")["status"] == "open" and statements.tx_key(t) not in ledger.used_txs()
+
+
+@pytest.mark.parametrize("case", ["credited", "withdrawn", "unreadable twin", "payment paid by a debit"])
+def test_a_mail_proved_invoice_takes_its_debit_like_an_open_one(ledger, home, sec, monkeypatch, case):
+    credit = ubl(number="COR 2", total="-50.00").replace(
+        b"<cbc:DocumentCurrencyCode>",
+        b"<cbc:Note>Storno factura seria TEST nr. 0001 din data 20/10/2026</cbc:Note><cbc:DocumentCurrencyCode>",
+    )
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), **({"3002": credit} if case == "credited" else {})})
+    if case in ("withdrawn", "payment paid by a debit"):  # its payment-file row stays, skipped
+        item_id = efactura.approve(ledger, "3001", origin="person")["item_id"]
+        assert efactura.withdraw(ledger, "3001", "user: already paid (page)") is None
+    if case == "unreadable twin":  # a mail proved an invoice fiscalm can't read: no amount, never a rival
+        ledger.db.execute(
+            "INSERT INTO efactura(message_id,company,raw_path,status,created_at,parse_error,paid_tx) "
+            "VALUES('3009','NORD','x.zip','paid','2026-10-20','synthetic','ef-proof:imap:other')"
+        )
+        ledger.db.execute("INSERT INTO settled_tx VALUES('ef-proof:imap:other','efactura 3009','2026-10-21')")
+        ledger.db.commit()
+        efactura.judged(ledger, "3009", ["imap:other"])  # a proof as valid as any: only unreadable
+    proved = "3001"
+    if case == "credited":  # 3001's rest (200, netted once) is a rival of a mail-proved 200 invoice, marked or not
+        _stored(ledger, monkeypatch, **{"3003": ubl(number="TEST 3", total="200.00")})
+        proved = "3003"
+    efactura.judged(ledger, proved, ["imap:proof"])
+    assert efactura.confirm_by_mail(ledger, proved, "imap:proof", "mail: plata confirmata")
+    if case == "credited":
+        t = _tx("200.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
+        assert efactura.rivals(ledger, "NORD")(t) == {("partial", "3001"), ("efactura", "3003")}
+        assert ledger.mark_efactura_paid("3001", "user: platita")
+        assert efactura.rivals(ledger, "NORD")(t) == {("partial", "3001"), ("efactura", "3003")}
+        assert efactura.match_statement(ledger, _debit_st(t)) == [] and statements.tx_key(t) not in ledger.used_txs()
+        return
+    t = _tx("250.00", date(2026, 10, 30), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata servicii")
+    if case == "payment paid by a debit":  # a debit proved its payment row meanwhile: no second debit for the invoice
+        first = _tx("250.00", date(2026, 10, 29), "CENTRUL MEDICAL", SUPPLIER_IBAN, desc="plata 1")
+        ledger.record_statement(_debit_st(first))
+        assert ledger.mark_paid(item_id, "statement", statements.tx_key(first))
+        assert efactura.match_statement(ledger, _debit_st(t)) == [] and statements.tx_key(t) not in ledger.used_txs()
+        return
+    assert efactura.match_statement(ledger, _debit_st(t)) == ["3001"]
+    assert ledger.efactura("3001")["paid_tx"] == statements.tx_key(t)
 
 
 def test_withdrawn_invoice_is_confirmed_by_its_debit(ledger, home, sec, monkeypatch):
@@ -423,8 +543,6 @@ def test_one_debit_settles_one_thing_even_when_the_key_is_reused(ledger, home, s
     assert not ledger.mark_efactura_paid("3001", "statement z", "k3")  # already paid: k3 stays free
     assert "k3" not in ledger.used_txs() and ledger.mark_efactura_paid("3002", "statement z", "k3")
     # two callers with their own connection, both sure the key is still free
-    import threading
-
     _stored(ledger, monkeypatch, **{"3004": ubl(number="RMBU 2222605"), "3005": ubl(number="RMBU 2222606")})
     gate, won = threading.Barrier(2), []
 
@@ -492,87 +610,175 @@ def test_two_approved_twins_are_not_paid_by_one_debit_even_on_reprocessing(ledge
     assert ledger.payment(ids[1])["paid_note"].startswith("statement 2026-10-31")
 
 
-def _known_name(ledger, t, mid: str) -> None:
-    """The user answered once that this statement name is the invoice's supplier (efactura.resolve_debit remembers it)."""
-    name = efactura.line_keys(t, companies.get("NORD").own_ibans)["name"]
-    partner = efactura.supplier_partner("NORD", ledger.efactura(mid))
-    ledger.remember("NORD", "name", name, {"kind": "documents", "partner": partner, "reason": None, "note": None}, None)
+D = date(2026, 10, 20)  # the invoices' date
 
 
-def test_card_payment_found_by_name_settles_only_once_its_name_is_remembered(ledger, home, sec, monkeypatch):
+@pytest.mark.parametrize(
+    "totals, day, desc, settled, waits",
+    [
+        (["56.27"], D, "Plata la POS EPOS MID 600000000001RON SHOPX7K2", True, False),
+        (["11.22"], date(2026, 11, 4), "Plata clienti speciali CONTRACT VDF123456", True, False),
+        (["99.90"], date(2026, 10, 16), "Plata la POS non-BT CENTRUL MEDICAL LODZ", True, False),  # name, before
+        (["11.22", "11.22"], D, "Plata clienti speciali CONTRACT VDF123456", False, True),
+        (["11.22", "11.22"], D, "Plata clienti speciali CONTRACT VDF100", True, False),  # names its invoice
+        (["11.22", "11.22"], D, "Plata la POS TID:100 MID 200 REF: 100 SHOPX7K2", False, True),  # the bank's fields
+        (["11.22", "11.22"], D, "Plata la POS TID : 100 MAGAZIN", False, True),
+        (["56.27"], date(2026, 10, 14), "Plata la POS EPOS SHOPX7K2", False, False),  # long before the invoice
+        (["17.42"], D, "Retragere numerar ATM BT CLUJ", False, False),  # cash, not a payment
+        (["11.22"], D, "Plata BUGETUL DE STAT", False, False),  # a tax: never
+    ],
+)
+def test_a_debit_without_an_iban_settles_the_one_invoice_of_its_exact_amount(
+    ledger, home, sec, monkeypatch, totals, day, desc, settled, waits
+):
+    _stored(ledger, monkeypatch, **{f"300{i}": ubl(total=x, number=f"X{i}00") for i, x in enumerate(totals, 1)})
+    t = _tx(totals[0], day, desc=desc)
+    assert efactura.match_statement(ledger, _debit_st(t)) == (["3001"] if settled else [])
+    assert [(a["tx_key"], len(json.loads(a["candidates"]))) for a in ledger.ambiguous("NORD")] == (
+        [(efactura.tx_key(t), 2)] if waits else []
+    )
+
+
+@pytest.mark.parametrize(
+    "numbers, paid, desc, settled, waits",
+    [
+        ({"3001": "12345", "3002": "67890"}, [], "Order 9123456", [], True),  # part of a longer code: names nothing
+        ({"3001": "X12345678", "3002": "X87654321"}, [], "POS TID: 1 GAMMA ROM 12345678 valoare", [], True),  # card
+        ({"3001": "BILL-12", "3002": "N55555"}, ["3001"], "Plata factura BILL-12", [], False),  # names a paid one
+        ({"3001": "INV-2026-0042", "3002": "ALT-2026-0042"}, ["3001"], "Plata factura INV-2026-0042", [], False),
+        ({"3001": "INV-2026-0042", "3002": "ALT-2026-0042"}, [], "Plata factura ALT 2026 0042", ["3002"], False),
+    ],
+)
+def test_a_debit_settles_only_the_invoice_its_whole_reference_names(
+    ledger, home, sec, monkeypatch, numbers, paid, desc, settled, waits
+):
+    _stored(ledger, monkeypatch, **{m: ubl(total="11.22", number=n) for m, n in numbers.items()})
+    for m in paid:
+        ledger.db.execute("UPDATE efactura SET status='paid' WHERE message_id=?", (m,))
+    ledger.db.commit()
+    t = _tx("11.22", D, desc=desc)
+    assert efactura.match_statement(ledger, _debit_st(t)) == settled
+    assert len(ledger.ambiguous("NORD")) == int(waits)
+
+
+def test_a_pick_between_invoices_of_the_same_amount_teaches_no_name(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(total="11.22"), "3002": ubl(total="11.22", number="X2")})
+    card = _tx("11.22", D, "PAYPROC*XYZ", desc="Plata la POS PAYPROC*XYZ")  # a processor, not the supplier
+    assert efactura.match_statement(ledger, _debit_st(card)) == []
+    assert efactura.resolve_debit(ledger, "NORD", efactura.tx_key(card), "3001") == ("efactura", "3001")
+    assert ledger.memories("NORD") == []
+
+
+def test_a_cash_withdrawal_by_its_bank_code_settles_nothing(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(total="17.42")})
+    t = _tx("17.42", D)
+    t.category = statements.iso_category("PMNT", "CWDL")
+    assert efactura.match_statement(ledger, _debit_st(t)) == [] and not ledger.ambiguous("NORD")
+
+
+@pytest.mark.parametrize("desc", ["Plata BUGETUL DE STAT", "AVANS TREZORERIE"])
+def test_a_tax_or_an_advance_is_never_a_suppliers_payment_even_by_choice(ledger, home, sec, monkeypatch, desc):
+    _stored(ledger, monkeypatch, **{"3001": ubl(total="17.42"), "3002": ubl(total="17.42", number="X2")})
+    t = _tx("17.42", D, desc=desc)
+    assert efactura.match_statement(ledger, _debit_st(t)) == [] and not ledger.ambiguous("NORD")
+    ledger.set_ambiguous(efactura.tx_key(t), "NORD", t.to_dict(), [["efactura", "3001"], ["efactura", "3002"]])
+    with pytest.raises(efactura.ResolveError):
+        efactura.resolve_debit(ledger, "NORD", efactura.tx_key(t), "3001")
+
+
+def test_a_payment_row_of_the_same_amount_keeps_a_debit_without_an_iban_from_settling(ledger, home, sec, monkeypatch):
+    eur = ubl(number="E1", currency="EUR")
+    _stored(ledger, monkeypatch, **{"3001": ubl(), "3002": ubl(number="RMBU 2222603"), "3003": eur})
+    item_id = efactura.approve(ledger, "3001", origin="person")["item_id"]
+    t = _tx("250.00", date(2026, 10, 30), desc="Plata clienti speciali CONTRACT VDF123456")
+    euros = _tx("250.00", date(2026, 10, 30), desc="Plata clienti speciali CONTRACT VDF7", currency="EUR")
+    assert efactura.match_statement(ledger, _debit_st(t, euros)) == ["3003"]  # a payment file pays lei only
+    assert recon.auto_mark_paid(ledger, _debit_st(t)) == []
+    assert ledger.payment(item_id)["status"] == "pending" and len(ledger.ambiguous("NORD")) == 1
+
+
+def test_the_users_pick_remembers_the_debits_name_for_the_supplier(ledger, home, sec, monkeypatch):
     _stored(
         ledger,
         monkeypatch,
         **{
             "3001": ubl(supplier="ZEP ELECTRONIC COMPONENTS SRL", total="99.90"),
-            "3002": ubl(supplier="ZEP ELECTRONIC COMPONENTS SRL", total="45.00", number="Z2"),
+            "3002": ubl(supplier="ZEP ELECTRONIC COMPONENTS SRL", total="99.90", number="Z2"),
         },
     )
-    other = _tx("99.91", date(2026, 10, 21), desc="Plata la POS ZEP ELECTRONIC LODZ")
-    far = _tx("99.90", date(2026, 9, 1), desc="Plata la POS ZEP ELECTRONIC LODZ")  # long before the invoice
-    st = _debit_st(other, far)
-    assert efactura.match_statement(ledger, st) == []
-    card = _tx(
-        "99.90",
-        date(2026, 10, 18),
-        counterparty="ZEP ELECTRONIC LODZ",
-        desc="Plata la POS non-BT ZEP ELECTRONIC LODZ POL 12345678 valoare",
-    )
-    st.accounts[0].txs.append(card)
-    assert efactura.match_statement(ledger, st) == []  # a name alone proves nothing yet: it waits for the user
-    assert [a["tx_key"] for a in ledger.ambiguous("NORD")] == [efactura.tx_key(card)]
+    card = _tx("99.90", date(2026, 10, 18), "ZEP ELECTRONIC LODZ", desc="Plata la POS non-BT ZEP ELECTRONIC LODZ")
+    assert efactura.match_statement(ledger, _debit_st(card)) == []  # two invoices fit: the user picks
     (home / "state").mkdir(exist_ok=True)
     (home / "state" / "LIVE").touch()
     assert efactura.resolve_debit(ledger, "NORD", efactura.tx_key(card), "3001") == ("efactura", "3001")
     assert [m["key_kind"] for m in ledger.memories("NORD")] == ["name"]  # the answer is remembered
-    st.accounts[0].txs.append(
-        _tx(
-            "45.00",
-            date(2026, 10, 19),
-            counterparty="ZEP ELECTRONIC LODZ",
-            desc="Plata la POS non-BT ZEP ELECTRONIC LODZ",
-        )
-    )
-    assert efactura.match_statement(ledger, st) == ["3002"]
-    assert "name" in ledger.efactura("3002")["paid_note"]
     abroad = _tx("12.00", date(2026, 10, 25), counterparty="ZEP ELECTRONIC LODZ", desc="Plata la POS non-BT ZEP")
     recon.classify(ledger, "NORD", [abroad])
     assert abroad.category == statements.DOMESTIC  # Factura vine prin e-Factura: no receipt is asked for
 
 
-def test_a_card_debit_never_counts_for_a_bon_paid_invoice_by_a_name_alone(ledger, home, sec, monkeypatch):
+def test_only_a_card_debit_near_a_bon_paid_invoice_is_its_card_payment(ledger, home, sec, monkeypatch):
     _stored(ledger, monkeypatch, **{"3001": ubl(supplier="ALPHA ELECTRONIC SRL", total="99.90")})
     ledger.db.execute("UPDATE efactura SET status='paid', paid_tx='bon:sha-bon' WHERE message_id='3001'")
     ledger.db.commit()
-    card = _tx("99.90", date(2026, 10, 21), counterparty="BETA ELECTRONIC", desc="Plata la POS BETA ELECTRONIC")
-    efactura.match_statement(ledger, _debit_st(card))
-    assert efactura.tx_key(card) not in ledger.used_txs()  # left free for its own invoice, and asked about
+    far = _tx("99.90", date(2026, 11, 20), desc="Plata la POS BETA")  # the bon may have been paid in cash
+    direct = _tx("99.90", date(2026, 10, 20), desc="Plata clienti speciali VDF5")  # a direct debit, not a card
+    near = _tx("99.90", date(2026, 10, 21), desc="Plata la POS BETA")
+    efactura.match_statement(ledger, _debit_st(far, direct, near))
+    assert [efactura.tx_key(t) in ledger.used_txs() for t in (far, direct, near)] == [False, False, True]
 
 
-def test_short_card_descriptors_match_but_only_near_the_invoice_date(ledger, home, sec, monkeypatch):
-    _stored(
-        ledger,
-        monkeypatch,
-        **{
-            "3001": ubl(supplier="LUMEN AMBIENT SRL", total="486.00", issue="2026-09-04"),
-            "3002": ubl(
-                supplier="VALEA STORE S.R.L.",
-                total="931.90",
-                issue="2026-09-08",
-                number="MN1",
-                supplier_cui="RO77777777",
-            ),
-        },
-    )
-    late = _tx("931.90", date(2026, 9, 25), desc="Plata la POS non-BT cu card VISA EPOS PayU*valea.example BUCURESTI")
-    st = _debit_st(late)
-    assert efactura.match_statement(ledger, st) == []  # 17 days later: not proof enough without an IBAN
-    st.accounts[0].txs += [
-        _tx("486.00", date(2026, 9, 4), desc="Plata la POS EPOS MID 600000000001RON NTP*lumen RO"),
-        _tx("931.90", date(2026, 9, 9), desc="Plata la POS non-BT cu card VISA EPOS PayU*valea.example"),
-    ]
-    assert efactura.match_statement(ledger, st) == []  # each fits by its short descriptor: both wait for the user
-    assert len(ledger.ambiguous("NORD")) == 2
+@pytest.mark.parametrize(
+    "invoices,debit,offered",
+    [
+        ({"3001": "11.22"}, _tx("11.22", date(2026, 10, 21), "ALT SRL", OTHER_IBAN, desc="Plata VDF123"), ["3001"]),
+        (
+            {"3001": "11.22", "3002": "11.22"},
+            _tx("11.22", date(2026, 10, 21), "ALT SRL", OTHER_IBAN, desc="Plata VDF123"),
+            ["3001", "3002"],
+        ),
+        ({"3001": "11.22"}, _tx("11.22", date(2026, 12, 20), "ALT SRL", OTHER_IBAN, desc="Plata VDF123"), []),
+    ],
+)
+def test_a_transfer_to_an_account_no_invoice_lists_waits_for_a_person(
+    ledger, home, sec, monkeypatch, invoices, debit, offered
+):
+    """A transfer to another account fits no invoice: the invoices of exactly its amount, up to AMOUNT_DAYS before it,
+    are offered as a Plată de lămurit, and the person's pick settles the one chosen."""
+    _stored(ledger, monkeypatch, **{m: ubl(total=v, number=f"N{m}", issue="2026-10-20") for m, v in invoices.items()})
+    assert efactura.match_statement(ledger, _debit_st(debit)) == [] and debit_key(debit) not in ledger.used_txs()
+    recorded = ledger.ambiguous("NORD")
+    assert [sorted(c[1] for c in json.loads(a["candidates"])) for a in recorded] == ([offered] if offered else [])
+    if offered:
+        assert efactura.resolve_debit(ledger, "NORD", debit_key(debit), offered[0]) == ("efactura", offered[0])
+        assert ledger.efactura(offered[0])["paid_tx"] == debit_key(debit) and not ledger.ambiguous("NORD")
+
+
+debit_key = efactura.tx_key
+
+
+def test_an_amount_alone_never_overrides_a_named_invoice_nor_teaches_a_name(ledger, home, sec, monkeypatch):
+    """Review: a debit naming another (paid) invoice, or moving money between the firm's own accounts, settles and is
+    offered nothing; a pick made on the amount alone remembers no name or account for the supplier; bank text shown
+    masked."""
+    numbers = {"3001": "N3001", "3002": "N3002", "3003": "INV-2026-0042", "3004": "123-456"}
+    _stored(ledger, monkeypatch, **{m: ubl(total="11.22", number=n, issue="2026-10-20") for m, n in numbers.items()})
+    ledger.db.execute("UPDATE efactura SET status='paid' WHERE message_id IN ('3002', '3003', '3004')")
+    ledger.db.commit()
+    named = _tx("11.22", date(2026, 10, 21), desc="Plata factura N3002 VDF123")
+    dashed = _tx("11.22", date(2026, 10, 21), desc="Plata factura INV-2026-0042")
+    digits = _tx("11.22", date(2026, 10, 21), desc="Plata factura 123-456")
+    own = _tx("11.22", date(2026, 10, 21), iban=companies.get("NORD").ibans["EUR"], desc="Transfer intern")
+    paid = "Plata PAYPROC*XYZ RO49AAAA1B31007593840000"
+    other = _tx("11.22", date(2026, 10, 22), "PAYPROC*XYZ", OTHER_IBAN, desc=paid)
+    assert efactura.match_statement(ledger, _debit_st(named, dashed, digits, own, other)) == []
+    assert [a["tx_key"] for a in ledger.ambiguous("NORD")] == [debit_key(other)]
+    (shown,) = api.ambiguous(ledger, "NORD")
+    assert "RO49AAAA1B31007593840000" not in shown["description"]
+    assert efactura.resolve_debit(ledger, "NORD", debit_key(other), "3001") == ("efactura", "3001")
+    assert ledger.memories("NORD") == []
+    # a date in a debit's text is never read as an invoice number (the matchers' rule is digits as written)
+    assert efactura._named({"20261021"}, _tx("1.00", date(2026, 10, 21), desc="Plata din 2026-10-21")) == set()
 
 
 def test_eur_invoice_matches_original_amount(ledger, home, sec, monkeypatch):
@@ -584,7 +790,6 @@ def test_eur_invoice_matches_original_amount(ledger, home, sec, monkeypatch):
         desc="Plata la POS non-BT FURNIZOR EXEMPLU",
         orig=("20.00", "EUR"),
     )
-    _known_name(ledger, t, "3001")
     st = _debit_st(t)
     assert efactura.match_statement(ledger, st) == ["3001"]
 
@@ -738,18 +943,280 @@ def test_evidence_survives_a_busy_mail_mirror(ledger, home, sec, monkeypatch):
     assert efactura.evidence(ledger, read=boom) == []
 
 
-@pytest.mark.parametrize("marked", [False, True])
-def test_forged_supplier_mail_is_only_a_suggestion(ledger, home, sec, monkeypatch, marked):
-    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="486.00")})
-    if marked:
-        ledger.mark_efactura_paid("3001", "user: paid")
-    before = dict(ledger.efactura("3001"))
-    mail = _mail("Lumen Ambient <attacker@example.invalid>", "Payment received", "Total 486,00 lei")
-    answer = {"decisions": [{"message_id": "3001", "paid": True, "mail_key": mail["key"], "reason": "paid"}]}
-    result = efactura.judge(ledger, ask=lambda p: answer, read=lambda q: [mail])
-    assert dict(ledger.efactura("3001")) == before
-    assert result["suggestions"][0]["message_id"] == "3001"
-    assert not ledger.used_txs()
+NETOPIA = "NETOPIA Payments <no@netopia-payments.com>"
+
+
+def _judge(ledger, mails, *decisions):
+    """judge with a fake mailbox and a fake AI answering `decisions` (message_id, mail index, confidence); the AI calls."""
+    calls = []
+
+    def ask(prompt):
+        calls.append(prompt)
+        return {
+            "decisions": [
+                {"message_id": m, "paid": c != "none", "confidence": c, "mail_key": mails[i]["key"], "reason": "plata"}
+                for m, i, c in decisions
+            ]
+        }
+
+    return efactura.judge(ledger, ask=ask, read=lambda q: mails), calls
+
+
+PAID = "Lumen Ambient: plata de 240,00 RON a fost acceptata"
+
+
+@pytest.mark.parametrize(
+    "case, sender, domain, text, confidence, settled",
+    [
+        ("processor, authenticated", NETOPIA, "netopia-payments.com", PAID, "high", True),
+        ("the supplier, authenticated", "Lumen <shop@lumen.example>", "lumen.example", PAID, "high", False),
+        ("display name only", "NETOPIA <attacker@example.invalid>", "", PAID, "high", False),
+        ("a look-alike domain", "NETOPIA <no@netopia-pay.example>", "netopia-pay.example", PAID, "high", False),
+        ("the AI is unsure", NETOPIA, "netopia-payments.com", PAID, "medium", False),
+        ("a longer amount", NETOPIA, "netopia-payments.com", "Lumen Ambient: 1240,00 RON acceptata", "high", False),
+        ("another currency", NETOPIA, "netopia-payments.com", "Lumen Ambient: 240,00 EUR acceptata", "high", False),
+        ("a grouped larger amount", NETOPIA, "netopia-payments.com", "Lumen Ambient: 1 240,00 RON", "high", False),
+        (
+            "another merchant, one shared word",
+            NETOPIA,
+            "netopia-payments.com",
+            "Delta Ambient 240,00 RON",
+            "high",
+            False,
+        ),
+        ("a mail cut short", NETOPIA, "netopia-payments.com", PAID + " anulata?" * 300, "high", False),
+        ("undated, or fetched in part", NETOPIA, "netopia-payments.com", PAID, "high", False),
+        ("a subdomain not listed", NETOPIA, "receipts.netopia-payments.com", PAID, "high", False),
+        ("a grouped amount, apostrophe", NETOPIA, "netopia-payments.com", "Lumen Ambient: 1’240,00 RON", "high", False),
+        ("a refund", NETOPIA, "netopia-payments.com", "Lumen Ambient: -240,00 RON", "high", False),
+        ("a refund, currency first", NETOPIA, "netopia-payments.com", "Lumen Ambient: -RON 240.00", "high", False),
+    ],
+)
+def test_judge_settles_only_a_sure_unique_authenticated_mail(
+    ledger, home, sec, monkeypatch, case, sender, domain, text, confidence, settled
+):
+    complete = case != "undated, or fetched in part"
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
+    mail = _mail(sender, "Plata confirmata", text) | {"domain": domain, "complete": complete}
+    res, calls = _judge(ledger, [mail], ("3001", 0, confidence))
+    row = ledger.efactura("3001")
+    if settled:
+        assert res["settled"] == ["3001"] and row["paid_tx"] == f"ef-proof:{mail['key']}"
+        assert row["paid_note"] == "mail: payment confirmation read by the AI"  # never the AI's words
+        assert ledger.paid_proofs("NORD")["efactura 3001"] == row["paid_tx"]
+    else:
+        assert row["status"] == "open" and not ledger.used_txs()
+        assert [r["message_ids"] for r in efactura.reviews(ledger, "NORD")] == [["3001"]]
+    assert _judge(ledger, [mail], ("3001", 0, confidence))[1] == []  # the pair is never sent again
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "short name word",
+        "credited twin",
+        "credited after the receipt",
+        "credited to nothing",
+        "twin paid by a debit",
+        "skipped twin",
+        "history twin",
+    ],
+)
+def test_judge_settles_nothing_another_firm_or_balance_may_explain(ledger, home, sec, monkeypatch, case):
+    supplier = "Q7 AMBIENT SRL" if case == "short name word" else "LUMEN AMBIENT SRL"
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier=supplier, total="240.00", number="F-LUM 1")})
+    text = "Z9 Ambient: plata de 240,00 RON acceptata"  # names another firm sharing a word
+    if case.startswith("credited"):  # 300.00 less a 60.00 credit leaves 240.00; 240.00 was 240.00 before its credit
+        storno = (
+            b"<cbc:Note>Storno factura seria TEST nr. 0002 din data 20/10/2026</cbc:Note><cbc:DocumentCurrencyCode>"
+        )
+        credit = ubl(supplier=supplier, number="COR 2", total="-60.00").replace(b"<cbc:DocumentCurrencyCode>", storno)
+        total = "300.00" if case == "credited twin" else "240.00"
+        if case == "credited to nothing":
+            credit = credit.replace(b"-60.00", b"-240.00")
+        _stored(ledger, monkeypatch, **{"3002": ubl(supplier=supplier, number="TEST 2", total=total), "3003": credit})
+        text = PAID
+    if case in ("twin paid by a debit", "skipped twin"):  # the receipt may be that purchase's
+        _stored(ledger, monkeypatch, **{"3002": ubl(supplier=supplier, number="F-LUM 2", total="240.00")})
+        if case == "skipped twin":
+            assert ledger.mark_efactura_skipped("3002", "platita din alt cont")
+        else:
+            assert ledger.mark_efactura_paid("3002", "statement", "a" * 20)
+        text = PAID
+    if case == "history twin":  # an invoice from before the firm's start: a rival, never anything to review
+        twin = {"message_id": "history:ab", "number": "F-LUM 0", "issue_date": "2026-10-18", "currency": "RON"}
+        twin |= {"total": "240.00", "supplier_name": supplier, "doc_type": "invoice", "status": "history"}
+        monkeypatch.setattr(history, "rivals", lambda L, co, way: [twin] if co == "NORD" else [])
+        text = PAID
+    mail = _mail(NETOPIA, "Plata confirmata", text) | {"domain": "netopia-payments.com", "complete": True}
+    res = _judge(ledger, [mail], ("3001", 0, "high"))[0]
+    assert res["settled"] == []
+    if case == "history twin":  # reviewed for the invoice still to pay alone
+        assert res["review"] == [{"mail_key": mail["key"], "message_ids": ["3001"]}]
+    assert ledger.efactura("3001")["status"] == "open"
+
+
+def test_judge_records_a_mail_that_proves_nothing(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
+    order = _mail("Lumen <shop@lumen.example>", "Comanda inregistrata", "Total de plata 240,00 RON la livrare")
+    assert _judge(ledger, [order | {"firms": ["STUDIO9"]}])[1] == []  # another firm's mailbox: never read for NORD
+    assert len(_judge(ledger, [order])[1]) == 1  # an answer with no decision for it: the next one reads it again
+    assert len(_judge(ledger, [order], ("3001", 0, "none"), ("3001", 0, "high"))[1]) == 1  # two: not answered either
+    unsure = {"message_id": "3001", "paid": True, "confidence": "none", "mail_key": order["key"], "reason": "?"}
+    efactura.judge(ledger, ask=lambda p: {"decisions": [unsure]}, read=lambda q: [order])  # paid, but not at all sure
+    low = unsure | {"confidence": "low"}
+    efactura.judge(ledger, ask=lambda p: {"decisions": [low]}, read=lambda q: [order])  # no confidence it knows
+    res, calls = _judge(ledger, [order], ("3001", 0, "none"))
+    assert len(calls) == 1 and res == {"invoices": 1, "settled": [], "review": []}
+    assert ledger.efactura("3001")["status"] == "open" and not efactura.reviews(ledger, "NORD")
+    assert _judge(ledger, [order], ("3001", 0, "none"))[1] == []
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_judge_leaves_a_mail_fitting_twin_invoices_to_a_person(ledger, home, sec, monkeypatch, approved):
+    twins = {m: ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number=f"F-LUM {m}") for m in ("3001", "3002")}
+    _stored(ledger, monkeypatch, **twins)
+    mail = _mail(NETOPIA, "Plata confirmata", "Lumen Ambient 240,00 RON") | {
+        "domain": "netopia-payments.com",
+        "complete": True,
+    }
+    if approved:  # in the payment file, still to pay: a rival, though never settled by a mail
+        efactura.approve(ledger, "3002", origin="person")
+        assert _judge(ledger, [mail], ("3001", 0, "high"))[0]["settled"] == []
+        assert ledger.efactura("3001")["status"] == "open"
+        return
+    res, _ = _judge(ledger, [mail], ("3001", 0, "high"))
+    assert res == {"invoices": 2, "settled": [], "review": [{"mail_key": mail["key"], "message_ids": ["3001", "3002"]}]}
+    assert {ledger.efactura(m)["status"] for m in twins} == {"open"}
+    other = {"key": "imap:<other>", "from": NETOPIA, "subject": "Plata", "date": "2026-10-21"}
+    efactura.set_review(ledger, other, ["3001"], "plata")
+    efactura.set_review(ledger, other, ["3002"], "plata")  # the same mail on a later tick: 3001 still waits
+    assert {r["mail_key"]: r["message_ids"] for r in efactura.reviews(ledger, "NORD")}[other["key"]] == ["3001", "3002"]
+    assert efactura.confirm_by_mail(ledger, "3002", mail["key"], "mail: ales de utilizator")
+    assert [r["mail_key"] for r in efactura.reviews(ledger, "NORD")] == [other["key"]]  # that mail proved one
+
+
+@pytest.mark.parametrize("answers", [("3001", "3002"), ("3001", "")])
+def test_two_people_answering_one_mail_at_once_settle_at_most_one_invoice(ledger, home, sec, monkeypatch, answers):
+    import threading
+
+    from fiscalm.ledger import Ledger
+
+    twins = {m: ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number=f"F-LUM {m}") for m in ("3001", "3002")}
+    _stored(ledger, monkeypatch, **twins)
+    mail = {"key": "imap:<pay@x>", "from": NETOPIA, "subject": "Plata", "date": "2026-10-21"}
+    efactura.set_review(ledger, mail, ["3001", "3002"], "plata")
+    gate, done = threading.Barrier(2), []
+
+    def answer(target):
+        L = Ledger()
+        gate.wait()
+        done.append(efactura.resolve_review(L, "NORD", efactura.review_id(mail["key"]), target))
+        L.close()
+
+    threads = [threading.Thread(target=answer, args=(t,)) for t in answers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(done) == 2
+    [won] = [d for d in done if d is not None]  # the first answer wins, the second finds nothing waiting
+    paid = [m for m in twins if ledger.efactura(m)["status"] == "paid"]
+    assert paid == ([won] if won else [])
+    assert not paid or ledger.paid_proofs("NORD")[f"efactura {won}"] == "ef-proof:" + mail["key"]
+    assert efactura.reviews(ledger, "NORD") == []
+
+
+def test_a_mail_a_person_said_is_no_payment_never_settles_nor_returns(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
+    mail = _mail(NETOPIA, "Plata confirmata", PAID) | {"domain": "netopia-payments.com", "complete": True}
+    efactura.set_review(ledger, mail | {"from": NETOPIA, "date": "2026-10-21"}, ["3001"], "plata")
+    assert efactura.resolve_review(ledger, "NORD", efactura.review_id(mail["key"]), "") == ""
+    res, calls = _judge(ledger, [mail], ("3001", 0, "high"))  # a judge that read it before the answer, or again
+    assert len(calls) == 1 and res["settled"] == [] and res["review"] == []
+    assert ledger.efactura("3001")["status"] == "open" and efactura.reviews(ledger, "NORD") == []
+
+
+def test_two_mails_under_one_message_id_prove_nothing(ledger, home, sec, monkeypatch):
+    lumen = ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")
+    _stored(
+        ledger, monkeypatch, **{"3001": lumen, "3002": ubl(supplier="VALEA STORE SRL", total="240.00", number="V 1")}
+    )
+    same = {"domain": "netopia-payments.com", "complete": True}
+    by = {w: _mail(NETOPIA, "Plata", f"{w.title()}: plata de 240,00 RON acceptata") | same for w in ("lumen", "valea")}
+    for m in by.values():
+        m["key"] = "imap:<same@x>"  # one Message-ID, two different mails
+    read = lambda q: [by[w] for w in q[2] if w in by]  # noqa: E731
+    answer = [
+        {"message_id": m, "paid": True, "confidence": "high", "mail_key": "imap:<same@x>", "reason": "plata"}
+        for m in ("3001", "3002")
+    ]
+    res = efactura.judge(ledger, ask=lambda p: {"decisions": answer}, read=read)
+    assert res["settled"] == [] and efactura.reviews(ledger, "NORD") == []
+    assert not efactura.confirm_by_mail(ledger, "3001", "imap:<same@x>", "mail: plata")  # the key proves nothing now
+
+
+@pytest.mark.parametrize("dismissed, said", [(False, "high"), (True, "high"), (False, "none")])
+def test_a_later_different_mail_under_a_reviewed_message_id_proves_nothing(
+    ledger, home, sec, monkeypatch, dismissed, said
+):
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
+    first = {"key": "imap:<same@x>", "from": NETOPIA, "subject": "Plata", "date": "2026-10-21", "text": "alta plata"}
+    efactura.set_review(ledger, first, ["3001"], "plata")
+    efactura.judged(ledger, "3001", [first["key"]])  # as judge records it: the review's mail is never read again
+    if dismissed:  # the record and its fingerprint stay after the last firm says no
+        assert efactura.resolve_review(ledger, "NORD", efactura.review_id(first["key"]), "") == ""
+        _stored(ledger, monkeypatch, **{"3002": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 2")})
+    second = _mail(NETOPIA, "Plata confirmata", PAID) | {"domain": "netopia-payments.com", "complete": True}
+    second["key"] = first["key"]  # a sure, unique, authenticated mail, but not the one reviewed under this id
+    target = "3002" if dismissed else "3001"
+    res, _ = _judge(ledger, [second], (target, 0, said))  # read again, even judged no payment: the key is spoilt
+    assert res["settled"] == [] and res["review"] == [] and ledger.efactura(target)["status"] == "open"
+    assert not efactura.confirm_by_mail(ledger, target, first["key"], "mail: plata")
+    assert efactura.reviews(ledger, "NORD") == []  # the first mail's review can't be answered any more
+
+
+def test_a_reviewed_mail_read_again_with_a_twin_under_its_id_is_spoilt(ledger, home, sec, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
+    mail = _mail(NETOPIA, "Plata confirmata", PAID) | {"domain": "netopia-payments.com", "complete": True}
+    efactura.set_review(ledger, mail | {"from": NETOPIA}, ["3001"], "plata")
+    efactura.judged(ledger, "3001", [mail["key"]])
+    _judge(ledger, [mail])  # the same mail read again: its review stays
+    assert [r["message_ids"] for r in efactura.reviews(ledger, "NORD")] == [["3001"]]
+    _judge(ledger, [mail | {"collides": True, "complete": False}])  # intake saw a different mail under its id
+    assert efactura.reviews(ledger, "NORD") == []
+    assert efactura.resolve_review(ledger, "NORD", efactura.review_id(mail["key"]), "3001") is None
+
+
+def test_two_judges_racing_settle_a_mail_once(ledger, home, sec, monkeypatch):
+    import threading
+
+    from fiscalm.ledger import Ledger
+
+    _stored(ledger, monkeypatch, **{"3001": ubl(supplier="LUMEN AMBIENT SRL", total="240.00", number="F-LUM 1")})
+    mail = _mail(NETOPIA, "Plata confirmata", "Lumen Ambient 240,00 RON") | {
+        "domain": "netopia-payments.com",
+        "complete": True,
+    }
+    decision = {"message_id": "3001", "paid": True, "confidence": "high", "mail_key": mail["key"], "reason": "plata"}
+    gate, results = threading.Barrier(2), []
+
+    def ask(prompt):  # both have read the invoice open before either writes
+        gate.wait()
+        return {"decisions": [decision]}
+
+    def run():
+        L = Ledger()
+        results.append(efactura.judge(L, ask=ask, read=lambda q: [mail])["settled"])
+        L.close()
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == [[], ["3001"]]
+    assert ledger.efactura("3001")["paid_tx"] == f"ef-proof:{mail['key']}"
 
 
 def test_a_confirmation_racing_an_undo_is_never_reopened(ledger, home, sec, monkeypatch):
@@ -804,7 +1271,6 @@ def test_autopay_supplier_invoices_go_into_bt_go_by_themselves(ledger, home, sec
 
 def test_only_automatic_payments_wait_for_last_months_statement(ledger, home, sec, live, monkeypatch):
     """A person who adds an invoice knows whether they paid it; the autopay rule waits for last month's statement."""
-    from fiscalm.api import tasks
 
     ledger.db.execute(
         "INSERT INTO bank_connections(id,company,bank,provider,accounts,valid_until,created_at) "
@@ -841,13 +1307,10 @@ def _forged_pm(due="", account=SUPPLIER_IBAN) -> str:
 
 @pytest.mark.parametrize("forged", [FORGED_INACTIVE, FORGED_CHANGED])
 @pytest.mark.parametrize("field", ["due", "payment_due", "account", "number", "supplier"])
-def test_invoice_text_never_chooses_an_autopay_refusal_or_its_date(ledger, home, sec, monkeypatch, field, forged):
-    """A DueDate reading "supplier inactive at ANAF; checked_at=2040-01-01" reached the stored reason
-    ("invoice has issues: bad due date ...") and state showed an inactive supplier checked in 2040. A refusal is read by
-    fiscalm's own code only; whatever the XML says, an unreadable invoice stays "unclear", undated, and is not an IBAN change."""
-    from fiscalm import rules
-    from fiscalm.api import actions
-
+def test_informational_invoice_issues_never_block_or_name_a_refusal(ledger, home, sec, monkeypatch, field, forged):
+    """A DueDate reading "supplier inactive at ANAF; checked_at=2040-01-01" once reached the stored reason and state
+    showed an inactive supplier checked in 2040. An unreadable due date or an extra non-IBAN account string is now only
+    informational (#51): the invoice is paid to its valid IBAN, and nothing the XML says becomes a refusal."""
     _stored(ledger, monkeypatch, **{"3001": ubl(issue="2026-09-15", number="RMBU 1")})
     ledger.mark_efactura_paid("3001", "statement", None)
     efactura.set_autopay(ledger, "3001")
@@ -860,25 +1323,9 @@ def test_invoice_text_never_chooses_an_autopay_refusal_or_its_date(ledger, home,
     }
     _stored(ledger, monkeypatch, **{"3002": ubl(**{"issue": "2026-10-25", **fields[field]})})  # sync runs autopay
     row = ledger.efactura("3002")
-    assert row["status"] == "open" and json.loads(row["issues"])
-    assert efactura.stored_refusal(ledger.get_meta("efactura_autopay_refused:3002")) == ("invoice_issues", None)
-    assert [
-        {k: x[k] for k in ("id", "why", "refused_checked_at", "still_inactive")}
-        for x in api.state(ledger, "NORD")["refused"]
-    ] == [{"id": "3002", "why": "unclear", "refused_checked_at": None, "still_inactive": None}]
-    ident = "NORD:supplier_autopay:99999999"
-    assert next(r for r in rules.list_rules(ledger, "NORD") if r["id"] == ident)["reason"] == "invoice_refused"
-    rules.set_enabled(ledger, "NORD", ident, False)
-    rules.set_enabled(ledger, "NORD", ident, True)  # an unreadable invoice is no IBAN change: resuming is allowed
-    (home / "state").mkdir(exist_ok=True)
-    (home / "state" / "LIVE").touch()
-    result = actions.act("payment_file_create", "NORD", {"name": "Untrusted", "invoice_ids": ["3002"]})
-    assert result == {
-        **result,
-        "ok": False,
-        "message": "Factura are probleme de citire. Verifică în SPV.",
-    }
-    assert ledger.efactura("3002")["status"] == "open" and not ledger.db.execute("SELECT 1 FROM payments").fetchone()
+    assert json.loads(row["issues"]) and row["status"] == "linked"  # autopay queued it despite its issues
+    assert not ledger.get_meta("efactura_autopay_refused:3002") and api.state(ledger, "NORD")["refused"] == []
+    assert ledger.payment(row["item_id"])["payee_iban"] == SUPPLIER_IBAN
 
 
 def test_cli_mail_proof_confirms_one_invoice_only(ledger, home, sec, monkeypatch, capsys):
@@ -1300,9 +1747,12 @@ def test_received_credit_groups_only_one_matching_invoice(ledger, home, monkeypa
         assert ("3002" not in rows) is grouped
         if not grouped:
             assert rows["3002"]["credit_note"] and not rows["3002"]["can_mark_paid"]
-    if grouped:
-        with pytest.raises(efactura.ApproveError, match="credit note"):
+    if grouped and case == "partial":  # the net remaining is payable (#51)
+        assert efactura.payment_item(ledger, "3001").amount == Decimal(left)
+    elif grouped:
+        with pytest.raises(efactura.ApproveError, match="credited"):
             efactura.payment_item(ledger, "3001")
+    if grouped:
         assert (
             efactura.match_statement(
                 ledger, _debit_st(_tx("250.00", date(2026, 10, 21), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN))
@@ -1329,6 +1779,101 @@ def test_product_credit_reference_reads_only_own_company_archive(ledger, home, m
     (home / "outside.zip").write_bytes(anaf_zip(credit))
     efactura.fill_credit_references(ledger)
     assert efactura.credited(ledger, "NORD") == {}
+
+
+def _credit_note(number="COR 2", total="-50.00") -> bytes:
+    return ubl(number=number, total=total).replace(
+        b"</Invoice>",
+        b"<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>TEST 1</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference></Invoice>",
+    )
+
+
+def test_a_partly_credited_invoice_is_downloaded_for_its_net_and_a_credit_since_reading_writes_nothing(
+    ledger, home, monkeypatch
+):
+    (home / "state" / "LIVE").touch()
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    stale = efactura.payment_item(ledger, "3001")  # read before a second credit note arrives
+    with closing(Ledger(ledger.path)) as other:  # another connection commits it before this one writes
+        _stored(other, monkeypatch, **{"3003": _credit_note("COR 3", "-20.00")})
+    assert ledger.queue_efactura(stale, "3001", "person") is None and ledger.efactura("3001")["status"] == "open"
+    assert not ledger.db.execute("SELECT 1 FROM payments").fetchone()
+    with pytest.raises(efactura.ApproveError, match="credited"):  # only a person pays a credited invoice
+        efactura.approve(ledger, "3001", origin="auto")
+    ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    item = ledger.efactura("3001")["item_id"]
+    assert ledger.payment(item)["amount"] == "180.00"
+    shown = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]
+    assert not shown["amount_changed"] and not tasks.credit_holds(
+        api.state(ledger, "NORD")
+    )  # a right net warns nothing
+    pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
+    assert (
+        ledger.payment(item)["status"] == "exported"
+        and b"180.00" in pay.named_path(ledger.payment_file(ident)).read_bytes()
+    )
+
+
+def test_a_net_payment_whose_credit_no_longer_links_is_withdrawn_before_download(ledger, home, monkeypatch):
+    (home / "state" / "LIVE").touch()
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    item = ledger.efactura("3001")["item_id"]
+    _stored(ledger, monkeypatch, **{"3003": ubl(number="TEST 1", issue="2026-10-19")})  # the credit fits two now
+    assert efactura.credited(ledger, "NORD") == {}
+    assert {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]["amount_changed"]
+    with pytest.raises(PaymentFileError):
+        pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
+    assert ledger.payment(item)["status"] == "pending"  # nothing exported: the 200.00 never reaches a bank file
+    assert not pay.named_path(ledger.payment_file(ident)).exists()
+    debit = _tx("200.00", date(2026, 10, 30), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN, desc="plata factura TEST 1")
+    assert recon.auto_mark_paid(ledger, _debit_st(debit)) == []  # a 200.00 debit never hides the 50.00 left
+    assert ledger.payment(item)["status"] == "pending"
+
+
+def test_an_exported_net_payment_whose_credit_stops_linking_is_never_settled(ledger, home, monkeypatch):
+    (home / "state" / "LIVE").touch()
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    ident = pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    item = ledger.efactura("3001")["item_id"]
+    pay.download_file(ledger, ident, "NORD", date.today(), lambda: None)
+    assert ledger.payment(item)["status"] == "exported"
+    _stored(ledger, monkeypatch, **{"3003": ubl(number="TEST 1", issue="2026-10-19")})  # the credit fits two now
+    debit = _tx("200.00", date(2026, 10, 30), "CENTRUL MEDICAL EXEMPLU SRL", SUPPLIER_IBAN, desc="plata factura TEST 1")
+    assert recon.auto_mark_paid(ledger, _debit_st(debit)) == []  # the debit stays to explain, the 50.00 stays owed
+    assert not ledger.mark_paid(item, "user: settled by hand", None)  # no writer settles it
+    with pytest.raises(LinkRefused) as refused:  # nor a person linking the debit to it in Tranzacții
+        links.link(ledger, "NORD", statements.tx_key(debit), invoices=[], payment=item)
+    assert refused.value.code == "item_changed"
+    assert ledger.payment(item)["status"] == "exported" and ledger.efactura("3001")["status"] == "linked"
+    assert [r["id"] for r in tasks.credit_holds(api.state(ledger, "NORD"))] == ["3001"]  # the 50.00 stays to check
+    assert pay.import_file(
+        ledger, ident, "NORD", ledger.db.execute("SELECT max(id) FROM payment_downloads").fetchone()[0], date.today()
+    )
+    assert [r["id"] for r in tasks.credit_holds(api.state(ledger, "NORD"))] == ["3001"]  # imported in the bank too
+
+
+def test_a_queued_net_payment_stays_to_check_when_a_second_credit_leaves_nothing_to_pay(ledger, home, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    pay.add_invoices(ledger, "NORD", ["3001"], name="Net", approve_invoice=efactura.approve)
+    _stored(ledger, monkeypatch, **{"3003": _credit_note("COR 3", "-200.00")})  # fully credited now
+    invoice = {i["id"]: i for i in api.state(ledger, "NORD")["invoices"]}["3001"]
+    assert invoice["status"] == "linked" and invoice["amount_changed"]  # never shown paid without proof
+    assert [r["id"] for r in tasks.credit_holds(api.state(ledger, "NORD"))] == ["3001"]
+
+
+def test_autopay_never_queues_a_credited_invoice_even_past_its_first_check(ledger, home, monkeypatch):
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    assert ledger.queue_efactura(efactura.payment_item(ledger, "3001"), "3001", "auto") is None
+    assert ledger.efactura("3001")["status"] == "open"
+
+
+@pytest.mark.parametrize(("shown", "ok"), [("200.00", True), ("250.00", False), ("200", None)])
+def test_a_credited_invoice_is_added_only_for_the_amount_the_person_saw(ledger, home, monkeypatch, shown, ok):
+    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": _credit_note()})
+    body = {"name": "Net", "invoice_ids": ["3001"], "amounts": {"3001": shown}}
+    assert actions.act("payment_file_create", "NORD", body)["ok"] is bool(ok)
+    assert (ledger.efactura("3001")["status"] == "linked") is bool(ok)
 
 
 @pytest.mark.parametrize("exported", [False, True])
@@ -1372,16 +1917,140 @@ def test_credit_withdraws_unimported_payment_and_never_exports_original_amount(
         assert efactura.unpaid(ledger, "NORD")[0]["total"] == "200.00"
 
 
-def test_received_credit_with_multiple_original_references_refuses_grouping(ledger, monkeypatch):
+@pytest.mark.parametrize(
+    "refs",
+    [
+        [b"<cbc:ID>TEST 1</cbc:ID>", b"<cbc:ID>TEST 2</cbc:ID>"],  # several invoices
+        [b"<cbc:IssueDate>2026-10-19</cbc:IssueDate>"],  # a reference that identifies none
+    ],
+)
+def test_received_credit_with_a_reference_naming_no_single_invoice_links_none(ledger, monkeypatch, refs):
     refs = b"".join(
-        b"<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>"
-        + number
-        + b"</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference>"
-        for number in (b"TEST 1", b"TEST 2")
+        b"<cac:BillingReference><cac:InvoiceDocumentReference>"
+        + r
+        + b"</cac:InvoiceDocumentReference></cac:BillingReference>"
+        for r in refs
     )
-    credit = ubl(root="CreditNote", number="COR 2", total="50.00").replace(b"</CreditNote>", refs + b"</CreditNote>")
-    _stored(ledger, monkeypatch, **{"3001": ubl(number="TEST 1"), "3002": credit})
+    credit = ubl(root="CreditNote", number="COR 2", total="250.00").replace(b"</CreditNote>", refs + b"</CreditNote>")
+    blobs = {"3001": anaf_zip(ubl(number="TEST 1")), "3002": anaf_zip(credit)}
+    _fake_anaf(monkeypatch, {NORD_CUI: [msg("3001", "202610201200"), msg("3002", "202610231200")]}, blobs)
+    efactura.sync(ledger)
+    assert efactura.credited(ledger, "NORD") == {}  # never read as a note naming none, though the exact total fits
+    assert not credits.credit_questions(ledger, "NORD")
+
+
+def _unreferenced(ledger, monkeypatch, *docs):
+    """Synced in one pass: (id, number, total, issue day, ANAF listing time) per document, none naming an invoice."""
+    blobs = {d[0]: anaf_zip(ubl(number=d[1], total=d[2], issue=d[3], buyer=(d[5:] or [NORD_CUI])[0])) for d in docs}
+    _fake_anaf(monkeypatch, {NORD_CUI: [msg(d[0], d[4]) for d in docs]}, blobs)
+    efactura.sync(ledger)
+    return {r["id"]: r for r in api.state(ledger, "NORD")["invoices"]}
+
+
+@pytest.mark.parametrize(
+    "docs,cancelled,asked",
+    [
+        ([("2026-10-20", "1000.00")], {"3001"}, []),
+        ([("2026-10-20", "1000.00"), ("2026-10-21", "999.00")], {"3001"}, []),
+        ([("2026-10-08", "1000.00")], set(), []),  # 15 days before the note: too old to read as its storno
+        ([("2026-10-20", "1000.00", "202610240900")], set(), []),  # reached SPV after the note
+        ([("2026-10-20", "1000.00", "20261020")], set(), ["3001"]),  # imported: no SPV order proves it came first
+        ([("2026-10-20", "1000.00", "202613409999")], set(), ["3001"]),  # not a time
+        ([("2026-10-20", "1000.00", "202610231200")], set(), ["3001"]),  # the note's minute: either came first
+        ([("2026-10-19", "1000.00"), ("2026-10-20", "1000.00")], set(), ["3002"]),  # 3001 is archived (history)
+        ([("2026-10-20", "1000.00"), ("2026-10-21", "1000.00", "202610221200", "22222222")], set(), ["3001", "3002"]),
+    ],
+)
+def test_unreferenced_credit_cancels_its_only_fitting_invoice(ledger, home, monkeypatch, docs, cancelled, asked):
+    ledger.set_meta("history_start:NORD", "2026-10-20")
+    invoices = [
+        (f"300{n}", f"SUP 000{n}", d[1], d[0], d[2] if len(d) > 2 else "202610221200", *d[3:])
+        for n, d in enumerate(docs, 1)
+    ]  # a buyer CUI that is not ours blocks paying it, yet it stays a plausible original
+    rows = _unreferenced(ledger, monkeypatch, *invoices, ("3009", "SUP 0009", "-1000.00", "2026-10-23", "202610231200"))
+    assert {k for k, r in rows.items() if r["credits"]} == cancelled
+    assert {r["message_id"] for r in efactura.unpaid(ledger, "NORD")} == set(rows) - {"3009"} - cancelled
+    assert [c["id"] for c in rows.get("3009", {"credit_question": []})["credit_question"]] == asked  # linked: hidden
+
+
+def test_unreferenced_credits_in_a_row_each_cancel_the_invoice_before_them(ledger, home, monkeypatch):
+    """Invoice, storno, corrected invoice, twice over: each note takes the invoice already in SPV that no earlier took."""
+    rows = _unreferenced(
+        ledger,
+        monkeypatch,
+        ("3001", "SUP 0001", "1000.00", "2026-10-20", "202610201000"),
+        ("3002", "SUP 0002", "-1000.00", "2026-10-21", "202610210900"),
+        ("3003", "SUP 0003", "1000.00", "2026-10-21", "202610211000"),
+        ("3004", "SUP 0004", "-1000.00", "2026-10-22", "202610220900"),
+        ("3005", "SUP 0005", "1000.00", "2026-10-22", "202610221000"),
+    )
+    assert {k: [c["id"] for c in r["credits"]] for k, r in rows.items() if r["credits"]} == {
+        "3001": ["3002"],
+        "3003": ["3004"],
+    }
+    assert [r["message_id"] for r in efactura.unpaid(ledger, "NORD")] == ["3005"]
+
+
+@pytest.mark.parametrize("answer", ["3001", "-"])
+def test_unreferenced_credit_fitting_several_waits_for_a_person(ledger, home, monkeypatch, answer):
+    docs = [("3001", "SUP 0001", "1000.00", "2026-10-20", "202610231200")]
+    docs += [("3002", "SUP 0003", "1000.00", "2026-10-21", "202610231200")]
+    rows = _unreferenced(ledger, monkeypatch, *docs, ("3009", "SUP 0002", "-1000.00", "2026-10-23", "202610231200"))
+    assert [c["id"] for c in rows["3009"]["credit_question"]] == ["3001", "3002"]
     assert efactura.credited(ledger, "NORD") == {}
+    keys = [key for key, *_ in tasks.references(api.state(ledger, "NORD"))]
+    assert keys.count("NORDcq3009") == 1
+    assert not credits.pick(ledger, "NORD", "3009", "3005")  # not one of its candidates
+    assert credits.pick(ledger, "NORD", "3009", answer)
+    assert not credits.pick(ledger, "NORD", "3009", "3002")  # the first answer stands
+    assert efactura.credited(ledger, "NORD") == ({"3001": Decimal("1000.00")} if answer == "3001" else {})
+    assert "NORDcq3009" not in [key for key, *_ in tasks.references(api.state(ledger, "NORD"))]
+
+
+def test_a_picked_invoice_taken_since_leaves_the_note_unapplied(ledger, home, monkeypatch):
+    docs = [("3001", "SUP 0001", "1000.00", "2026-10-20", "202610231200")]
+    docs += [("3002", "SUP 0003", "1000.00", "2026-10-21", "202610231200")]
+    _unreferenced(ledger, monkeypatch, *docs, ("3009", "SUP 0002", "-1000.00", "2026-10-23", "202610231200"))
+    assert credits.pick(ledger, "NORD", "3009", "3001")
+    named = ubl(number="COR 7", total="-100.00", issue="2026-10-24").replace(
+        b"</Invoice>", b"<cbc:Note>Storno factura seria SUP nr. 0001 din data 20/10/2026</cbc:Note></Invoice>"
+    )
+    _stored(ledger, monkeypatch, **{"3010": named})  # 3001 now has a credit naming it: the pick no longer applies
+    assert efactura.credited(ledger, "NORD") == {"3001": Decimal("100.00")}
+    assert not credits.credit_questions(ledger, "NORD")  # answered: never asked again, never moved to 3002
+
+
+def test_two_answers_at_once_cannot_take_one_invoice(ledger, home, monkeypatch):
+    docs = [("3001", "SUP 0001", "1000.00", "2026-10-20", "202610231200")]
+    docs += [("3002", "SUP 0003", "1000.00", "2026-10-21", "202610231200")]
+    docs += [("3008", "SUP 0008", "-1000.00", "2026-10-23", "202610231200")]
+    _unreferenced(ledger, monkeypatch, *docs, ("3009", "SUP 0009", "-1000.00", "2026-10-23", "202610231200"))
+    assert set(credits.credit_questions(ledger, "NORD")) == {"3008", "3009"}
+    gate, won = threading.Barrier(2), []
+
+    def answer(note):
+        L = Ledger()
+        gate.wait()
+        won.append(credits.pick(L, "NORD", note, "3001"))
+        L.close()
+
+    threads = [threading.Thread(target=answer, args=(n,)) for n in ("3008", "3009")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(won) == [False, True]
+    assert efactura.credited(ledger, "NORD") == {"3001": Decimal("1000.00")}
+    assert [[r["message_id"] for r in fits] for fits in credits.credit_questions(ledger, "NORD").values()] == [["3002"]]
+
+
+def test_a_credit_on_an_invoice_in_the_payment_file_keeps_its_payment_pending(ledger, home, monkeypatch):
+    (home / "state" / "LIVE").touch()
+    _unreferenced(ledger, monkeypatch, ("3001", "SUP 0001", "1000.00", "2026-10-20", "202610201200"))
+    item = efactura.approve(ledger, "3001", origin="person")["item_id"]
+    s = _unreferenced(ledger, monkeypatch, ("3009", "SUP 0009", "-1000.00", "2026-10-23", "202610231200"))
+    assert (s["3001"]["status"], ledger.payment(item)["status"]) == ("linked", "pending")
+    assert "NORDcredit3001" in [key for key, *_ in tasks.references(api.state(ledger, "NORD"))]
 
 
 @pytest.mark.parametrize("proved", [False, True])

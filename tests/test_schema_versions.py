@@ -20,7 +20,7 @@ import pytest
 from firms import seed
 from test_invoicing import DATA, LINE, PARTY
 
-from fiscalm import __version__, backup, bnr, cli, migrations as m, pack
+from fiscalm import __version__, backup, bnr, cli, migrations as m
 from fiscalm.api import state as api
 from fiscalm.invoicing import engine as invoicing, issued, ubl
 from fiscalm.ledger import Ledger
@@ -38,13 +38,13 @@ def test_fresh_schema_matches_dev_before_migrations(ledger):
         map(
             list,
             ledger.db.execute(
-                "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name NOT IN ('passkeys','bank_account_offers','auth_failure_window','auth_limits','setup_links','recovery_codes','auth_events','bank_auth_owners','sessions','auth_tickets','history_documents','receipt_items','receipt_invoice_links','archive','partner_settlement_formats','firms','firm_accounts','firm_cards','card_owners','firm_aliases','receipt_uploads') ORDER BY type,name"
+                "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name NOT IN ('passkeys','bank_account_offers','auth_failure_window','auth_limits','setup_links','recovery_codes','auth_events','bank_auth_owners','sessions','auth_tickets','history_documents','archive','partner_settlement_formats','firms','firm_accounts','firm_cards','card_owners','firm_aliases','receipt_uploads') ORDER BY type,name"
             ),
         )
     )
     # Core product schema, including removal of legacy mappings and per-firm account permissions; upgrades are checked separately.
     assert hashlib.sha256(json.dumps(rows).encode()).hexdigest() == (
-        "941a72a650954624d4265213a2a46074a476eb24cb14633153c65493396f9177"
+        "11e6e7dadca65b35d07ce55eb24d930a0c3b295254b679a3a55812e07588bcc1"
     )
     assert not ledger.db.execute("SELECT 1 FROM sqlite_master WHERE name='user_firms'").fetchone()
     assert m.read_version(ledger.path) == m.SCHEMA_VERSION
@@ -731,7 +731,8 @@ def test_app_statements_join_packs_on_upgrade_but_never_after_a_sent_pack(tmp_pa
                 (sha, month, kind, source),
             )
     with closing(Ledger(path)) as ledger:
-        assert [d["sha"] for d in pack.pending_docs(ledger, "EXAMPLE", "2026-11")] == ["oct"]
+        unsent = ledger.documents(company="EXAMPLE", up_to_month="2026-11", unsent_only=True)
+        assert [d["sha"] for d in unsent if d["kind"] == "statement"] == ["oct"]
         assert sorted(json.loads(ledger.get_meta("app-statements-counted-sent"))) == ["aug", "sep"]
         assert dict(ledger.db.execute("SELECT sha, source FROM documents")) == {
             "aug": "statement-import",
@@ -739,6 +740,27 @@ def test_app_statements_join_packs_on_upgrade_but_never_after_a_sent_pack(tmp_pa
             "oct": "statement-import",
             "bon": "upload:phone",
         }
+
+
+def test_dropping_receipt_lines_keeps_a_confirmed_receipt_invoice_association(tmp_path, monkeypatch):
+    path = tmp_path / "previous.db"
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.drop_receipt_items))
+        Ledger(path).close()
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "INSERT INTO documents(sha,company,month,kind,path,source,created_at,efactura_id) "
+            "VALUES('bon','EXAMPLE','2026-10','receipt','/synthetic.jpg','upload:phone','2026-10-01','8001')"
+        )
+        db.execute(
+            "INSERT INTO efactura(message_id,company,raw_path,status,created_at) "
+            "VALUES('8001','EXAMPLE','/synthetic.zip','open','2026-10-01')"
+        )
+        db.execute("INSERT INTO receipt_items VALUES('bon','EXAMPLE','{}','{}','user',1,1,'2026-10-02')")
+        db.execute("INSERT INTO receipt_invoice_links VALUES('bon','8001','EXAMPLE','2026-10-02')")
+    with closing(Ledger(path)) as ledger:
+        assert ledger.document("bon")["efactura_id"] == "8001"
+        assert not ledger.db.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'receipt_i%'").fetchone()
 
 
 @pytest.mark.parametrize(
@@ -778,3 +800,61 @@ def test_reading_off_and_no_ai_become_a_stopped_integration(tmp_path, monkeypatc
             ("mail-aaaaaaaa", 0, {"firm_scope": "all"}),
             ("mail-bbbbbbbb", 1, {"firm_scope": "all"}),
         ]
+
+
+def test_credit_notes_stored_without_a_reference_are_read_again_on_upgrade(tmp_path, monkeypatch):
+    """Several references were stored as none: the next sync reads every such note again (fill_credit_references)."""
+    path = tmp_path / "previous.db"
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.credit_references_reread))
+        Ledger(path).close()
+    with sqlite3.connect(path) as db:
+        for mid, status, ref in (("none", "credit", ""), ("named", "credit", "SUP 1"), ("invoice", "open", "")):
+            db.execute(
+                "INSERT INTO efactura(message_id,company,raw_path,status,billing_ref,created_at) "
+                "VALUES(?,'EXAMPLE','synthetic',?,?,'2026-10-31')",
+                (mid, status, ref),
+            )
+    with closing(Ledger(path)) as ledger:
+        refs = dict(ledger.db.execute("SELECT message_id, billing_ref FROM efactura"))
+        assert refs == {"none": None, "named": "SUP 1", "invoice": ""}
+
+
+def test_stored_statements_keep_covering_their_month_on_upgrade(tmp_path, monkeypatch):
+    path = tmp_path / "previous.db"
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.bank_coverage))
+        Ledger(path).close()
+    a, b = "RO00XXXX0000000000000001", "RO00XXXX0000000000000002"
+    with sqlite3.connect(path) as db:
+        for sha, file, accounts in (
+            ("camt", "/s.xml", [a, b]),  # its import refused lines that don't give the balances
+            ("pdf", "/s.pdf", [a]),  # nothing proves its lines were matched: it counts once imported again
+            ("csv", "/s.csv", [a]),  # a CSV proves only its own days: they are not on record
+            ("old", "/s.xml", None),  # names no account: covers none
+        ):
+            db.execute(
+                "INSERT INTO documents(sha,company,month,kind,path,accounts,created_at) "
+                "VALUES(?,'EXAMPLE','2026-02','statement',?,?,'2026-03-01')",
+                (sha, file, accounts and json.dumps(accounts)),
+            )
+    with closing(Ledger(path)) as ledger:
+        got = {r[0]: r[1] and json.loads(r[1]) for r in ledger.db.execute("SELECT sha, coverage FROM documents")}
+    assert got == {
+        "camt": {a: ["2026-02-01", "2026-02-28", True], b: ["2026-02-01", "2026-02-28", True]},
+        "pdf": None,
+        "csv": None,
+        "old": None,
+    }
+
+
+def test_statement_line_readings_start_empty_on_upgrade(tmp_path, monkeypatch):
+    path = tmp_path / "previous.db"
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.statement_tx_readings))
+        Ledger(path).close()
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO statement_txs(tx_key,company,direction,tx) VALUES('k','EXAMPLE','credit','{}')")
+    with closing(Ledger(path)) as ledger:
+        assert [tuple(r) for r in ledger.db.execute("SELECT tx FROM statement_txs")] == [("{}",)]
+        assert ledger.db.execute("SELECT * FROM statement_tx_readings").fetchall() == []

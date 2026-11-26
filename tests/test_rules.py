@@ -21,7 +21,6 @@ from test_efactura import OTHER_IBAN, _stored, ubl
 from fiscalm import companies, pack, rules
 from fiscalm.api import (
     actions,
-    mcp_tools,
     schema as api_schema,
     state as api,
     tokens,
@@ -302,8 +301,6 @@ def test_legacy_bearer_configuration_is_documented_as_forbidden():
     operation = api_schema.openapi()["paths"]["/api/v1/companies/{co}/invoicing/auto-upload"]["post"]
     assert "200" not in operation["responses"] and "403" in operation["responses"]
     assert "admin_required" in operation["description"]
-    tool = next(t for t in mcp_tools.definitions("write") if t["name"] == "invoicing_auto_upload")
-    assert "403 admin_required" in tool["description"]
 
 
 @pytest.mark.parametrize(
@@ -428,7 +425,15 @@ def test_a_partner_ticked_not_mailed_stays_out_of_the_pack(ledger, server, monke
         currency="USD",
         source="mail:synthetic",
     )
-    ledger.add_document("sha-st", "NORD", "2026-10", "statement", "/nonexistent/st.pdf", vendor="Synthetic AI Inc")
+    ledger.add_document(
+        "sha-st",
+        "NORD",
+        "2026-10",
+        "statement",
+        "/nonexistent/st.pdf",
+        vendor="Synthetic AI Inc",
+        accounts=["RO24BTRLRONCRT0000000001", "RO71BTRLEURCRT0000000001"],
+    )
     partner = "NORD.n-synthetic-ai-inc"
     ledger.set_pack("NORD", "2026-09", "prepared")  # a prepared snapshot waits: its selection cannot change
     assert (

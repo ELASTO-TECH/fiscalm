@@ -66,7 +66,12 @@ def ingest(L: Ledger, shop: integrations.Instance, row: dict, today: str, api=No
         L,
         shop,
         external,
-        "attachment_retry" if pending and pending[0] else "auto_issue_refused" if result["message"] else None,
+        "attachment_retry"
+        if pending and pending[0]
+        # A draft waiting for its VAT treatment has its own task; only a refused issue is eMAG's.
+        else "auto_issue_refused"
+        if result["message"] not in ("", commerce.VAT_REVIEW["message"])
+        else None,
     )
     try:
         # eMAG courier reservations are identifiers only; never fetch their response URLs.

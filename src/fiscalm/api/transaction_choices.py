@@ -6,10 +6,11 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 
+from fiscalm import links
 from fiscalm.api import search, state as api
 from fiscalm.api.responses import bounded, fail, page
 
-COLLECTIONS = ("partners", "invoices", "payments", "selected")
+COLLECTIONS = ("partners", "invoices", "payments", "selected", "receipts")
 
 
 def options(query: dict) -> tuple[str, int, int]:
@@ -56,6 +57,10 @@ def project(full: dict, query: dict) -> dict:
     return {"pages": pages}
 
 
+def unread_upload(d: dict) -> bool:
+    return d["held"] and d["amount"] is None and not d["sent"] and not d["invoice"]
+
+
 def partner_name(row: dict) -> str:
     return row["name"] or f"CUI {row['cui'] if row['cui'] is not None else 'null'}"
 
@@ -73,6 +78,8 @@ def records(full: dict, tx: dict, collection: str, partner: str, searched: bool 
         ]
     if collection == "payments":
         return [] if credit else prepared(full, tx, searched)
+    if collection == "receipts":  # uploads with no data of their own yet: a debit's bon to name (tx-receipt)
+        return [] if credit else [d for d in full["documents"] if unread_upload(d)]
     if collection == "selected":
         link = (tx.get("explanation") or {}).get("link") or {}
         return [r for r in invoices(full, tx, link.get("partner") or "") if r["selected"]]
@@ -121,27 +128,43 @@ def _open(full: dict, tx: dict) -> list[dict]:
     ]
 
 
-def _plain(text: str) -> str:
-    return " ".join(re.findall(r"[0-9a-z]+", search.fold(text)))
-
-
 def proposed(full: dict, tx: dict) -> list[dict]:
     """The open invoice the bank's details name by its number, when the transaction is exactly what is left of it in
     its currency: at most one, never applied. A number that names several open invoices, or another amount, proposes
-    nothing. The details are only compared with the firm's own invoice numbers."""
-    if tx.get("explanation") or not tx.get("details"):
+    nothing. The details are only compared with the firm's own invoice numbers. Without one, the invoices the AI
+    integration proposed (ai_explain), while every one is still open and what is left of them is the amount."""
+    if tx.get("explanation"):
         return []
-    text = f" {_plain(tx['details'])} "
+    return _named(full, tx) or _guessed(full, tx)
 
-    def named(number: str) -> bool:
-        plain = _plain(number)
-        return (
-            len(plain) >= 3
-            and any(c.isdigit() for c in plain)
-            and (f" {plain} " in text or f" {plain.replace(' ', '')} " in text)
-        )
 
-    found = [r for r in _open(full, tx) if named(r["number"] or "")]
+def _guessed(full: dict, tx: dict) -> list[dict]:
+    """The AI proposal's invoices (ai_explain) while they still add up and are all still its partner's."""
+    p = tx.get("proposal") or {}
+    picks = exactly(full, tx, p.get("invoices", [])) if p.get("kind") == "ai" else []
+    return picks if all(r["partner"] == p["as"]["partner"] for r in picks) else []
+
+
+def exactly(full: dict, tx: dict, ids: list[str]) -> list[dict]:
+    """The picks of invoices `ids` when every one is open for the transaction, all in one currency, and what is left of
+    them is its amount in that currency to the cent; else none."""
+    left = {r["id"]: r for r in _open(full, tx)}
+    rows = [left[i] for i in dict.fromkeys(ids) if i in left]
+    currencies = {r.get("currency") or "RON" for r in rows}
+    if not rows or len(rows) != len(ids) or len(currencies) != 1:
+        return []
+    orig = tx.get("orig") or {}
+    amount = {tx["currency"]: tx["amount"], orig.get("currency"): orig.get("amount")}.get(currencies.pop())
+    if not amount or sum(Decimal(r["left"]) for r in rows) != abs(Decimal(amount)):
+        return []
+    return [pick(r, r["left"], False) | {"position": n} for n, r in enumerate(rows)]
+
+
+def _named(full: dict, tx: dict) -> list[dict]:
+    if not tx.get("details"):
+        return []
+    text = f" {links.plain(tx['details'])} "
+    found = [r for r in _open(full, tx) if links.names_number(text, r["number"] or "")]
     if len(found) != 1:
         return []
     r, orig = found[0], tx.get("orig") or {}

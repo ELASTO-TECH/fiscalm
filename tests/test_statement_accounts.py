@@ -2,9 +2,11 @@
 
 import dataclasses
 import json
-from datetime import date
+from contextlib import closing
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from firms import iban, set_firm
@@ -12,9 +14,10 @@ from pdf_fake import bt_statement
 from test_camt import complete, fake_pdf, parse, write, xml
 
 from fiscalm import companies, integrations, pack, recon
-from fiscalm.bank import banking_days, intake as statement_intake, statements, upload
-from fiscalm.ledger import finance_home
+from fiscalm.bank import banking_days, coverage, intake as statement_intake, statements, upload
+from fiscalm.ledger import Ledger, finance_home
 from fiscalm.mail import imap as imapread, invoices as mail_invoices
+from fiscalm.payments import engine as pay
 from fiscalm.pdftext import pdf_text
 
 ING = "RO00INGB0000000000000009"
@@ -34,18 +37,79 @@ def test_an_imported_statement_records_its_accounts_and_its_transactions_carry_t
     (doc,) = ledger.documents(kind="statement")
     nord = companies.get("NORD")
     assert json.loads(doc["accounts"]) == sorted([nord.ibans["RON"], nord.ibans["EUR"]])
+    october = date(2026, 10, 1), date(2026, 10, 31)
+    assert all(coverage.covered(ledger, "NORD", i, *october, trusted_only=True) for i in nord.ibans.values())
     ledger.record_statement(parse(tmp_path, xml()))
     rows = ledger.db.execute("SELECT DISTINCT iban, company FROM statement_txs").fetchall()
     assert [tuple(r) for r in rows] == [(nord.ibans["RON"], "NORD")]
 
 
-def test_all_configured_accounts_required(ledger, tmp_path):
-    p = write(tmp_path, xml(currency="EUR"))
-    r = recon.ingest_file(ledger, p, operator=True)
-    assert r["status"] == "refused" and "missing configured accounts: RON" in r["errors"][0]
-    assert not ledger.documents(kind="statement")
-    p.write_bytes(complete())
-    assert recon.ingest_file(ledger, p, operator=True)["status"] == "added"
+def test_a_statement_of_some_accounts_is_imported_and_names_those_still_to_come(ledger, tmp_path):
+    r = recon.ingest_file(ledger, write(tmp_path, xml(currency="EUR")), operator=True)
+    assert (r["status"], r["missing"]) == ("added", ["RON 0001"])
+    assert statement_intake.month_missing(ledger, "NORD", "2026-10") == ["RON 0001"]
+
+
+def test_an_account_in_another_currency_than_the_firms_is_refused(ledger, tmp_path):
+    ron = companies.get("NORD").ibans["RON"]
+    r = recon.ingest_file(ledger, write(tmp_path, xml(iban=ron, currency="EUR")), operator=True)
+    assert r["status"] == "refused" and "currency differs" in r["errors"][0] and not ledger.documents()
+    # nor does it stand as a neighbouring month's evidence
+    wrong = SimpleNamespace(st=parse(tmp_path, xml(iban=ron, currency="EUR")))
+    assert recon._checked({("NORD", "2026-10"): [wrong]}, None) == []
+
+
+def test_a_months_completeness_reads_the_firms_from_the_ledger_it_is_given(tmp_path):
+    """Another install's ledger (a backup check, a second home): its own firms, never the default home's."""
+    other = companies.Company(**{**companies.get("NORD").__dict__, "key": "CUSTOM"})
+    with closing(Ledger(tmp_path / "other.db")) as L:
+        L.save_company(other)
+        L.add_document("c", "CUSTOM", "2026-10", "statement", "/x/c.xml", accounts=[other.ibans["RON"]])
+        assert statement_intake.month_missing(L, "CUSTOM", "2026-10") == ["EUR 0001"]
+        assert not pack.ready(L, "CUSTOM", "2026-10")
+
+
+def test_a_statement_learned_from_its_file_names_accounts_only_for_its_own_month(ledger, tmp_path, monkeypatch):
+    """A row stored before accounts were recorded whose file reads as another month proves no account for its own."""
+    october = str(write(tmp_path, complete()))
+    ledger.add_document("sep", "NORD", "2026-09", "statement", october)
+    assert statement_intake.learn_accounts(ledger, ledger.document("sep")) == []
+    assert (
+        ledger.document("sep")["accounts"] is None and statement_intake.month_missing(ledger, "NORD", "2026-09") is None
+    )
+    ledger.add_document("oct", "NORD", "2026-10", "statement", october)
+    assert len(statement_intake.learn_accounts(ledger, ledger.document("oct"))) == 2
+    # STUDIO9's October read for NORD (a PDF reads under the firm it is opened for): accounts that aren't NORD's
+    stranger = statements.Statement("NORD", date(2026, 10, 1), date(2026, 10, 31), [statements.Account(X1, "EUR")])
+    ledger.add_document("x", "NORD", "2026-10", "statement", "/x/x.pdf")
+    monkeypatch.setattr(statements, "parse", lambda path, co: stranger)
+    assert statement_intake.learn_accounts(ledger, ledger.document("x")) == []
+    ron = companies.get("NORD").ibans["RON"]
+    for section in (
+        statements.Account(ron, "EUR"),  # the firm's account in another currency
+        statements.Account(ron, "RON", period=(date(2026, 11, 1), date(2026, 11, 30))),  # a section of November
+    ):
+        stranger.accounts = [section]
+        assert statement_intake.learn_accounts(ledger, ledger.document("x")) == []
+    ledger.add_document("y", "NORD", "2026-08", "statement", "/x/y.xml", accounts=[X1])  # stored naming a stranger
+    assert statement_intake.month_missing(ledger, "NORD", "2026-08") is None
+
+
+def test_the_pack_takes_a_months_statements_only_with_every_account_of_their_banks(ledger, tmp_path):
+    """October's RON alone doesn't ride along with November's pack; with October's EUR both go, and a statement
+    that names no account leaves its month waiting."""
+    nord = companies.get("NORD")
+    ron, eur = nord.ibans["RON"], nord.ibans["EUR"]
+    ledger.add_document("oct-ron", "NORD", "2026-10", "statement", "/x/oct-ron.xml", accounts=[ron])
+    ledger.add_document("nov", "NORD", "2026-11", "statement", "/x/nov.xml", accounts=[ron, eur])
+    assert [d["sha"] for d in pack.pending_docs(ledger, "NORD", "2026-11")] == ["nov"]
+    ledger.add_document("oct-eur", "NORD", "2026-10", "statement", "/x/oct-eur.xml", accounts=[eur])
+    assert {d["sha"] for d in pack.pending_docs(ledger, "NORD", "2026-11")} == {"oct-ron", "oct-eur", "nov"}
+    ledger.add_document("dec", "NORD", "2026-12", "statement", str(tmp_path / "gone.xml"))  # accounts never recorded
+    assert statement_intake.month_missing(ledger, "NORD", "2026-12") is None and not pack.ready(
+        ledger, "NORD", "2026-12"
+    )
+    assert "dec" not in {d["sha"] for d in pack.pending_docs(ledger, "NORD", "2027-01")}  # nor rides along later
 
 
 @pytest.mark.parametrize(
@@ -170,11 +234,10 @@ def test_a_months_report_reads_every_banks_statement(ledger, tmp_path, monkeypat
     bt, ing = write(tmp_path, complete(), "bt.xml"), write(tmp_path, xml(iban=ING, currency="EUR"), "ing.xml")
     ledger.add_document("bt", "NORD", "2026-10", "statement", str(bt), accounts=["x"])
     ledger.add_document("ing", "NORD", "2026-10", "statement", str(ing), accounts=[ING])
-    view = recon.month_view(ledger, "NORD", "2026-10", [])
-    text, summary = recon.build_report(ledger, "NORD", "2026-10", tmp_path)
-    assert summary["transactions"] == len(parse(tmp_path, complete()).txs) + 1  # BT's and ING's
-    assert ING in text and companies.get("NORD").ibans["RON"] in text
-    assert view["balanced"] is True
+    st = recon.month_statement(ledger.documents(company="NORD", month="2026-10", kind="statement"), "NORD")
+    assert len(st.txs) == len(parse(tmp_path, complete()).txs) + 1  # BT's and ING's
+    assert {ING, companies.get("NORD").ibans["RON"]} <= {a.iban for a in st.accounts}
+    assert recon.month_view(ledger, "NORD", "2026-10", [])["balanced"] is True
     ing.unlink()  # one bank's file gone: the month can't be judged
     assert recon.month_view(ledger, "NORD", "2026-10", [])["balanced"] is None
 
@@ -295,6 +358,10 @@ def test_the_operator_imports_one_months_bt_pdfs_together(ledger, tmp_path, peri
     assert len(docs) == len(files) and all(len(json.loads(d["accounts"])) == 1 for d in docs)
     days = ledger.db.execute("SELECT COUNT(DISTINCT day), COUNT(DISTINCT iban) FROM statement_txs").fetchone()
     assert tuple(days) == (len(periods), 2)  # every file's lines are on record, for both accounts
+    october = date(2026, 10, 1), date(2026, 10, 31)  # and their days add up to the month, proven by the balances
+    assert all(
+        coverage.covered(ledger, "NORD", json.loads(d["accounts"])[0], *october, trusted_only=True) for d in docs
+    )
     again = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
     assert [r["status"] for r in again] == ["duplicate"]
 
@@ -409,7 +476,7 @@ OCTOBER = ("01/10/2026", "31/10/2026", "100.00")
         ("USD opened in October, day unknown", [(*OCTOBER, usd("0.00"))], {"opened": "2026-10"}, "full calendar"),
         ("USD opened on the 8th, a Thursday", [(*OCTOBER, usd("0.00"))], {"opened": "2026-10-08"}, "full calendar"),
         ("USD not marked opened", [(*OCTOBER, usd("0.00"))], {}, "full calendar month"),
-        ("USD retired on 1 May, owed for May", [MAY], {"retired": "2022-05-01"}, "missing configured accounts"),
+        ("USD retired on 1 May, still to come for May", [MAY], {"retired": "2022-05-01"}, None),
     ],
 )
 def test_a_month_starts_after_the_1st_only_when_no_day_with_movements_is_left_out(
@@ -433,6 +500,16 @@ def test_a_month_starts_after_the_1st_only_when_no_day_with_movements_is_left_ou
         assert len(ledger.documents(kind="statement")) == len(before)
     else:
         assert (result["status"], result["month"]) == ("added", hi[6:] + "-" + hi[3:5])
+        assert proven_month(ledger, result["month"])  # from the 1st: the days before held no movement
+
+
+def proven_month(ledger, month):
+    """Every account of the month's stored statements is covered from its 1st to its last day, proven by balances."""
+    first = date.fromisoformat(month + "-01")
+    last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    docs = [d for d in ledger.documents(kind="statement") if d["month"] == month]
+    ibans = {i for d in docs for i in json.loads(d["accounts"])}
+    return bool(ibans) and all(coverage.covered(ledger, "NORD", i, first, last, trusted_only=True) for i in ibans)
 
 
 def quarter(folder, pages=True):
@@ -521,6 +598,7 @@ def test_older_daily_bt_pdfs_make_a_month_only_when_numbers_and_balances_leave_n
         assert not [d for d in ledger.documents(kind="statement") if d["month"] == "2020-01"]
         return
     assert (january["status"], january["month"], january["transactions"]) == ("added", "2020-01", 6)
+    assert proven_month(ledger, "2020-01")  # the days between statements too
     # February's own last statement waits for March's first
     assert february[0]["status"] == "refused" and "last statement" in february[0]["errors"][0]
 
@@ -542,14 +620,17 @@ def test_only_the_next_number_of_the_same_year_proves_nothing_was_left_out(ledge
     assert month not in {d["month"] for d in ledger.documents(kind="statement")}
 
 
-def test_a_quarterly_pdf_with_an_account_twice_in_a_month_is_refused_alone(ledger, tmp_path):
-    """Review: two April sections of RON, one unproven (a line outside its period), never crash the import."""
+def test_an_account_twice_in_a_quarterlys_month_refuses_that_month(ledger, tmp_path):
+    """Review: two April sections of RON, one unproven (a line outside its period), never crash the import, and never
+    store April; May, whole and proven, is imported."""
     ron, april = companies.get("NORD").ibans["RON"], ("01/04/2022", "30/04/2022")
     sections = [("RON", ron, Decimal(100), [(day, day, Decimal(10))], april) for day in ("05/04/2022", "05/05/2022")]
     sections += [("RON", ron, Decimal(110), [], ("01/05/2022", "31/05/2022"))]
     pdf = bt_statement(tmp_path / "q.pdf", "11111111", ("01/04/2022", "31/05/2022"), sections, pages=True)
     results = recon.ingest_files(ledger, [pdf], password_lookup=lambda co: "synthetic")
-    assert {r["status"] for r in results} == {"refused"} and not ledger.documents(kind="statement")
+    assert [(r["status"], r.get("month")) for r in results] == [("refused", None), ("added", "2022-05")]
+    assert "appears twice" in results[0]["errors"][0]
+    assert [d["month"] for d in ledger.documents(kind="statement")] == ["2022-05"]
 
 
 def test_a_neighbour_is_what_is_stored_or_what_passes_its_own_checks(ledger, tmp_path):
@@ -590,21 +671,77 @@ def test_a_final_balance_after_a_page_break_still_proves_the_month(ledger, tmp_p
     assert recon.ingest_files(ledger, [pdf], password_lookup=lambda co: "synthetic")[0]["status"] == "duplicate"
     lines = ledger.db.execute("SELECT COUNT(*) FROM statement_txs").fetchone()[0]
     assert lines == (4 if trusted else 0)
+    assert proven_month(ledger, "2026-10") == trusted  # its coverage is the new reading's, once matched again
+    # unproven, its lines never reach the matchers: November's automatic payments wait for October
+    assert pay.missing_statement(ledger, "NORD", date(2026, 11, 6)) == ("" if trusted else "2026-10")
+
+
+@pytest.mark.parametrize("shape", ["one file", "a month set"])
+def test_a_stored_copy_ingested_again_is_its_own_duplicate(ledger, tmp_path, shape):
+    """An encrypted PDF is stored decrypted, under the digest of what arrived: the stored copy read again (after a
+    parser fix) is that document, so its lines are recorded again and nothing new is stored."""
+    nord = companies.get("NORD")
+    if shape == "one file":
+        sections = [
+            (c, i, Decimal("100.00"), [("05/10/2026", f"S-{c}", Decimal("10.00"))]) for c, i in nord.ibans.items()
+        ]
+        files = [bt_statement(tmp_path / "oct.pdf", nord.cui, ("01/10/2026", "31/10/2026"), sections)]
+    else:
+        files = bt_files(tmp_path)
+    assert recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")[0]["status"] == "added"
+    docs = ledger.documents(kind="statement")
+    ledger.db.execute("DELETE FROM statement_txs")  # as a parser that read no line left them
+    ledger.db.commit()
+    copies = [tmp_path / f"copy-{n}.pdf" for n in range(len(docs))]  # e.g. a backup of the stored copies
+    for doc, copy in zip(docs, copies, strict=True):
+        copy.write_bytes(Path(doc["path"]).read_bytes())
+    (again,) = recon.ingest_files(ledger, copies, password_lookup=lambda co: "synthetic")
+    assert again["status"] == "duplicate" and ledger.documents(kind="statement") == docs
+    assert ledger.db.execute("SELECT COUNT(*) FROM statement_txs").fetchone()[0] == 2
+    # the copy also kept as a receipt, or the stored file no longer the copy: nothing is matched
+    ledger.add_document(recon.sha256(copies[0]), "NORD", "2026-10", "receipt", "/x/r.pdf", source="links:1")
+    assert recon.ingest_files(ledger, copies[:1], password_lookup=lambda co: "synthetic")[0]["status"] == "refused"
+    ledger.db.execute("DELETE FROM documents WHERE kind='receipt'")
+    ledger.db.commit()
+    Path(docs[0]["path"]).write_bytes(b"%PDF-1.4 changed")
+    assert recon.ingest_files(ledger, copies[:1], password_lookup=lambda co: "synthetic")[0]["status"] == "error"
+
+
+def test_a_stored_copy_is_read_once_under_the_imports_own_home(ledger, tmp_path, monkeypatch):
+    """Review: the copy is identified by the bytes that were parsed, not by the file read again later; and an import
+    into another data directory finds its stored copies there."""
+    home, (ron, eur) = tmp_path / "home", bt_files(tmp_path)
+    assert recon.ingest_files(ledger, [ron, eur], home, lambda co: "synthetic")[0]["status"] == "added"
+    copies = []
+    for n, doc in enumerate(ledger.documents(kind="statement")):
+        copies.append(tmp_path / f"copy-{n}.pdf")
+        copies[-1].write_bytes(Path(doc["path"]).read_bytes())
+    decrypt = statements.decrypt_to
+
+    def then_swapped(path, *a, **kw):  # the source replaced right after it was read
+        out = decrypt(path, *a, **kw)
+        next(c for c in copies if c.name == Path(path).name).write_bytes(b"%PDF-1.4 another file")
+        return out
+
+    monkeypatch.setattr(statements, "decrypt_to", then_swapped)
+    assert recon.ingest_files(ledger, copies, home, lambda co: "synthetic")[0]["status"] == "duplicate"
+    linked = tmp_path / "linked.pdf"  # a source that became a symlink after it was routed: never followed
+    linked.symlink_to(Path(ledger.documents(kind="statement")[0]["path"]))
+    (result,) = recon.ingest_statements(ledger, [linked], home, lambda co: "synthetic")
+    assert result["status"] == "error" and not ledger.used_txs()
 
 
 @pytest.mark.parametrize(
     "case,refusal",
     [
         ("a day missing", "full calendar month"),
-        ("an account missing", "missing configured accounts: EUR 0001"),
         ("stored before", "already imported"),
         ("kept as a receipt", "kept as another document"),  # those bytes are a document already: no takeover
         ("stored copy gone", "restore the stored document"),  # imported before, but its file is missing
     ],
 )
 def test_an_incomplete_or_overlapping_set_stores_nothing(ledger, tmp_path, case, refusal):
-    currencies = ("RON",) if case == "an account missing" else ("RON", "EUR")
-    files = bt_files(tmp_path, DAYS[:10] + ((11, 31),), currencies)
+    files = bt_files(tmp_path, DAYS[:10] + ((11, 31),))
     if case == "a day missing":
         files.remove(tmp_path / "extras-EUR-05.pdf")
     if case == "stored copy gone":  # the month's per-account files, imported, then one stored copy lost
@@ -647,7 +784,7 @@ INGEST = recon.ingest_statements
 
 
 def bring(ledger, caller: str, files, monkeypatch, account: str = "") -> str:
-    """BT PDFs in through one of the ways they arrive: "added", or the accounts the import says are missing."""
+    """BT PDFs in through one of the ways they arrive: "added", or what the person reads for a refusal."""
     if caller == "app":
         try:
             return upload.accept_pdfs(ledger, "NORD", "", [f.read_bytes() for f in files])["status"]
@@ -666,27 +803,33 @@ def bring(ledger, caller: str, files, monkeypatch, account: str = "") -> str:
     (result,) = results
     if result["status"] != "refused":
         return result["status"]
-    return upload.incomplete(result["missing"]) if "missing" in result else upload._say(result["errors"])
+    return upload._say(result["errors"])
 
 
 @pytest.mark.parametrize("caller", ["cli", "mail", "app"])
-def test_every_way_a_bt_pdf_arrives_needs_every_account_and_only_the_firms(ledger, sec, tmp_path, monkeypatch, caller):
+def test_every_way_a_bt_pdf_arrives_takes_one_account_at_a_time_and_only_the_firms(
+    ledger, sec, tmp_path, monkeypatch, caller
+):
     integrations.set_statement_password(ledger, "NORD", "bt", "synthetic")
     inbox = {"host": "imap.example.test", "username": "u", "password": "x", "from_address": "books@example.com"}
     account = integrations.add(ledger, "mail", "Synthetic inbox", inbox)["id"]
     ron, eur = bt_files(tmp_path)
-    assert bring(ledger, caller, [ron], monkeypatch, account) == upload.incomplete(["EUR 0001"])
-    assert not ledger.documents(kind="statement") and not ledger.db.execute("SELECT 1 FROM statement_txs").fetchone()
     nord = companies.get("NORD")
     other = [("RON", "RO94BTRLRONCRT0000000002", Decimal("0.00"), [])]  # STUDIO9's account, in a file with NORD's CUI
     foreign = bt_statement(tmp_path / "other.pdf", nord.cui, ("01/10/2026", "31/10/2026"), other)
     assert bring(ledger, caller, [ron, eur, foreign], monkeypatch, account) == upload.OTHER_ACCOUNT
-    assert bring(ledger, caller, [ron, eur], monkeypatch, account) == "added"
-    assert len(ledger.documents(kind="statement")) == 2
+    assert not ledger.documents(kind="statement") and not ledger.db.execute("SELECT 1 FROM statement_txs").fetchone()
+    assert bring(ledger, caller, [ron], monkeypatch, account) == "added"  # RON alone: EUR is still to come
+    assert statement_intake.month_missing(ledger, "NORD", "2026-10") == ["EUR 0001"]
+    assert not pack.ready(ledger, "NORD", "2026-10")
+    assert bring(ledger, caller, [eur], monkeypatch, account) == "added"
+    assert (
+        statement_intake.month_missing(ledger, "NORD", "2026-10") == [] and len(ledger.documents(kind="statement")) == 2
+    )
 
 
-def test_an_account_added_while_a_set_is_checked_refuses_it_under_the_write_lock(ledger, tmp_path, monkeypatch):
-    """The firm's checks run again in the transaction that stores the set: an account added in between is owed."""
+def test_an_account_added_while_a_set_is_checked_is_still_to_come(ledger, tmp_path, monkeypatch):
+    """An account added while the set is checked is owed by the month: the set is stored, and says it is missing."""
     files = bt_files(tmp_path)
     place = recon._place
 
@@ -697,5 +840,4 @@ def test_an_account_added_while_a_set_is_checked_refuses_it_under_the_write_lock
 
     monkeypatch.setattr(recon, "_place", added_meanwhile)
     (result,) = recon.ingest_files(ledger, files, password_lookup=lambda co: "synthetic")
-    assert (result["status"], result["missing"]) == ("refused", ["USD 0001"])
-    assert not ledger.documents(kind="statement") and not list(recon.month_dir("NORD", "2026-10").rglob("*.pdf"))
+    assert (result["status"], result["missing"]) == ("added", ["USD 0001"])

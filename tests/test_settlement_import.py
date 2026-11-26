@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import zipfile
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
+from email.message import EmailMessage
 
 import pytest
-from test_settlements import collect, setup, statement
+from test_settlements import collect, setup, statement, store_bank
 
 from fiscalm import companies
 from fiscalm.api import actions
+from fiscalm.ledger import Ledger
+from fiscalm.mail import imap, invoices
 from fiscalm.settlements import engine as settlements, upload as bank_upload
-from fiscalm.settlements.reports import SOURCES, STRIPE, ReportError, parse, table
+from fiscalm.settlements.reports import SOURCES, STRIPE, ReportError, money, parse, table
 
 UPLOAD = dict(report_date="2026-10-10", today=date(2026, 10, 12))
 NETOPIA = dict(
@@ -27,14 +32,25 @@ NETOPIA = dict(
 NS = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
 
 
-def workbook(rows="", *, sheet=None, strings=None):
-    """A one-worksheet XLSX holding `rows` (or the raw `sheet` XML), with optional shared strings."""
+def workbook(rows="", *more, sheet=None, strings=None):
+    """An XLSX holding `rows` (or the raw `sheet` XML) on its first worksheet and `more` on the next ones, with
+    optional shared strings."""
     b = io.BytesIO()
     with zipfile.ZipFile(b, "w") as z:
         if strings is not None:
             z.writestr("xl/sharedStrings.xml", f"<sst {NS}>{strings}</sst>")
         z.writestr("xl/worksheets/sheet1.xml", sheet or f"<worksheet {NS}><sheetData>{rows}</sheetData></worksheet>")
+        for n, extra in enumerate(more, 2):
+            z.writestr(f"xl/worksheets/sheet{n}.xml", f"<worksheet {NS}><sheetData>{extra}</sheetData></worksheet>")
     return b.getvalue()
+
+
+def cells(*rows):
+    cell = '<c r="{}{}" t="inlineStr"><is><t>{}</t></is></c>'
+    return "".join(
+        "<row>" + "".join(cell.format(chr(65 + i), n, v) for i, v in enumerate(r)) + "</row>"
+        for n, r in enumerate(rows, 1)
+    )
 
 
 @pytest.mark.parametrize("source", [s for s in SOURCES if s != "stripe"])
@@ -53,7 +69,12 @@ def test_mapped_sources(source):
 def test_stripe():
     data = b"invoice_number,gross,fee,net,currency,automatic_payout_id,reporting_category\nTEST-1,100.00,2.00,98.00,ron,po_test,charge\n"
     assert parse(data, "csv", "stripe")[0]["fee"] == "2.00"
-    for bad in (data.replace(b"98.00", b"98.01"), data.replace(b"charge", b"refund"), data.replace(b"100.00", b"NaN")):
+    assert parse(data.replace(b"charge", b"refund"), "csv", "stripe")[0]["adjustment"] == "1"  # kept, flagged
+    fee_only = data.replace(b"100.00,2.00,98.00", b"0.00,2.00,-2.00").replace(b"charge", b"fee")
+    assert parse(fee_only, "csv", "stripe")[0]["fee"] == "2.00"  # a fee adjustment, flagged, not a refused file
+    fee_back = data.replace(b"100.00,2.00,98.00", b"-100.00,2.00,-98.00").replace(b"charge", b"refund")
+    assert parse(fee_back, "csv", "stripe")[0]["fee"] == "-2.00"  # the refund returned its fee: net says so
+    for bad in (data.replace(b"98.00", b"98.01"), data.replace(b"100.00", b"NaN")):
         with pytest.raises(ReportError):
             parse(bad, "csv", "stripe")
 
@@ -63,6 +84,143 @@ def test_xlsx_sparse_and_formula():
     assert table(workbook(header + '<row><c r="C2"><v>12</v></c></row>'), "xlsx") == [["Ref"], ["", "", "12"]]
     with pytest.raises(ReportError):
         table(workbook(header + '<row><c r="A2"><f>1+1</f><v>2</v></c></row>'), "xlsx")
+
+
+def excel_package(*sheets) -> bytes:
+    """A synthetic workbook in the layout Excel saves: package, workbook and content-type manifests, styles, a theme
+    and document properties."""
+    pkg, rel = "http://schemas.openxmlformats.org/package/2006", "http://schemas.openxmlformats.org/officeDocument/2006"
+    ct = "application/vnd.openxmlformats-officedocument"
+    parts = {
+        f"xl/worksheets/sheet{n}.xml": f"<worksheet {NS}><sheetData>{rows}</sheetData></worksheet>"
+        for n, rows in enumerate(sheets, 1)
+    }
+    overrides = "".join(f'<Override PartName="/{p}" ContentType="{ct}.spreadsheetml.worksheet+xml"/>' for p in parts)
+    links = "".join(
+        f'<Relationship Id="rId{n}" Type="{rel}/relationships/worksheet" Target="worksheets/sheet{n}.xml"/>'
+        for n in range(1, len(sheets) + 1)
+    )
+    listed = "".join(f'<sheet name="Foaie{n}" sheetId="{n}" r:id="rId{n}"/>' for n in range(1, len(sheets) + 1))
+    parts |= {
+        "[Content_Types].xml": f'<Types xmlns="{pkg}/content-types"><Default Extension="rels" ContentType="application/'
+        f'vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+        f'<Override PartName="/xl/workbook.xml" ContentType="{ct}.spreadsheetml.sheet.main+xml"/>{overrides}'
+        f'<Override PartName="/xl/styles.xml" ContentType="{ct}.spreadsheetml.styles+xml"/></Types>',
+        "_rels/.rels": f'<Relationships xmlns="{pkg}/relationships"><Relationship Id="rId1" Type="{rel}/relationships/'
+        f'officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="{pkg}/relationships/metadata/'
+        f'core-properties" Target="docProps/core.xml"/></Relationships>',
+        "docProps/core.xml": f'<cp:coreProperties xmlns:cp="{pkg}/metadata/core-properties"/>',
+        "xl/workbook.xml": f'<workbook {NS} xmlns:r="{rel}/relationships"><sheets>{listed}</sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{pkg}/relationships">{links}<Relationship Id="rId99" '
+        f'Type="{rel}/relationships/styles" Target="styles.xml"/></Relationships>',
+        "xl/styles.xml": f"<styleSheet {NS}/>",
+        "xl/theme/theme1.xml": '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"/>',
+    }
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for name, body in parts.items():
+            z.writestr(name, body)
+    return out.getvalue()
+
+
+def test_xlsx_sheets_with_one_header_read_as_one_table():
+    """Monthly workbooks split lines over sheets with one header: one table. Any other sheet (a summary, a title row,
+    another layout) refuses: no sheet is left unread."""
+    header = ["Ref", "Gross", "Fee"]
+    data = workbook(cells(header, ["TEST-1", "100.00", "2.00"]), cells(header, ["TEST-2", "100.00", "2.00"]))
+    excel = excel_package(cells(header, ["TEST-1", "100.00", "2.00"]), cells(header, ["TEST-2", "100.00", "2.00"]))
+    assert table(excel, "xlsx") == table(data, "xlsx")  # a workbook as Excel saves it reads the same
+    assert table(data, "xlsx") == [header, ["TEST-1", "100.00", "2.00"], ["TEST-2", "100.00", "2.00"]]
+    for other in (["Total", "Lines"], ["REF", "GROSS", "FEE"], ["Gross", "Ref", "Fee"]):
+        with pytest.raises(ReportError):
+            table(workbook(cells(header, ["TEST-1", "1", "0"], ["TEST-2", "1", "0"]), cells(other, ["1", "2"])), "xlsx")
+    rels = '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{}</Relationships>'
+    for target, extra in (("worksheets/refunds.xml", cells(["Gross"], ["-5.00"])), ("worksheets/missing.xml", "")):
+        named = io.BytesIO()  # a worksheet the workbook names but doesn't number (or doesn't hold)
+        with zipfile.ZipFile(named, "w") as z:
+            sheet = f"<worksheet {NS}><sheetData>{{}}</sheetData></worksheet>"
+            z.writestr("xl/worksheets/sheet1.xml", sheet.format(cells(header, ["T", "1", "0"])))
+            z.writestr(
+                "xl/_rels/workbook.xml.rels",
+                rels.format(f'<Relationship Id="rId9" Type="x/worksheet" Target="{target}"/>'),
+            )
+            if extra:
+                z.writestr("xl/" + target, sheet.format(extra))
+        with pytest.raises(ReportError):
+            table(named.getvalue(), "xlsx")
+
+    def declared(*targets):  # a workbook declaring Sales and Refunds, with relationships for `targets` only
+        out, rid = io.BytesIO(), 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+        with zipfile.ZipFile(out, "w") as z:
+            sheet = f"<worksheet {NS}><sheetData>{{}}</sheetData></worksheet>"
+            for n in (1, 2):
+                z.writestr(f"xl/worksheets/sheet{n}.xml", sheet.format(cells(header, [f"T{n}", "1", "0"])))
+            sheets = '<sheet name="Sales" r:id="rId1"/><sheet name="Refunds" r:id="rId2"/>'
+            z.writestr("xl/workbook.xml", f"<workbook {NS} {rid}><sheets>{sheets}</sheets></workbook>")
+            links = "".join(f'<Relationship Id="rId{n}" Type="x/worksheet" Target="{t}"/>' for n, t in targets)
+            z.writestr("xl/_rels/workbook.xml.rels", rels.format(links))
+        return out.getvalue()
+
+    both = declared((1, "worksheets/sheet1.xml"), (2, "worksheets/sheet2.xml"))
+    assert [r[0] for r in table(both, "xlsx")] == ["Ref", "T1", "T2"]
+    with pytest.raises(ReportError):  # Refunds declared, its relationship gone
+        table(declared((1, "worksheets/sheet1.xml")), "xlsx")
+    for old, new in ((b"sheetData", b"data"), (b"xl/workbook.xml", b"xl/workbook.xmz")):
+        broken = io.BytesIO()  # Refunds unreadable (no sheetData); the workbook manifest missing
+        with zipfile.ZipFile(io.BytesIO(both)) as src, zipfile.ZipFile(broken, "w") as z:
+            for info in src.infolist():
+                body = src.read(info)
+                name = (
+                    info.filename.replace("xl/workbook.xml", new.decode())
+                    if old == b"xl/workbook.xml"
+                    else info.filename
+                )
+                z.writestr(name, body.replace(old, new) if name.endswith("sheet2.xml") else body)
+            z.writestr(
+                "_rels/.rels", rels.format('<Relationship Id="rId1" Type="x/officeDocument" Target="xl/workbook.xml"/>')
+            )
+        with pytest.raises(ReportError):
+            table(broken.getvalue(), "xlsx")
+
+    def variant(**parts):  # `both` with parts replaced or added (None drops one)
+        out = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(both)) as src, zipfile.ZipFile(out, "w") as z:
+            files = {n: src.read(n) for n in src.namelist()} | parts
+            for name, body in files.items():
+                if body is not None:
+                    z.writestr(name, body)
+        return out.getvalue()
+
+    refunds = f"<worksheet {NS}><sheetData>{cells(['Gross'], ['-5.00'])}</sheetData></worksheet>".encode()
+    twice = rels.format(
+        '<Relationship Id="rId1" Type="x/worksheet" Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId1" Type="x/worksheet" Target="worksheets/sheet2.xml"/>'
+    )
+    strict = both_book = zipfile.ZipFile(io.BytesIO(both)).read("xl/workbook.xml")
+    strict = both_book.replace(NS.split('"')[1].encode(), b"http://purl.oclc.org/ooxml/spreadsheetml/main")
+    for parts in (
+        {"xl/_rels/workbook.xml.rels": twice.encode()},  # one id twice: a sheet could be dropped
+        {"xl/workbook.xml": strict},  # another dialect: its sheet list can't be read
+        {"xl/worksheets/sub/refunds.xml": refunds},  # nested under xl/worksheets/
+        {"xl/worksheets/SHEET3.XML": refunds},  # upper case
+        {  # Refunds outside xl/worksheets/, said to be a chart sheet
+            "xl/refunds.xml": refunds,
+            "xl/worksheets/sheet2.xml": None,
+            "xl/_rels/workbook.xml.rels": rels.format(
+                '<Relationship Id="rId1" Type="x/worksheet" Target="worksheets/sheet1.xml"/>'
+                '<Relationship Id="rId2" Type="x/chartsheet" Target="refunds.xml"/>'
+            ).encode(),
+        },
+        {"xl/workbook.xml": both_book.replace(b' r:id="rId2"', b"")},  # a sheet without its id
+        {"_rels/.rels": rels.format("").encode()},  # a package naming no workbook
+        {  # Refunds outside xl/worksheets/, named only by the content types
+            "xl/refunds.xml": refunds,
+            "[Content_Types].xml": b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            b'<Override PartName="/xl/refunds.xml" ContentType="application/x.worksheet+xml"/></Types>',
+        },
+    ):
+        with pytest.raises(ReportError):
+            table(variant(**parts), "xlsx")
 
 
 @pytest.mark.parametrize("data", [b"a,a\n1,2", b"a,b\n1", b"a,b\n1,2,3"])
@@ -76,12 +234,7 @@ def test_xlsx_source_happy(source):
     """XLSX reads the same for the Stripe preset and for a mapped source (every mapped source parses alike)."""
     headers = ["invoice_number", "gross", "fee", "net", "currency", "automatic_payout_id", "reporting_category"]
     values = ["TEST-1", "100.00", "2.00", "98.00", "ron", "po_synthetic", "charge"]
-    rows = "".join(
-        "<row>"
-        + "".join(f'<c r="{chr(65 + i)}{n}" t="inlineStr"><is><t>{v}</t></is></c>' for i, v in enumerate(row))
-        + "</row>"
-        for n, row in enumerate([headers, values], 1)
-    )
+    rows = cells(headers, values)
     mapping = (
         None if source == "stripe" else {"reference": "invoice_number", "gross": "gross", "fee": "fee", "net": "net"}
     )
@@ -115,10 +268,86 @@ def test_bad_delimiter_and_negative_string_index():
         )
 
 
-@pytest.mark.parametrize("value", ["=SUM(1)", " +cmd", "@ref", "-1"])
-def test_csv_formula_cells_refuse(value):
-    with pytest.raises(ReportError):
-        table(f"Ref,Gross,Fee\n{value},100.00,2.00\n".encode(), "csv")
+@pytest.mark.parametrize(
+    "gross,fee,net,expected",
+    [
+        ("1.250,50", "-12,50", "1.238,00", ("1250.50", "12.50", "")),
+        ("1,250.50", "12.50", "", ("1250.50", "12.50", "")),
+        ("1 250,50 lei", "-", "1.250,50", ("1250.50", "0.00", "RON")),
+        ("€ 100", "2,00 EUR", "98", ("100.00", "2.00", "EUR")),
+        ("100", "2", "-", None),  # a mapped net must say the amount
+        ("$ 100", "0", "", None),  # USD, CAD or AUD
+        ("1,000,000,000,000.00", "0", "", None),  # past the stored amount's 12 digits
+        ("1 " * 300 + "x", "0", "", None),  # a long odd cell refuses at once
+        ("0.250,50", "0", "", None),  # a grouped amount never starts with 0
+        ("100lei", "100,00", "-0,00", ("100.00", "100.00", "RON")),  # a net of -0 is stored as 0.00
+        ("1.250", "0", "", None),  # one group, no decimals: 1250 or 1.25
+        ("100,005", "0", "", None),
+        ("1e3", "0", "", None),
+        ("100 RON", "2 EUR", "", None),
+        ("-100,00", "0", "", ("-100.00", "0.00", "")),
+        ("-100,00", "2,00", "", None),  # a refund's fee: kept or returned? Only a mapped net says.
+        (
+            "0",
+            "2,00",
+            "-2,00",
+            None,
+        ),  # zero gross, a fee: an adjustment only with a non-charge category (test_stripe)  # a refund line: kept and flagged (test_settlements)
+    ],
+)
+def test_real_amounts_parse_exactly_or_refuse(gross, fee, net, expected):
+    """Romanian and English separators, currency words, signed fees and placeholders; ambiguity refuses."""
+    data = f"Ref;Telefon;Gross;Fee;Net\n=TEST-1;+40700000000;{gross};{fee};{net}\n".encode()
+    mapping = {"reference": "Ref", "gross": "Gross", "fee": "Fee"} | ({"net": "Net"} if net else {})
+    if expected is None:
+        with pytest.raises(ReportError):
+            parse(data, "csv", "fan", mapping, ";")
+        return
+    line = parse(data, "csv", "fan", mapping, ";")[0]
+    assert (line["reference"], line["gross"], line["fee"], line.get("currency", "")) == ("=TEST-1", *expected)
+    assert money(line["gross"], signed=True) == Decimal(expected[0])  # what is stored reads back exactly
+    if net:  # a mapped net is stored as gross minus fee, never `-0.00`
+        assert line["net"] == f"{Decimal(expected[0]) - Decimal(expected[1]):.2f}"
+
+
+def test_multi_payout_file_becomes_one_report_per_payout(ledger):
+    """Two payout ids in one borderou: two reports, each dated by its own day, stored together; the file again is a
+    duplicate."""
+    for n in (1, 2):
+        ledger.add_issued(dict(message_id=f"m{n}", company="NORD", number=f"TEST-{n}", status="open", raw_path=""))
+    data = (
+        b"Borderou;Factura;Ramburs;Comision;Data\nB-1;TEST-1;100,00;2,00;09.10.2026\nB-2;TEST-2;50,00;1,00;11.10.2026\n"
+    )
+    mapping = dict(batch="Borderou", reference="Factura", gross="Ramburs", fee="Comision", date="Data")
+    described = NETOPIA | dict(source="fan", name="Synthetic Courier SRL", mapping=mapping)
+    result = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    rows = settlements.state(ledger, "NORD")
+    assert sorted(result["ids"]) == sorted(r["id"] for r in rows)
+    assert sorted((r["report_key"], r["date"], r["net"]) for r in rows) == [
+        ("B-1", "2026-10-09", "98.00"),
+        ("B-2", "2026-10-11", "49.00"),
+    ]
+    partner = ledger.db.execute("SELECT partner FROM partner_settlement_formats").fetchone()[0]
+    again = bank_upload.accept_report(ledger, "NORD", data, "text/csv", partner=partner, **UPLOAD)
+    assert again["status"] == "duplicate" and len(settlements.state(ledger, "NORD")) == 2
+    mixed = data.replace(b"B-2;TEST-2;50,00;1,00;11", b"B-1;TEST-2;50,00;1,00;11")
+    old = data.replace(b"11.10.2026", b"11.10.2024")
+    clash = data.replace(b"B-1;", b"B-9;", 1).replace(b"B-2;", b"B-1;")  # a new payout, then one already stored
+    for bad in (mixed, old, clash):  # two days in one payout; a day past the upload rule; a stored payout id
+        with pytest.raises(bank_upload.Refused):
+            bank_upload.accept_report(ledger, "NORD", bad, "text/csv", partner=partner, **UPLOAD)
+    assert len(settlements.state(ledger, "NORD")) == 2  # nothing of a refused file is stored
+    once = described | {"mapping": {k: v for k, v in mapping.items() if k not in ("batch", "date")}}
+    remapped = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=once, **UPLOAD)
+    assert remapped["status"] == "duplicate" and len(settlements.state(ledger, "NORD")) == 2  # same bytes, one file
+    b2 = next(r["id"] for r in settlements.state(ledger, "NORD") if r["report_key"] == "B-2")
+    assert ledger.withdraw_report(b2, "NORD")  # withdrawn to correct it: it comes back as a corrected file
+    again = bank_upload.accept_report(ledger, "NORD", data, "text/csv", partner=partner, **UPLOAD)
+    assert again["status"] == "duplicate" and len(settlements.state(ledger, "NORD")) == 1
+    corrected = b"Borderou;Factura;Ramburs;Comision;Data\nB-2;TEST-2;50,00;1,00;11.10.2026\n"
+    assert (
+        bank_upload.accept_report(ledger, "NORD", corrected, "text/csv", partner=partner, **UPLOAD)["status"] == "added"
+    )
 
 
 def test_uploaded_format_belongs_to_partner_and_is_reused(ledger):
@@ -172,6 +401,106 @@ def test_preview_guesses_columns_and_date_only_to_prefill(ledger, dates, day, or
     assert ledger.db.execute("SELECT count(*) FROM settlement_reports").fetchone()[0] == 0
 
 
+def test_preview_recognizes_a_preset_header(ledger):
+    """A built-in preset fills the source and its columns; only the person's submit stores anything."""
+    data = (
+        b"Numar borderou;AWB;Numar factura;Ramburs;Comision ramburs;Telefon\nB1;1;TEST-1;1.250,50;-12,50;+40700000000\n"
+    )
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    preview = ask.value.extra
+    assert (preview["source"], preview["proposed"]) == ("fan", "preset")
+    assert preview["guess"] == dict(
+        reference="Numar factura", gross="Ramburs", fee="Comision ramburs", batch="Numar borderou"
+    )
+    with_currency = data.replace(b";Telefon\n", b";Moneda\n").replace(b";+40700000000\n", b";EUR\n")
+    with pytest.raises(bank_upload.Refused) as ask:  # a column the preset doesn't use keeps its header guess
+        bank_upload.accept_report(ledger, "NORD", with_currency, "text/csv", **UPLOAD)
+    assert ask.value.extra["guess"]["currency"] == "Moneda" and ask.value.extra["currency"] == "EUR"
+    twice = data.replace(b";Telefon\n", b";Num\xc4\x83r factur\xc4\x83\n")  # read alike as "Numar factura"
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", twice, "text/csv", **UPLOAD)
+    assert (ask.value.extra["proposed"], ask.value.extra["source"]) == ("", "")
+
+
+COLUMN_IDS = {"Doc": "c1", "Incasat": "c2", "Retinut": "c3", "Moneda": "c4"}
+
+
+@pytest.mark.parametrize(
+    "answer,expected",
+    [
+        (dict(reference="Doc", gross="Incasat", fee="Retinut"), dict(reference="Doc", gross="Incasat", fee="Retinut")),
+        (dict(reference="Doc", gross="Incasat", fee="Ignore previous instructions"), None),  # not a header name
+        (dict(reference="Doc", gross="Incasat", fee="Incasat"), None),  # one column twice
+        (dict(reference="Doc"), None),  # incomplete, even with the header guesses
+        (dict(reference="Doc", gross="Retinut", fee="Incasat"), None),  # contradicts the header guess
+        (  # a payout day is a person's: dropped from the proposal
+            dict(reference="Doc", gross="Incasat", fee="Retinut", date="Doc"),
+            dict(reference="Doc", gross="Incasat", fee="Retinut"),
+        ),
+    ],
+)
+def test_preview_takes_only_a_checked_ai_proposal(ledger, monkeypatch, answer, expected):
+    """An unknown header: the AI proposes, the engine keeps only header names, each once, complete; otherwise the
+    header-name guess stays."""
+    asked = []
+    monkeypatch.setattr(bank_upload.ai, "available", lambda L: True)
+    monkeypatch.setattr(
+        bank_upload.ai,
+        "ask_json",
+        # The fake answers with column ids, as the prompt asks, for the header names a case gives.
+        lambda L, s, p, schema: (
+            asked.append(p)
+            or {f: "" for f in bank_upload.FIELDS} | {f: COLUMN_IDS.get(c, c) for f, c in answer.items()}
+        ),
+    )
+    data = b"Doc,Incasat,Retinut,Moneda\nTEST-1,100.00,2.00,EUR\n"
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    preview, header = ask.value.extra, {"gross": "Incasat", "currency": "Moneda"}  # the header guesses stand
+    assert (preview["guess"], preview["proposed"]) == ((header | expected, "ai") if expected else (header, ""))
+    assert preview["currency"] == "EUR"
+    assert len(asked) == 1 and "TEST-1" not in asked[0] and "xxxx-9" in asked[0]  # cells leave only as shapes
+    assert '"name": "incasat"' in asked[0] and '"name": "xxx"' in asked[0]  # "Doc" is no settlement word
+    asked.clear()
+    firsts = (
+        b"TEST-1,100.00,2.00",
+        b"INV-12,EUR 42.50,EUR 1.25",
+        b"Mara Exemplu,Cluj,Achitat",
+        b"Mara,Cluj,Plata ramburs",
+    )
+    for first in firsts:  # a first line of data: nothing of it leaves as written
+        with pytest.raises(bank_upload.Refused):
+            bank_upload.accept_report(ledger, "NORD", first + b"\nTEST-2,5.00,0\n", "text/csv", **UPLOAD)
+    assert not any(w in p for p in asked for w in ("Mara", "Cluj", "INV-12", "TEST-1"))  # settlement words may go
+    asked.clear()
+    other = "Иван Петров,Cluj,Plata ramburs,Factura — Киев\nTEST-2,5.00,0,x\n".encode()  # another alphabet
+    with pytest.raises(bank_upload.Refused):
+        bank_upload.accept_report(ledger, "NORD", other, "text/csv", **UPLOAD)
+    assert asked and not any(w in p for p in asked for w in ("Иван", "Петров", "Киев"))
+    assert bank_upload._shape("12.50 € 📦 Doc🔒") == "99.99 ? ? xxx?"  # only the form leaves
+
+
+def test_ai_never_sets_the_report_currency_and_failure_proposes_nothing(ledger, monkeypatch):
+    """A three-letter column the AI calls a currency (a county, a country) never becomes the report's currency, and
+    an AI failure leaves the header-name guess."""
+    monkeypatch.setattr(bank_upload.ai, "available", lambda L: True)
+    answer = {f: "" for f in bank_upload.FIELDS} | dict(reference="c1", gross="c2", fee="c3", currency="c4")
+    monkeypatch.setattr(bank_upload.ai, "ask_json", lambda L, s, p, schema: answer)
+    data = b"Doc,Incasat,Retinut,Judet\nTEST-1,100.00,2.00,CLJ\n"
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    assert (ask.value.extra["proposed"], ask.value.extra["currency"]) == ("ai", "")
+
+    def fails(*args):
+        raise bank_upload.ai.AIError("synthetic failure")
+
+    monkeypatch.setattr(bank_upload.ai, "ask_json", fails)
+    with pytest.raises(bank_upload.Refused) as ask:
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", **UPLOAD)
+    assert (ask.value.extra["proposed"], ask.value.extra["guess"]) == ("", {"gross": "Incasat"})
+
+
 @pytest.mark.parametrize("second,currency", [("ron", "RON"), ("eur", "")])
 def test_preview_prefills_stripe_currency_and_saved_payers(ledger, second, currency):
     setup(ledger)
@@ -202,7 +531,7 @@ def test_preview_prefills_stripe_currency_and_saved_payers(ledger, second, curre
 
 
 @pytest.mark.parametrize(
-    "bad", [b"Ref,Gross,Fee\nTEST-1,NaN,2.00\n", b"Ref,Gross,Fee\n=CMD,100.00,2.00\n", b"\xff,\xff\n1,2\n"]
+    "bad", [b"Ref,Gross,Fee\nTEST-1,NaN,2.00\n", b'Ref,Gross,Fee\nTEST-1,"1,250",2.00\n', b"\xff,\xff\n1,2\n"]
 )
 def test_refused_upload_saves_no_partner_format(ledger, bad):
     with pytest.raises(bank_upload.Refused):
@@ -286,3 +615,276 @@ def test_uploaded_company_cui_refuses_whole_report(ledger, kind, value):
     assert all(r["status"] == "open" for r in ledger.db.execute("SELECT status FROM issued WHERE company='STUDIO9'"))
     if value in ("foreign", "unknown", "invalid"):
         assert all(r["status"] == "open" for r in ledger.db.execute("SELECT status FROM issued"))
+
+
+def test_one_report_writes_its_fees_one_way():
+    """A fee written `-5` beside one written `5` could be a rebate or a deduction: the report refuses."""
+    data = b"Ref;Gross;Fee\nTEST-1;100,00;5,00\nTEST-2;100,00;-5,00\n"
+    mapping = {"reference": "Ref", "gross": "Gross", "fee": "Fee"}
+    with pytest.raises(ReportError):
+        parse(data, "csv", "fan", mapping, ";")
+    assert [x["fee"] for x in parse(data.replace(b";5,00", b";-5,00"), "csv", "fan", mapping, ";")] == ["5.00", "5.00"]
+
+
+def test_first_fan_borderou_settles_on_its_own(ledger):
+    """Issue #49: a first FAN borderou with a phone column, `-` cells and Romanian amounts, matching open invoices
+    and the bank credit to the cent, settles without a person's confirmation."""
+    for n, total in ((1, "1250.50"), (2, "300.00")):
+        ledger.add_issued(
+            dict(
+                message_id=f"fan-{n}",
+                company="NORD",
+                number=f"FAN-{n}",
+                issue_date="2026-10-01",
+                currency="RON",
+                total=total,
+                doc_type="invoice",
+                status="open",
+                raw_path="",
+            )
+        )
+    store_bank(ledger, statement(amount=Decimal("1538.00")))  # 1550.50 collected minus 12.50 fee
+    data = (
+        b"AWB;Telefon destinatar;Numar factura;Ramburs;Comision ramburs;Observatii\n"
+        b"1000000001;+40700000000;FAN-1;1.250,50;-12,50;-\n"
+        b"1000000002;+40700000001;FAN-2;300,00;-;-\n"
+    )
+    mapping = dict(reference="Numar factura", gross="Ramburs", fee="Comision ramburs")
+    described = dict(source="fan", name="Synthetic Courier SRL", currency="RON", mapping=mapping)
+    result = bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    assert result["message"] == bank_upload.COLLECTED
+    assert {r["message_id"]: r["status"] for r in ledger.issued_rows()} == {"fan-1": "collected", "fan-2": "collected"}
+    assert ledger.db.execute("SELECT count(*) FROM settlement_confirmations").fetchone()[0] == 0
+
+
+def test_mailed_report_from_a_named_sender_is_imported(ledger, mail_account, monkeypatch):
+    """Read-only intake: a CSV in the saved format from an address a person named is imported with that payer and
+    the day the file says; another format, or another sender, imports nothing."""
+    day = date.today() - timedelta(days=5)
+    for n, total in ((1, "50.00"), (2, "100.00")):
+        ledger.add_issued(
+            dict(
+                message_id=f"m{n}",
+                company="NORD",
+                number=f"TEST-{n}",
+                status="open",
+                raw_path="",
+                total=total,
+                currency="RON",
+                doc_type="invoice",
+                issue_date=(day - timedelta(days=9)).isoformat(),
+            )
+        )
+    header = "Factura;Ramburs;Comision;Data plata\n"
+    described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+    first = (header + f"TEST-1;50,00;1,00;{day:%d.%m.%Y}\n").encode()
+    bank_upload.accept_report(ledger, "NORD", first, "text/csv", description=described, report_date=day.isoformat())
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    with pytest.raises(ValueError):
+        bank_upload.set_senders(ledger, "NORD", partner, sig, "not an address")
+    assert bank_upload.set_senders(ledger, "NORD", partner, sig, "Rapoarte@Curier.example\n") == [
+        "rapoarte@curier.example"
+    ]
+    other = (header + f"TEST-1;50,00;1,00;{(day - timedelta(days=1)):%d.%m.%Y}\n").encode()
+    again = bank_upload.accept_report(
+        ledger, "NORD", other, "text/csv", description=described, report_date=day.isoformat()
+    )
+    assert ledger.withdraw_report(again["id"], "NORD")
+    kept = json.loads(ledger.db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])["senders"]
+    assert kept == ["rapoarte@curier.example"]  # the same description uploaded again keeps the senders
+
+    def mailed(sender):
+        mail = EmailMessage()
+        mail["From"], mail["Subject"], mail["Message-ID"] = f"Curier <{sender}>", "Decont", f"<{sender}>"
+        mail.add_attachment((header + f"TEST-2;100,00;2,00;{day:%d.%m.%Y}\n").encode(), "text", "csv", filename="r.csv")
+        mail.add_attachment(b"Other,Columns\n1,2\n", "text", "csv", filename="other.csv")
+        return imap.parse(mail_account["id"], bytes(mail), date.today())
+
+    msg = mailed("rapoarte@curier.example")
+    assert (len(msg.tables), msg.attachments) == (2, ())
+    store_bank(ledger, statement(date=day + timedelta(days=2), amount=Decimal("98.00"), counterparty=NETOPIA["name"]))
+    assert invoices.handle(ledger, msg) == "settlement:added:1,settlement:unknown-format:1"
+    assert invoices.handle(ledger, mailed("someone@curier.example")) == "no-documents"
+    rows = settlements.state(ledger, "NORD")
+    assert len(rows) == 2 and {r["date"] for r in rows} == {day.isoformat()}
+    # Verified against the credit, the mailed report still waits: a From header is no proof of who sent it.
+    mailed_row = next(r for r in rows if r["lines"][0]["reference"] == "TEST-2")
+    assert (mailed_row["error"], mailed_row["can_confirm"]) == ("mail_confirmation_required", True)
+    body = {"id": mailed_row["id"], "tx": mailed_row["credit"]["id"], "confirmed": "yes"}
+    assert settlements.perform(ledger, "NORD", body, "synthetic person")["ok"]
+    assert ledger.issued("m2")["status"] == "collected"
+    # Withdrawn, the same file mailed again stays out; a revoked sender's mail in flight stores nothing.
+    other = next(r for r in rows if r["id"] != mailed_row["id"])
+    assert ledger.withdraw_report(other["id"], "NORD")
+    first_mail = EmailMessage()
+    first_mail["From"], first_mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<again>"
+    first_mail.add_attachment(first, "text", "csv", filename="r.csv")
+    again = imap.parse(mail_account["id"], bytes(first_mail), date.today())
+    assert invoices.handle(ledger, again) == "settlement:refused:1"  # the withdrawn report stays withdrawn
+    late = EmailMessage()
+    late["From"], late["Message-ID"] = "Curier <rapoarte@curier.example>", "<late>"
+    late.add_attachment((header + f"TEST-9;5,00;0;{day:%d.%m.%Y}\n").encode(), "text", "csv", filename="r.csv")
+    original = bank_upload._report_spec
+
+    def revoked_meanwhile(*args):  # another connection removes the sender between reading and storing
+        other_connection = Ledger()
+        try:
+            bank_upload.set_senders(other_connection, "NORD", partner, sig, "")
+        finally:
+            other_connection.close()
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_report_spec", revoked_meanwhile)
+    assert invoices.handle(ledger, imap.parse(mail_account["id"], bytes(late), date.today())) == "settlement:refused:1"
+    data = json.loads(ledger.db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])
+    assert data["senders"] == [] and len(settlements.state(ledger, "NORD")) == 1
+
+
+def test_a_sender_naming_two_payers_imports_nothing_and_invoices_still_read(ledger, mail_account):
+    """One address on two payers' formats: the attachment never chooses; the mail's PDFs are read the invoice way."""
+    header = b"Factura;Ramburs;Comision\n"
+    for name in ("Synthetic Processor SRL", "Other Processor SRL"):
+        described = NETOPIA | dict(name=name, mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+        data = header + name.encode()[:5] + b";100,00;2,00\n"
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    for partner, sig in ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchall():
+        bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<two>"
+    mail.add_attachment(header + b"TEST-1;100,00;2,00\n", "text", "csv", filename="r.csv")
+    mail.add_attachment(b"%PDF-1.4 synthetic", "application", "pdf", filename="factura.pdf")
+    result = invoices.handle(ledger, imap.parse(mail_account["id"], bytes(mail), date.today()))
+    assert result.startswith("settlement:ambiguous-sender,") and len(result.split(",")) == 2
+
+
+def test_mailed_payer_is_decided_again_under_the_write_lock(ledger, mail_account, monkeypatch):
+    """The sender named on a second payer while a mail is read: the report is not filed under the first one. A request
+    naming a saved payer and a new description together is refused (it could write back an old sender list)."""
+    header = b"Factura;Ramburs;Comision;Data plata\n"
+    for name in ("Synthetic Processor SRL", "Other Processor SRL"):
+        described = NETOPIA | dict(name=name, mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+        data = header + name.encode()[:5] + b";100,00;2,00;10.10.2026\n"
+        bank_upload.accept_report(ledger, "NORD", data, "text/csv", description=described, **UPLOAD)
+    (first, sig), (second, _) = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchall()
+    bank_upload.set_senders(ledger, "NORD", first, sig, "rapoarte@curier.example")
+    with pytest.raises(bank_upload.Refused):
+        bank_upload.accept_report(
+            ledger, "NORD", header + b"T;1,00;0;10.10.2026\n", "text/csv", partner=first, description=NETOPIA
+        )
+    original = bank_upload._report_spec
+
+    def named_twice_meanwhile(*args):
+        other = Ledger()
+        try:
+            bank_upload.set_senders(other, "NORD", second, sig, "rapoarte@curier.example")
+        finally:
+            other.close()
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_report_spec", named_twice_meanwhile)
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<twice>"
+    mail.add_attachment(header + b"TEST-7;100,00;2,00;10.10.2026\n", "text", "csv", filename="r.csv")
+    msg = imap.parse(mail_account["id"], bytes(mail), date.today())
+    assert settlement_from_mail(ledger, msg) == "settlement:refused:1"
+
+
+def settlement_from_mail(L, msg):
+    return bank_upload.from_mail(L, msg.address, msg.tables, lambda: ["NORD"], UPLOAD["today"])
+
+
+def test_an_unreadable_workbook_never_stops_the_mails_invoices(ledger, mail_account):
+    """A workbook zipfile can't read (another compression) is one unreadable table; the PDF beside it is still read."""
+    broken = bytearray(workbook(cells(["Ref", "Gross", "Fee"], ["T", "1", "0"])))
+    at = broken.index(b"PK\x01\x02") + 10  # the first entry's compression method, in the central directory
+    broken[at : at + 2] = (99).to_bytes(2, "little")
+    damaged = io.BytesIO()  # a deflated entry whose stream is cut
+    with zipfile.ZipFile(damaged, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("xl/worksheets/sheet1.xml", f"<worksheet {NS}><sheetData>{'<row/>' * 200}</sheetData></worksheet>")
+    damaged = bytearray(damaged.getvalue())
+    start = damaged.index(b"sheet1.xml") + len(b"sheet1.xml")
+    damaged[start : start + 40] = b"\xff" * 40
+    unknown = workbook(sheet='<?xml version="1.0" encoding="x-unknown"?><worksheet/>')  # an encoding Python lacks
+    for bad in (bytes(broken), bytes(damaged), unknown):
+        with pytest.raises(ReportError):
+            table(bad, "xlsx")
+    assert bank_upload._mailed_date(ledger, "NORD", "gone", "gone", [["Data"], ["01.10.2026"]]) == ""  # deleted
+    described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+    bank_upload.accept_report(
+        ledger, "NORD", b"Factura;Ramburs;Comision\nT;1,00;0\n", "text/csv", description=described, **UPLOAD
+    )
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<broken>"
+    mail.add_attachment(bytes(broken), "application", "octet-stream", filename="r.xlsx")
+    mail.add_attachment(b"%PDF-1.4 synthetic", "application", "pdf", filename="factura.pdf")
+    result = invoices.handle(ledger, imap.parse(mail_account["id"], bytes(mail), date.today()))
+    assert result.startswith("settlement:unreadable:1,") and len(result.split(",")) == 2
+
+
+def test_mailed_report_read_with_a_changed_format_or_a_busy_ledger(ledger, mail_account, monkeypatch):
+    """Columns corrected while a mail is read: nothing is stored with the old reading. A ledger that can't write
+    raises, so the mail is read again later instead of being counted as an unreadable table."""
+    header = b"Factura;Ramburs;Comision;Ref;Data plata\n"
+    described = NETOPIA | dict(mapping=dict(reference="Factura", gross="Ramburs", fee="Comision"))
+    bank_upload.accept_report(
+        ledger, "NORD", header + b"T;1,00;0;R;10.10.2026\n", "text/csv", description=described, **UPLOAD
+    )
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<changed>"
+    mail.add_attachment(header + b"TEST-1;100,00;2,00;TEST-2;10.10.2026\n", "text", "csv", filename="r.csv")
+    msg = imap.parse(mail_account["id"], bytes(mail), date.today())
+    original = bank_upload._report_spec
+
+    def corrected_meanwhile(*args):
+        other = Ledger()
+        try:
+            with other.tx() as db:
+                data = json.loads(db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])
+                data["mapping"]["reference"] = "Ref"
+                db.execute("UPDATE partner_settlement_formats SET data=?", (json.dumps(data),))
+        finally:
+            other.close()
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_report_spec", corrected_meanwhile)
+    assert settlement_from_mail(ledger, msg) == "settlement:refused:1" and len(settlements.state(ledger, "NORD")) == 1
+    monkeypatch.setattr(bank_upload, "_report_spec", original)
+
+    def busy(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(bank_upload.settlements, "import_payouts", busy)
+    with pytest.raises(sqlite3.OperationalError):
+        settlement_from_mail(ledger, msg)
+
+
+def test_mailed_day_comes_from_the_format_the_lines_are_read_with(ledger, mail_account, monkeypatch):
+    """The payout-day column removed while a mail is read: no day is taken from the reading before; with two date
+    columns and none mapped the file names no day, so nothing is stored."""
+    header = b"Factura;Ramburs;Comision;Data plata;Data decont\n"
+    mapping = dict(reference="Factura", gross="Ramburs", fee="Comision", date="Data plata")
+    described = NETOPIA | dict(mapping=mapping)
+    first = header + b"T;1,00;0;10.10.2026;09.10.2026\n"
+    bank_upload.accept_report(ledger, "NORD", first, "text/csv", description=described, **UPLOAD)
+    partner, sig = ledger.db.execute("SELECT partner,signature FROM partner_settlement_formats").fetchone()
+    bank_upload.set_senders(ledger, "NORD", partner, sig, "rapoarte@curier.example")
+    original = bank_upload._choose
+
+    def changed_meanwhile(*args):
+        with ledger.tx() as db:
+            data = json.loads(db.execute("SELECT data FROM partner_settlement_formats").fetchone()[0])
+            del data["mapping"]["date"]
+            db.execute("UPDATE partner_settlement_formats SET data=?", (json.dumps(data),))
+        return original(*args)
+
+    monkeypatch.setattr(bank_upload, "_choose", changed_meanwhile)
+    mail = EmailMessage()
+    mail["From"], mail["Message-ID"] = "Curier <rapoarte@curier.example>", "<day>"
+    mail.add_attachment(header + b"TEST-1;100,00;2,00;10.10.2026;09.10.2026\n", "text", "csv", filename="r.csv")
+    msg = imap.parse(mail_account["id"], bytes(mail), date.today())
+    assert settlement_from_mail(ledger, msg) == "settlement:refused:1"
+    assert len(settlements.state(ledger, "NORD")) == 1

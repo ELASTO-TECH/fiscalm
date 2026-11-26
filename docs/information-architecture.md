@@ -75,7 +75,7 @@ Raport lunar ── every Factură, Bon, Extras, Tranzacție of that firm and mo
 | Partener | its invoices (primite, emise), what is owed either way, the bank accounts it was paid from or to, its CUI data from ANAF; for a courier or processor, what it holds for the firm and its Decontări; the associations the user made for it (section 4) |
 | Plată | what it pays (Factură, Taxă, contabil); its Fișier de plăți; the Tranzacție that confirmed it |
 | Fișier de plăți | its payments, each with what it pays and its proof; its downloads |
-| Tranzacție | what it settled (Factură, Plată, Factură emisă), or the candidates when it fits several ("Plată de lămurit"); for a credit explained by a Decontare, every invoice it collected and the fee; its Extras |
+| Tranzacție | what it settled (Factură, Plată, Factură emisă), or the candidates when it fits several, or, for a transfer to an account no invoice lists, the invoices of exactly its amount dated up to 45 days before it ("Plată de lămurit"; a person confirms; a debit without an IBAN, such as a card or direct debit, settles the one invoice of its exact amount on its own); for a credit explained by a Decontare, every invoice it collected and the fee; its Extras |
 | Decontare | its Tranzacție (credit); each line's Factură emisă and AWB; the fee |
 | Bon | the Factură primită of the same purchase (if any); the card Tranzacție |
 | Raport lunar | every entity of the month, and what is missing |
@@ -160,7 +160,7 @@ gear is current on Setări, and Tranzacții only in the tab bar. Setări is reac
 | **Sarcini** | Every task in one paged list, not grouped, with the firm on each row when there are several. Each row opens or acts on the task's entity for the row's own firm. Client payment reminders appear here with their text to copy. |
 | **Vânzări** | Issued invoices and drafts: filters (Toate, De încasat, Restante), search, month, SPV state. Factură nouă and storno start here; shop orders appear as the invoices they became. |
 | **Cheltuieli** | Every Cheltuială, in two categories (header button: Încarcă bon sau factură, photos or PDFs from this device; one opens its sheet, several open Bonuri și chitanțe): **Facturi** (e-Factura and mailed invoices) and **Bonuri și chitanțe**. A purchase with both an invoice and a bon is one row in both categories, marked "Factură și bon", with one sheet: the invoice's, with the bon on it. Filters: Toate, De plătit, Restante; for bonuri, Toate and Fără factură. Search and month. In De plătit and Restante of one firm each invoice the engine lets a person act on has a box; choosing shows one bar (count and total, Marchează ca plătită, Pune în fișier). **Pune în fișier** asks which file: the newest open file (the default), another open file, or **Fișier nou** with the proposed name; with no open file, only the new file's name. An invoice's sheet offers the same. An invoice already in a file names it and links to it; one marked can't be chosen; an approved payment without a file can be put in one. The engine decides which invoices are eligible. |
-| **Fișiere de plăți** (`tab=plati`) | The firm's payment files only, newest first: name, created date, payments, total and state (Deschis; Deschis, modificat după descărcare; Importat, 1 din 2 confirmate; Confirmat). No invoices and no adding here: payments are chosen in Cheltuieli. A file opens its sheet (`pf`): its payments, each with its proof; while open, Descarcă fișierul (Descarcă din nou after a download), Am importat în bancă once the current version is downloaded, removing a payment, Redenumește, and Șterge fișierul when it is empty; the engine's questions about it (a file missing from its folder, several downloads, an unknown file beside it). Confirmed payments are also in Tranzacții. |
+| **Fișiere de plăți** (`tab=plati`) | The firm's payment files only, newest first: name, created date, payments, total and state (Deschis; Deschis, modificat după descărcare; Importat, 1 din 2 confirmate; Confirmat). No invoices and no adding here: payments are chosen in Cheltuieli. A file opens its sheet (`pf`): its payments, each with its proof; while open, Descarcă fișierul (Descarcă din nou after a download), Am importat în bancă once the current version is downloaded, removing a payment, Redenumește, and Șterge fișierul when it is empty; its download history and a warning when it changed since the last download (downloading again never locks it); the engine's questions about it (a file missing from its folder, an unknown file beside it). Confirmed payments are also in Tranzacții. |
 | **Tranzacții** | Every transaction of the firm's accounts, newest first, with what explains it: **De explicat** first, then Toate, Intrări, Ieșiri, and search. Beside the title, **Încarcă**: *Încarcă extras* (the account is asked only for a CSV, when the firm has several) or *Încarcă raport de decontare*. Beside the list (below it on a phone): the accounts, one line each with its balance and last read, a bank connection ending or ended with **Reconectează banca**, and for an administrator the way to Bănci și conturi, where accounts are added; the statements by month; what couriers and processors hold. |
 | **Parteneri** | One list of clients and suppliers (filters Toți, Cu sold, Cu restanțe). Header button: Partener nou, a firm added by its CUI as a supplier or a client, ANAF filling in the rest. A partner's sheet shows what is owed each way with Factură nouă and Modifică, every invoice, what it holds for the firm if it is a courier or processor, then its details, closed once it has invoices (CUI or VAT id, address, known IBANs, ANAF state on one line), then what is linked to it. |
 | **Rapoarte** | One report per month per firm and the accountant's pack (anchors `#rezolvat` and `#pachet`). A month's received invoices list purchases as Cheltuieli does. |
@@ -230,13 +230,15 @@ between them. The transaction list and sheets show those explanations.
 | **Încasare** | a credit: the issued invoices it covers, the difference named | fiscalm (exact rules), a Decontare, or the user |
 | **Plată** | a debit: the payment it confirms, and so the received invoice or tax it pays | fiscalm (the payment's IBAN, amount and reference), or the user |
 | **Bon** | a card debit: the receipt that proves it | fiscalm (the receipt's amount and day) |
-| **Transfer între conturi** | money between two of the firm's own accounts | fiscalm (both ends seen), or the user |
+| **Transfer între conturi** | money between two of the firm's own accounts | fiscalm (both ends seen, one naming the other's account), or the user |
 | **Avans de trezorerie** | the owner's money in or out | the user, or an association the user made |
-| **Fără document** | a bank fee, interest, a personal card spend: a label the user picks, kept for the accountant | the user, or an association the user made |
+| **Fără document** | a bank fee, interest, a personal card spend: a label the user picks, kept for the accountant | the user, an association the user made, or the AI integration when sure and no open document fits the amount |
 
 A transaction without one is **de explicat**. That list is the work: Acasă counts it and Tranzacții
 opens on it. fiscalm proposes an explanation when it has one and never applies on its own a proposal that could be
-wrong (AGENTS.md non-negotiables 2 and 3); the user confirms it or picks something else.
+wrong (AGENTS.md non-negotiables 2 and 3); the user confirms it or picks something else. With an AI integration, the
+lines left to explain get its proposal (Propunere AI: a label, an advance, a partner and the invoices that add up to
+the amount), checked by the engine and confirmed on the sheet.
 
 ### The user explains what fiscalm can't
 
@@ -251,7 +253,9 @@ to it. Every link the user makes can be undone from the same sheet, and the part
 
 From a link the user makes, fiscalm can offer to remember it: "transfers from this IBAN are Client Exemplu SRL",
 "this card is personal" (Card personal). These are associations the user owns and sees on the partner's sheet, the
-transaction's sheet and in Automatizări, removed with `memory-forget`; never regexes or lists in a config file. The
+transaction's sheet and in Automatizări, removed with `memory-forget`; never regexes or lists in a config file. A
+Fără document or Avans association explains on its own the lines of that account, card or merchant still to explain,
+older ones too, unless a person undid that line's explanation. The
 explanations are the `tx-link` and `tx-unlink` actions ([openapi.json](openapi.json)).
 
 ### Couriers and processors hold money for the firm

@@ -6,7 +6,7 @@ import { Button, Input, Select, Label, Form, Actions, Panel, detailListStyle, no
 // (`tx-link`); the app lists the partner's open invoices, shows the difference and posts the choice.
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { post } from "@/lib/api";
-import { cents, fromCents, curOf, dm, lei, phrase } from "@/lib/format";
+import { cents, fromCents, curOf, dm, lei, lunaName, phrase } from "@/lib/format";
 import { type Label as TransactionLabel, type LinkKind, type MemoryKey, type Partner, type Reason, type Transaction,
   type TxLink, type CoveredRow, type TransactionChoices, type TransactionInvoiceChoice, type TransactionChoiceRows } from "@/lib/types";
 import { useApp, useCan, useCompany } from "./context";
@@ -132,7 +132,8 @@ function Linked({ t, link, onChange }: { t: Transaction; link: TxLink; onChange:
 }
 
 /** Who made an explanation no person made (links.apply_rules). */
-const BY_RULE = { saved: "după regula salvată", bank: "după extrasul băncii" };
+const BY_RULE = { saved: "după regula salvată", bank: "după extrasul băncii", transfer: "după ambele capete ale transferului",
+  ai: "după asistentul AI" };
 
 /** What a label, an advance, a transfer or a bon says; a transfer's other end and a bon open their own sheets. */
 function Marked({ t }: { t: Transaction }) {
@@ -253,7 +254,8 @@ function LinkForm({ t, link, onDone, onCancel }: {
   const { run, busy } = useApp();
   const initial = useDetail().transaction!.choices;
   const [was] = useState(link?.id ?? "");
-  const offer = link ? undefined : initial.proposed?.data[0];
+  const offers = link ? [] : initial.proposed?.data ?? [];
+  const offer = offers[0];
   const [initialPartner] = useState(link?.partner ?? offer?.partner ?? t.partner ?? "");
   const [partner, setPartner] = useState(initialPartner);
   const [partnerChoice, setPartnerChoice] = useState(s.partners.find((p) => p.id === initialPartner));
@@ -261,7 +263,7 @@ function LinkForm({ t, link, onDone, onCancel }: {
   const partners = useChoicePage(t.id, "partners", !q ? initial.partners : undefined, q);
   const restored = useSelected(t.id, initial.selected!);
   const [readySelection, setReadySelection] = useState(!initial.selected!.next_cursor);
-  const [chosen, setChosen] = useState(initial.selected!.data.length || offer?.partner !== initialPartner ? initial.selected!.data : [offer]);
+  const [chosen, setChosen] = useState(initial.selected!.data.length || offer?.partner !== initialPartner ? initial.selected!.data : offers);
   if (!readySelection && !restored.loading && !restored.error) {
     setChosen(restored.data[0]); setReadySelection(true);
   }
@@ -315,9 +317,10 @@ function LinkForm({ t, link, onDone, onCancel }: {
  * (MarkForm). A line the bank marks as its fee or interest starts on Fără document with that label; a card payment no
  * partner or invoice points to starts on its bon (a merchant abroad has no invoice to cover). */
 function Explain({ t, link, onDone, onCancel }: { t: Transaction; link?: TxLink; onDone: () => void; onCancel?: () => void }) {
-  const kept = t.proposal?.kind === "remembered" ? t.proposal.as : undefined;
-  const proposed = useDetail().transaction!.choices.proposed?.data[0];
-  const offer = link ? undefined : proposed;
+  const kept = t.proposal?.kind === "remembered" || t.proposal?.kind === "ai" ? t.proposal.as : undefined;
+  const proposed = useDetail().transaction!.choices.proposed?.data ?? [];
+  // one tap confirms one invoice; several (the AI's) start the form preselected, confirmed there
+  const offer = link || proposed.length !== 1 ? undefined : proposed[0];
   // a bon only explains a debit nothing explains yet (its matcher skips the user's explanations), so not when changing one
   const debit = t.direction === "debit";
   const labels: Partial<Record<Kind, string>> = !debit ? KIND_LABEL : link ? { ...KIND_LABEL, documents: DEBIT_LABEL.documents } : DEBIT_LABEL;
@@ -352,16 +355,28 @@ function Explain({ t, link, onDone, onCancel }: { t: Transaction; link?: TxLink;
   );
 }
 
-/** Bon / chitanță: one photo, uploaded as this debit's bon; it takes the debit's amount, day and card. */
+/** Bon / chitanță: one photo, uploaded as this debit's bon, or a file already uploaded with no data of its own yet
+ * (`tx-receipt`); either takes the debit's amount, day and card. */
 function Receipt({ t }: { t: Transaction }) {
   const up = useExpenseUpload(undefined, t.id);
-  if (!up) return null;
-  return <Actions>
-    {up.input}
-    <Button type="button" className="btn" disabled={up.busy} aria-busy={up.busy} onClick={up.pick}>
-      <I n="camera" />{up.busy ? "Se încarcă…" : "Încarcă bonul"}
-    </Button>
-  </Actions>;
+  const first = useDetail().transaction?.choices.receipts;
+  const unread = useChoicePage(t.id, "receipts", first, "", undefined, !first);
+  return <>
+    {up ? <Actions>
+      {up.input}
+      <Button type="button" className="btn" disabled={up.busy} aria-busy={up.busy} onClick={up.pick}>
+        <I n="camera" />{up.busy ? "Se încarcă…" : "Încarcă bonul"}
+      </Button>
+    </Actions> : null}
+    {unread.total ? <section aria-label="Bonuri încărcate fără date" className="grid gap-2">
+      <h3 className={sectionHeadingStyle}>Sau alege un bon deja încărcat</h3>
+      <PageNav page={unread} label="Bonuri încărcate" />
+      {unread.data.map((d) => <div key={d.id} className="flex flex-wrap items-center justify-between gap-2">
+        <L to={{ doc: d.id }}>{`Bon încărcat în ${lunaName(d.month)}`}</L>
+        <Act action="tx-receipt" body={{ tx: t.id, id: d.id }} label="Este bonul acestei plăți" cls="btn g" />
+      </div>)}
+    </section> : null}
+  </>;
 }
 
 /** Aștept factura: the debit stays to explain, last in De explicat, with an optional note; it can stop waiting. */
@@ -387,7 +402,7 @@ function MarkForm({ t, kind, link, onDone, onCancel }: {
   const s = useCompany();
   const { run, busy } = useApp();
   const [was] = useState(link?.id ?? "");
-  const kept = t.proposal?.kind === "remembered" && t.proposal.as.kind === kind ? t.proposal.as : undefined;
+  const kept = (t.proposal?.kind === "remembered" || t.proposal?.kind === "ai") && t.proposal.as.kind === kind ? t.proposal.as : undefined;
   const same = link?.kind === kind ? link : kept;
   const [label, setLabel] = useState<TransactionLabel | "">(kind === "label" ? (same?.reason as TransactionLabel | null) ?? t.bank_says ?? "" : "");
   const [text, setText] = useState(same?.note ?? "");
@@ -439,15 +454,15 @@ function keyFor(t: Transaction, kind: LinkKind, label: TransactionLabel | ""): M
 }
 
 /** Ține minte: the next transactions of this account, card or merchant get the same explanation on their own
- * (`auto`: Fără document, Avans) or as a proposal (an invoice: picking it stays a person's). */
+ * (`auto`: Fără document, Avans; also the ones still to explain) or as a proposal (an invoice: picking it stays a person's). */
 function Keep({ t, by, on, onChange, auto = false }: { t: Transaction; by: MemoryKey; on: boolean; onChange: (on: boolean) => void; auto?: boolean }) {
   return (
     <div className="my-5 border-0 border-t border-solid border-line pt-4">
       <Label className={transactionChoiceStyle} htmlFor="tx-keep">
         <Input id="tx-keep" type="checkbox" checked={on} onChange={(e) => onChange(e.target.checked)} aria-describedby="tx-keep-about" />
-        Salvează regula pentru tranzacțiile viitoare
+        Salvează regula
       </Label>
-      <p className={noteLeftStyle} id="tx-keep-about">{`${by === "name" && t.card && t.direction === "debit" ? "Comerciantul" : KEPT_BY[by]} ${t.remember[by]}: regula ${auto ? "se aplică automat tranzacțiilor" : "se propune la tranzacțiile"} următoare.`}</p>
+      <p className={noteLeftStyle} id="tx-keep-about">{`${by === "name" && t.card && t.direction === "debit" ? "Comerciantul" : KEPT_BY[by]} ${t.remember[by]}: regula ${auto ? "explică automat tranzacțiile următoare și pe cele încă neexplicate" : "se propune la tranzacțiile următoare"}.`}</p>
     </div>
   );
 }

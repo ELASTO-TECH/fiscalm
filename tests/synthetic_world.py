@@ -594,6 +594,8 @@ def build(L, home: Path, patch, now: datetime | None = None, *, integrations_con
             doc_date=f"{mo}-{day:02d}",
             amount=amount,
             currency="EUR",
+            # a statement holds every account of the firm's banks, so its month's pack is complete
+            accounts=[a.iban for a in companies.get(co, L=L).current_accounts] if kind == "statement" else None,
         )
         L.db.execute(
             "UPDATE documents SET created_at=? WHERE sha=?",
@@ -902,7 +904,14 @@ def _chart_document(L, home, co, account, first, xml):
     path = home / co / "chart-statements" / f"{first:%Y-%m}-{account.currency}.xml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(xml)
-    L.add_document(f"chart-{co}-{account.currency}-{first:%Y-%m}", co, first.strftime("%Y-%m"), "statement", str(path))
+    L.add_document(
+        f"chart-{co}-{account.currency}-{first:%Y-%m}",
+        co,
+        first.strftime("%Y-%m"),
+        "statement",
+        str(path),
+        accounts=[account.iban],
+    )
 
 
 def bank_history(L, patch, today: date) -> None:
@@ -1090,8 +1099,8 @@ def recurring_rules(L, patch, today: date, data: dict) -> None:
 
 def client_reminders(L, patch, today: date, data: dict) -> None:
     """Two overdue invoices issued in fiscalm, each a Sarcină: one with a reminder ready to prepare, one whose last attempt
-    left no answer (pending, sequence 1). The statements here are fakes, so their coverage is taken as complete and without
-    a credit from the client; everything else is fiscalm's own eligibility check."""
+    left no answer (pending, sequence 1). The statements here are fakes without recorded coverage, so each card warns that
+    they are missing, and hold no credit from the client; everything else is fiscalm's own eligibility check."""
     from fiscalm.invoicing import engine as i
     from fiscalm.mail import reminders
 
@@ -1111,7 +1120,7 @@ def client_reminders(L, patch, today: date, data: dict) -> None:
             ),
         )
         i.issue(L, iid, issue.isoformat(), company="NORD", version=1)
-    patch(reminders.StatementView, "credits", lambda self, since, today, max_age, locked=False: [])
+    patch(reminders.StatementView, "credits", lambda self, since, today: [])
     reminders.eligible(L, "NORD", "local-reminded", today)
 
 

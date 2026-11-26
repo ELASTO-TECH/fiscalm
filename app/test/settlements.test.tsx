@@ -9,8 +9,8 @@ const id = "a".repeat(32), tx = "b".repeat(20);
 export const settlement = (): Settlement => ({
   id, kind: "settlement", company: "NORD", source: "fan", report_key: "BATCH-1", reference: "BATCH-1", candidate: null,
   payer: { id: "synthetic-payer", name: "Curier Exemplu SRL" }, date: "2026-10-30", currency: "RON",
-  gross: "300.00", fee: "6.00", net: "294.00", status: "pending", error: "confirmation_required", failed_line: null,
-  tx_key: null, invoice_count: 2, confirmed_count: 1, auto_after: 3, can_confirm: true, human_confirmed: false,
+  gross: "300.00", fee: "6.00", net: "294.00", status: "pending", error: "statement_confirmation_required", failed_line: null,
+  tx_key: null, invoice_count: 2, can_confirm: true, human_confirmed: false,
   credit: { id: tx, date: "2026-10-31", amount: "294.00", currency: "RON" },
   sheet: { co: "NORD", set: id }, links: { transaction: null, issued: ["5001", "5002"] },
   lines: [{ position: 1, reference: "NRD 0042", awb: null, order: null, gross: "100.00", fee: "2.00", invoice: "5001", proved: false },
@@ -58,11 +58,26 @@ it("confirms exactly the displayed credit from the task card, the sheet one link
   renderApp({ state: () => json(s), onPost });
   const u = userEvent.setup();
   const card = (await screen.findByText("Decontare de confirmat")).closest(".task") as HTMLElement;
-  expect(card).toHaveTextContent("2 facturi, net 294,00 lei, de la Curier Exemplu SRL. Așteaptă confirmarea ta: intrare de 294,00 lei pe 31 oct. După încă 2 confirmări, următoarele decontări care trec verificările se confirmă automat.");
+  expect(card).toHaveTextContent("2 facturi, net 294,00 lei, de la Curier Exemplu SRL. Așteaptă confirmarea ta: intrare de 294,00 lei pe 31 oct.");
   expect(within(card).getByRole("link", { name: "Vezi decontarea" })).toHaveAttribute("href", `?co=NORD&tab=sarcini&set=${id}`);
   await u.click(within(card).getByRole("button", { name: "Confirmă decontarea" }));
   await waitFor(() => expect(onPost).toHaveBeenCalledTimes(1));
   expect(screen.getByRole("status")).toHaveTextContent("Decontare confirmată.");
+});
+
+it("lets a person confirm or withdraw a report that came by mail", async () => {
+  const s = fixture(); s.settlements = [{ ...settlement(), error: "mail_confirmation_required" }];
+  const onPost = vi.fn(({ body }: { body: unknown }) => {
+    expect(body).toEqual({ co: "NORD", id });
+    return json({ ok: true, message: "Raportul a fost șters.", next: null, done: null, state: s });
+  });
+  at(`?co=NORD&tab=sarcini&set=${id}`); renderApp({ state: () => json(s), onPost });
+  const dialog = await screen.findByRole("dialog", { busy: false });
+  expect(dialog).toHaveTextContent("Raportul a venit pe mail: verifică-l. Așteaptă confirmarea ta");
+  expect(within(dialog).getByRole("button", { name: "Confirmă decontarea" })).toBeEnabled();
+  await userEvent.click(within(dialog).getByRole("button", { name: "Șterge raportul" }));
+  await userEvent.click(within(await screen.findByRole("dialog", { name: "Ștergi raportul greșit? Facturile rămân neîncasate." })).getByRole("button", { name: "Șterge raportul" }));
+  await waitFor(() => expect(onPost).toHaveBeenCalledTimes(1));
 });
 
 it("allows verified local confirmation in shadow mode", async () => {
@@ -73,19 +88,12 @@ it("allows verified local confirmation in shadow mode", async () => {
   expect(onPost).not.toHaveBeenCalled();
 });
 
-it("counts nothing toward settling on its own for a payer without CUI or IBAN", async () => {
-  const s = fixture(); s.settlements = [{ ...settlement(), auto_after: null, confirmed_count: 5 }];
-  at(`?co=NORD&tab=sarcini&set=${id}`); renderApp({ state: () => json(s) });
-  const dialog = await screen.findByRole("dialog", { busy: false });
-  expect(dialog).not.toHaveTextContent("Încă");
-  expect(within(dialog).getByRole("button", { name: "Confirmă decontarea" })).toBeEnabled();
-});
-
 it.each([
   ["invoice_not_open_or_amount_differs", "Linia 2: factura nu este deschisă sau suma diferă."],
   ["awb_unknown", "Linia 2: AWB 1000000001 nu corespunde niciunei comenzi."],
   ["order_unknown", "Linia 2: comanda 77 nu există în comenzile firmei."],
   ["invoice_missing_or_ambiguous", "Linia 2: factura NRD 0043 nu există, apare de mai multe ori sau nu e a acestei comenzi."],
+  ["adjustment", "Linia 2: este o rambursare sau o ajustare. Verific-o manual."],
 ])("names the line's real cause (%s) and offers no confirmation without a verified credit", async (reason, text) => {
   const s = fixture(), r = settlement();
   r.lines[1] = { ...r.lines[1], awb: "1000000001", order: "77", invoice: null };

@@ -47,7 +47,7 @@ def named_file_summary() -> dict:
             "payment_count": INTEGER,
             "total": MONEY,
             "changed_since_download": BOOL,
-            "question": {"enum": ["missing", "downloads", "orphan", None]},
+            "question": {"enum": ["missing", "orphan", None]},
             "import_in": NULL_STRING,
             "confirmed_count": INTEGER,
             "skipped_count": INTEGER,
@@ -92,10 +92,12 @@ def schemas() -> dict:
         "paid_method": {"enum": ["bank", "card", "cash", "own", "other", None]},
         "total": MONEY,
         "credits": array(obj({"id": STRING, "number": STRING, "amount": MONEY, "date": NULL_STRING})),
+        "credit_question": array(obj({"id": STRING, "number": STRING, "amount": MONEY, "date": NULL_STRING})),
         "credit_note": BOOL,
         "covered": MONEY,
         "left": MONEY,
         "previous_iban_last4": STRINGS,
+        "accounts": array(obj({"index": INTEGER, "bank": STRING, "ending": STRING})),
         **bools("overdue", "can_approve", "can_mark_paid", "can_withdraw", "can_reopen", "proved"),
     }
     issued = {
@@ -175,16 +177,6 @@ def schemas() -> dict:
             "month's statement of the paying account; one a person added never waits for it.",
         },
     }
-    receipt_items = obj(
-        {
-            "lines": array(obj(strings("name", "unit", "quantity", "net", "vat"))),
-            **strings("total", "currency", "payment", "provenance", "state"),
-            "revision": INTEGER,
-            "verified": BOOL,
-            "proposal": NULL_STRING,
-            "payment_mismatch": BOOL,
-        }
-    )
     document = {
         "document_type": {
             "enum": ["invoice", "receipt"],
@@ -205,7 +197,6 @@ def schemas() -> dict:
         },
         "files": array(obj(strings("id", "type"))),
         "mail": {"anyOf": [obj({**strings("sender", "subject"), **nullable("date", "number")}), {"type": "null"}]},
-        "items": {"anyOf": [receipt_items, {"type": "null"}]},
     }
     bank = obj(
         {
@@ -267,7 +258,9 @@ def schemas() -> dict:
             **strings("id", "company", "name", "last"),
             **nullable("cui", "vat_id", "country", "client_id", "ro_vat_status"),
             "held": array(obj({"invoice": STRING, "amount": MONEY, "currency": STRING})),
-            "report_formats": array(obj({"signature": STRING, "source": STRING, "mapping": OBJECT, "courier": STRING})),
+            "report_formats": array(
+                obj({"signature": STRING, "source": STRING, "mapping": OBJECT, "courier": STRING, "senders": STRINGS})
+            ),
             "address": {"type": ["object", "null"]},
             "iban_last4": STRINGS,
             "roles": STRINGS,
@@ -296,8 +289,10 @@ def schemas() -> dict:
             "reason": {"enum": [None, *REASONS, *LABELS]},
             "difference": MONEY,
             "rule": {
-                "enum": [None, "saved", "bank"],
-                "description": "Made by no person: a saved rule (saved) or the bank's own fee or interest line (bank). "
+                "enum": [None, "saved", "bank", "transfer", "ai"],
+                "description": "Made by no person: a saved rule (saved), the bank's own fee or interest line (bank), or "
+                "both ends of a transfer between the firm's accounts, one naming the other's account (transfer), or a Fără "
+                "document label the AI integration was sure of on a line no open document fits by amount (ai). "
                 "Undoing or changing it leaves the transaction to people.",
             },
         }
@@ -334,6 +329,13 @@ def schemas() -> dict:
                     "kind": {"const": "remembered"},
                     "memory": STRING,
                     "as": obj({"kind": {"enum": list(KINDS)}, **nullable("partner", "reason", "note")}),
+                }
+            ),
+            obj(
+                {
+                    "kind": {"const": "ai", "description": "The AI integration's checked proposal; never applied."},
+                    "as": obj({"kind": {"enum": list(KINDS)}, **nullable("partner", "reason", "note")}),
+                    "invoices": {**STRINGS, "description": "Open invoices whose remaining total is the amount."},
                 }
             ),
             {"type": "null"},
@@ -521,7 +523,13 @@ def schemas() -> dict:
         "payable": OBJECT,
         "receivable": OBJECT,
         "invoices": array(
-            obj(received | {"payment_file": {"anyOf": [obj({"id": INTEGER, "name": STRING}), {"type": "null"}]}})
+            obj(
+                received
+                | {
+                    "payment_file": {"anyOf": [obj({"id": INTEGER, "name": STRING}), {"type": "null"}]},
+                    "amount_changed": BOOL,
+                }
+            )
         ),
         "firm_cards": STRINGS,
         "issued": array(obj(issued)),
@@ -547,18 +555,12 @@ def schemas() -> dict:
                         "anyOf": [obj({**strings("id", "date", "amount", "currency", "payer")}), {"type": "null"}]
                     },
                     "invoice_count": INTEGER,
-                    "confirmed_count": INTEGER,
                     "can_confirm": BOOL,
                     "human_confirmed": BOOL,
                     "payer": obj(strings("id", "name")),
                     **{n: MONEY for n in ("gross", "fee", "net")},
                     **nullable("error", "tx_key"),
                     "failed_line": {"type": ["integer", "null"]},
-                    "auto_after": {
-                        "type": ["integer", "null"],
-                        "description": "Person-confirmed settlements after which this payer's batches settle on their own; "
-                        "null when the payer has no CUI or IBAN, so every batch waits for a person.",
-                    },
                     "sheet": obj(strings("co", "set")),
                     "links": obj({"transaction": NULL_STRING, "issued": STRINGS}),
                     "lines": array(
@@ -639,7 +641,8 @@ def schemas() -> dict:
                 }
             )
         ),
-        "reminder_tasks": array(obj(strings("kind", "id", "label", "subject", "body"))),
+        # warning: null, or why to check the bank before sending (statements behind or missing; engine words).
+        "reminder_tasks": array(obj({**strings("kind", "id", "label", "subject", "body"), **nullable("warning")})),
         "partner_tasks": array(
             obj(
                 {
@@ -669,6 +672,18 @@ def schemas() -> dict:
             }
         ),
         **{k: array(OBJECT) for k in ("to_check", "news", "ambiguous", "bank_connections")},
+        "mail_proofs": array(
+            obj(
+                {
+                    **strings("id", "from", "subject", "date"),
+                    "candidates": array(OBJECT),
+                    "candidate_count": INTEGER,
+                }
+            )
+        )
+        | {
+            "description": "Payment mails the AI read as proof that settled nothing on their own: pick the invoice each paid, or none (mail-proof)."
+        },
         "unreadable": array(obj({"id": STRING, "listed": NULL_STRING})),
         "refused": array(
             obj(
@@ -791,6 +806,9 @@ def schemas() -> dict:
             "paid_detail": "card: the card's last four digits; own: who paid; other: the person's note; else null.",
             "covered": "Amount covered by explicit transaction links.",
             "credits": "Unambiguously linked received credit notes, scoped to this company, supplier and currency.",
+            "credit_question": "For a credit note naming no invoice: the invoices it could cancel (same supplier and "
+            "currency, exact opposite total, issued up to 14 days before), when several fit or SPV order or an archived invoice "
+            "leaves one in doubt. None is cancelled until credit-pick.",
             "credit_note": "An unmatched received credit note; never payable.",
             "left": "Remaining payable amount after credit notes and explicit links; zero when closed.",
         },
@@ -819,8 +837,9 @@ def schemas() -> dict:
             "logo (null without one) for invoicing/logo?co=&sha=.",
             "parts": "Per-company state under ALL. Money and identities never merge across firms.",
             "expenses": "Stored invoice/receipt links only. Ambiguous or contradictory links stay separate; no fuzzy matching here.",
-            "statement_hold": "Automatic payments held until last month's (month, YYYY-MM) statement of the paying "
-            "account is in: one task with the count; uploading the statement releases them. Null when none wait.",
+            "statement_hold": "Automatic payments held until the bank's record of the paying account covers every day of "
+            "last month (month, YYYY-MM): a statement, CSV exports or the open banking feed. One task with the count; "
+            "uploading the statement releases them. Null when none wait.",
         },
         "Action": {
             "message": "Romanian toast; clients should use error codes and capability flags, not parse this text.",
@@ -1051,6 +1070,7 @@ def schemas() -> dict:
         "selected": ref("TransactionInvoiceChoice"),
         "proposed": ref("TransactionInvoiceChoice"),
         "payments": obj({"id": STRING, "payment": ref("PaymentRow")}),
+        "receipts": ref("State/properties/documents/items"),
     }
     choice_pages = obj(
         {
@@ -1062,7 +1082,7 @@ def schemas() -> dict:
     out["TransactionChoices"] = obj({"pages": choice_pages})
     out["TransactionChoices"]["description"] = (
         "Current transaction-form choices, without linking or settling anything. Without collection, one full owner "
-        "projection returns initial partners, invoices, payments and selected pages; with collection, just that page. "
+        "projection returns initial partners, invoices, payments, selected and receipts pages; with collection, just that page. "
         "Each has an exact matching total and offset cursor (default 50, maximum 200). Only partners of the transaction's "
         "direction are offered, including a credit holder's complete exposure. Invoices retain the existing open/marked, "
         "SPV-ready, non-rejected, positive-left and account/original-currency filters; amounts restore this link's own "
@@ -1071,11 +1091,14 @@ def schemas() -> dict:
         "across pages/search. Invoices sort by date then case-folded number; partners by case-folded display name. "
         "Prepared payments retain held/in-file/lost/imported order, for debits with RON account or original currency only. "
         "Payment page IDs are keyed opaque identifiers; raw item_id is private and never appears in a cursor. "
+        "receipts lists, for a debit only, the firm's uploaded files with no amount yet (held, unsent, without an "
+        "invoice), in the documents order: the bon a person may name for it with tx-receipt. "
         "q is an accent-insensitive display-text substring (maximum 200 characters); it excludes private payment keys. "
         "partner applies only to invoices or the initial bundle; selected always uses the current link's partner. "
         "Only the initial bundle has proposed: at most the one open invoice of either partner whose number the bank details "
         "name, when the transaction equals its remaining amount in its currency (never for an explained transaction); "
-        "its partner is the default partner before the one the bank text points to. A proposal is never applied: the user confirms it. "
+        "else the open invoices of an AI proposal whose remaining amounts add up to the transaction in one currency. "
+        "Its partner is the default partner before the one the bank text points to. A proposal is never applied: the user confirms it. "
         "Reads are current, not a cross-request snapshot; replace choices after writes."
     )
     out["CoveredRow"] = {
@@ -1096,7 +1119,7 @@ def schemas() -> dict:
         {
             "state": {
                 **ref("StateSummary"),
-                "description": "Company shell with only the requested document and its purchase, receipt proposal, refusal and partner context populated.",
+                "description": "Company shell with only the requested document and its purchase, refusal and partner context populated.",
             },
             "related": obj(
                 {
@@ -1205,7 +1228,7 @@ def schemas() -> dict:
         "A null unit_price means a valid price "
         "per a positive base quantity other than one; a missing price or a malformed base quantity makes the "
         "document unavailable."
-        " Editable transactions also bundle four initial transaction-choices pages from the same owner projection; "
+        " Editable transactions also bundle five initial transaction-choices pages from the same owner projection; "
         "immutable transactions carry an empty choices object. Continue/filter through transaction-choices."
     )
     out["StateSummary"]["description"] = (
@@ -1258,22 +1281,6 @@ def schemas() -> dict:
                 {
                     "oneOf": [
                         obj({"kind": {"const": "missing"}, "version": STRING, "count": INTEGER}),
-                        obj(
-                            {
-                                "kind": {"const": "downloads"},
-                                "versions": array(
-                                    obj(
-                                        {
-                                            "id": INTEGER,
-                                            "version": STRING,
-                                            "at": STRING,
-                                            "count": INTEGER,
-                                            "total": MONEY,
-                                        }
-                                    )
-                                ),
-                            }
-                        ),
                         obj({"kind": {"const": "orphan"}, "name": STRING}),
                     ]
                 }

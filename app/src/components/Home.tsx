@@ -6,7 +6,7 @@ import { useCallback, useState, type ReactElement, type ReactNode } from "react"
 import { FIXTURES, actionRole, getCandidates, packFile, post } from "@/lib/api";
 import { cap, curOf, daysTo, dm, dmt, lei, luna, lunaName, nOf, weekday } from "@/lib/format";
 import { FirmStatementUpload } from "./Accounts";
-import { coName, isAll, parts, type Ambiguous, type PartnerTask, type PaymentFile, type ReminderTask, type Report, type State, type TaskEntry, type View } from "@/lib/types";
+import { coName, isAll, parts, type Ambiguous, type Invoice, type MailProof, type PartnerTask, type PaymentFile, type ReminderTask, type Report, type State, type TaskEntry, type View } from "@/lib/types";
 import { Company, useApp, useCan, useCompany } from "./context";
 import { anafExpiringSoon, findIssued, openInvoices, refusalReason, REPORT_LABEL } from "./derive";
 import { ANAF_PORTAL } from "./AnafConnect";
@@ -71,12 +71,12 @@ function PackTask({ r, title }: { r: Report; title: string }) {
   return <Task icon="paper-plane-tilt" title={title} body={body}><PackButtons month={r.month} /></Task>;
 }
 
-/** "Plată de lămurit": one button per invoice the debit fits (one when it fits only by the supplier's name, which the
- * answer then remembers); the user's pick settles it with the debit. */
+/** "Plată de lămurit": one button per invoice the debit may have paid (one when nothing on the statement proves it: only
+ * the supplier's name, or only the amount); the user's pick settles it with the debit. */
 export const ambiguousBody = (a: Ambiguous, today: string) =>
   `Plată de ${lei(a.amount)} ${curOf(a.currency)} pe ${dm(a.date, today)} către ${a.counterparty || a.description}. ${a.candidates.length > 1
     ? "Se potrivește cu mai multe facturi. Alege factura plătită."
-    : "Se potrivește cu o factură doar după numele furnizorului. Alege-o dacă este factura plătită."}`;
+    : "Extrasul nu dovedește factura plătită. Alege factura dacă aceasta este."}`;
 
 function CandidateButtons({ candidates, tx, today }: { candidates: Ambiguous["candidates"]; tx: string; today: string }) {
   return candidates.map((c) => <Act key={c.id} action="resolve-debit" body={{ tx, target: c.id }} cls="btn g"
@@ -98,6 +98,29 @@ export function ResolveBtns({ a, today }: { a: Ambiguous; today: string }) {
   </div>;
 }
 
+/** "Plată găsită în e-mail": a payment mail the AI read that proved nothing on its own. One button per invoice it may
+ * prove (the pick makes the mail its proof), and one to say it is no payment. */
+const mailProofBody = (m: MailProof, today: string) => `${m.from}, ${dm(m.date, today)}${m.subject ? `: „${m.subject}”` : ""}. ${tooMany(m)
+  ? `Se potrivește cu ${nOf(m.candidate_count, "o factură", "facturi")}. Marchează factura ca plătită din fișa ei.`
+  : m.candidate_count > 1 ? "Se potrivește cu mai multe facturi. Alege factura plătită." : "Confirmă dacă este plata facturii."}`;
+/** A task page carries at most 50 candidates: never a choice among some of them. */
+const tooMany = (m: MailProof) => m.candidate_count > m.candidates.length;
+
+/** What a choice says: the supplier too, and the invoice's id when two choices would still read the same. */
+function choiceLabel(c: MailProof["candidates"][number], all: MailProof["candidates"], today: string) {
+  const say = (x: typeof c) => `${x.supplier}, factura ${x.number}, ${lei(x.amount)} ${curOf(x.currency)}, din ${dm(x.date, today)}`;
+  return all.filter((x) => say(x) === say(c)).length > 1 ? `${say(c)} (nr. intern ${c.id})` : say(c);
+}
+
+function MailProofButtons({ m, today }: { m: MailProof; today: string }) {
+  return <div className="grid w-full gap-2">
+    {tooMany(m) ? null : m.candidates.map((c) => <Act key={c.id} action="mail-proof" body={{ id: m.id, target: c.id }} cls="btn g"
+      label={choiceLabel(c, m.candidates, today)}
+      confirm={{ text: `E-mailul devine dovada plății pentru ${choiceLabel(c, m.candidates, today)}?`, yes: "Confirmă plata" }} />)}
+    <Act action="mail-proof" body={{ id: m.id, target: "" }} cls="btn g" label="Nu este o plată" />
+  </div>;
+}
+
 function ReminderText({ t }: { t: ReminderTask }) {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
@@ -115,11 +138,27 @@ function ReminderText({ t }: { t: ReminderTask }) {
   </details>;
 }
 
+/** A credit note that names no invoice and fits several of the supplier's: the person says which one it cancels, or none
+ * (credit-pick); until then every one of them stays to pay. */
+function creditQuestionCard(s: State, r: Invoice, own: string | undefined): ReactElement {
+  const amount = `${lei(r.total.replace("-", ""))} ${curOf(r.currency)}`;
+  return <Task co={own} key={`${s.co}cq${r.id}`} icon="warning-circle" title={`${r.supplier}: ce factură anulează stornarea?`}
+    body={`Factura de stornare ${r.number}, de ${amount}, nu spune ce factură anulează. Până alegi, nu anulează niciuna.`}>
+    <div className="grid w-full gap-2">
+      {r.credit_question?.map((c) => <Act key={c.id} action="credit-pick" body={{ id: r.id, target: c.id }} cls="btn g"
+        label={`Factura ${c.number}, din ${dm(c.date, s.today)}`}
+        confirm={{ text: `Factura ${c.number} nu se mai plătește?`, yes: "Stornează factura" }} />)}
+      <Act action="credit-pick" body={{ id: r.id, target: "-" }} cls="btn g" label="Niciuna"
+        confirm={{ text: "Stornarea nu anulează niciuna dintre aceste facturi?", yes: "Niciuna" }} />
+    </div>
+  </Task>;
+}
+
 function reminderCard(s: State, t: ReminderTask, own: string | undefined): ReactElement {
   const r = findIssued(s, t.id)?.[0];
   return <Task co={own} key={`${s.co}rem${t.id}`} icon="envelope-simple"
     title={r ? `${r.client}: încasare restantă` : "Încasare restantă"} late
-    body="Copiază textul și trimite-l clientului din e-mail.">
+    body={t.warning ?? "Copiază textul și trimite-l clientului din e-mail."}>
     <ReminderText t={t} />
   </Task>;
 }
@@ -155,7 +194,6 @@ function fileCard(s: State, f: PaymentFile, own?: string): ReactElement {
   const where = f.import_in ?? "aplicația băncii";
   const [title, body, late] = f.question === "orphan" ? [`Un fișier necunoscut lângă ${f.name}`, `Verifică-l înainte să-l imporți în ${where}.`, true]
     : f.question === "missing" ? [`${f.name} a fost importat în ${where}?`, `Fișierul nu mai este în fiscalm.${s.live ? "" : " Răspunzi în Live."}`, false]
-    : f.question === "downloads" ? [`Ce versiune din ${f.name} ai importat în ${where}?`, "Descărcat de mai multe ori.", false]
     : f.downloaded_at && !f.changed_since_download ? [`${f.name} a fost importat în ${where}?`, `Descărcat pe ${dmt(f.downloaded_at, s.today)}.`, false]
     : [`${f.name}: de descărcat`, `${cap(nOf(f.payment_count, "o plată", "plăți"))}, ${lei(f.total)} ${curOf(f.currency)}. Se importă în ${where}.`, false];
   return <Task co={own} key={`${s.co}pf${f.id}`} icon={late ? "warning-circle" : "tray-arrow-down"} title={title} body={body} late={late}>
@@ -197,9 +235,16 @@ export function taskCards(s: State, { tag = false }: TaskOpts = {}): Card[] {
       </Task>,
     );
   }
-  for (const r of s.invoices.filter((r) => r.credits?.length && r.status === "linked" && r.payment_state !== "imported")) {
+  for (const m of s.mail_proofs ?? []) {
+    add(<Task co={own} key={`${co}mp${m.id}`} icon="envelope-simple" title="Plată găsită în e-mail" body={mailProofBody(m, today)}>
+      <MailProofButtons m={m} today={today} />
+    </Task>);
+  }
+  for (const r of s.invoices.filter((r) => r.credit_question?.length)) add(creditQuestionCard(s, r, own));
+  for (const r of s.invoices.filter((r) => r.amount_changed)) {
     add(<Task co={own} key={`${co}credit${r.id}`} icon="warning-circle" title="Plată în fișier, cu factură de stornare" late
-      body="Verifică plata în bancă. Fișierul nu se mai descarcă până lămurești situația.">
+      body={r.payment_state === "imported" ? "Suma importată în bancă nu mai este restul de plată. Verifică plata în bancă."
+        : "Verifică plata în bancă. Fișierul nu se mai descarcă până lămurești situația."}>
       <L to={{ inv: r.id }} className="btn g">Vezi factura</L>
     </Task>);
   }
@@ -249,6 +294,13 @@ export function taskCards(s: State, { tag = false }: TaskOpts = {}): Card[] {
     add(<Task co={own} key={`emag${task.id}`} icon="warning-circle" title={`Comandă eMAG ${task.external_id}`}
       body={task.reason === "return_review" ? "Verifică returul și, dacă e cazul, stornează factura inițială." : "Verifică comanda sau factura atașată."}>
       <L to={{ co, ord: `${co}:${task.id}` }} className="btn g">Vezi comanda</L>
+    </Task>);
+  }
+  for (const task of s.order_tasks ?? []) {
+    if (task.kind !== "order_vat_review" || !task.draft_id) continue;
+    add(<Task co={own} key={`${co}ordvat${task.order_id}`} icon="warning-circle" title="Comandă cu TVA 0% de verificat"
+      body="Confirmă sau schimbă tratamentul TVA al liniilor cu 0% din ciornă, apoi emite factura.">
+      <DraftLink co={co} id={task.draft_id} />
     </Task>);
   }
   for (const node of bankTasks(s, own)) add(node);

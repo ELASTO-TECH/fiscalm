@@ -37,7 +37,8 @@ STOP_GRACE = 10.0  # seconds a stopped step's process group gets after SIGTERM, 
 RELEASE_AND_PAYMENTS = ((10, ("update-check",), "release check"), (120, ("pay", "redate"), "pay redate"))
 EFACTURA = ((600, ("efactura", "sync"), "efactura sync"), (600, ("efactura", "sync-issued"), "efactura sync-issued"))
 # Only after every matcher ran (sync, EFACTURA): a rule explains what they left, never what a failed one would take.
-RULES = ((120, ("tx-rules",), "saved rules"),)
+# The AI integration then reads what the rules left (ai_explain), with ai.TIMEOUT for its one request.
+RULES = ((660, ("tx-rules",), "saved rules"),)
 SHOPS_AND_UPLOADS = (
     (600, ("shopify-sync",), "Shopify sync"),
     (600, ("invoice", "tick"), "invoice tick"),
@@ -124,7 +125,7 @@ def _sync_summary(out: str) -> str:
 
 def _judge_summary(out: str) -> str:
     d = json.loads(out)
-    counts = f"{d['invoices']} invoice(s) read, {len(d['suggestions'])} suggested for review"
+    counts = f"{d['invoices']} invoice(s) read, {len(d['settled'])} paid by mail, {len(d['review'])} for review"
     return "efactura judge: " + (d.get("error") or counts)
 
 
@@ -163,7 +164,7 @@ def _pipeline(run: Run, home: Path, today: date, check: float) -> int:
         return rc
     # Anonymous release reads are allowed in shadow; the company gate still owns startup.
     _steps(run, RELEASE_AND_PAYMENTS)
-    # Mail, statements, payment files, reports (read-only and local in shadow; Drive only live).
+    # Mail, statements, payment files (read-only and local in shadow; Drive only live).
     matched = _summarised(run, ("sync",), 900, _sync_summary)
     # ANAF received and issued invoices (read-only toward ANAF), then the AI reading of payment mails.
     if _steps(run, EFACTURA) and matched:

@@ -10,11 +10,12 @@ import stat
 from datetime import date, datetime
 from decimal import Decimal
 
-from fiscalm import companies
+from fiscalm import ai_extract, companies, docs, identity
 from fiscalm.efactura.inbox import Invoice, tax_token
-from fiscalm.ledger import Ledger, finance_home, is_live, now
+from fiscalm.ledger import Ledger, finance_home, now
 from fiscalm.mail import invoices as reader
 from fiscalm.payments.engine import pay_lock
+from fiscalm.pdftext import first_page_png
 
 
 class ReviewError(ValueError):
@@ -29,9 +30,9 @@ def fields(L: Ledger, raw: bytes, company: str) -> dict:
     if re.search(r"\bseria\b", doc.text, re.I):
         doc.number = ""  # separately printed series needs explicit review
     role = doc.roles.get(company, "") if doc.firms == [company] else ""
-    total = reader.pdf_total(L, doc, allow_ai=is_live()) if not doc.refused else None
+    total = doc.totals[0] if len(doc.totals) == 1 and not doc.refused else None
     name, cui = reader.pdf_party(doc.text, "buyer" if role == "seller" else "seller") if role else ("", "")
-    return {
+    rules = {
         "direction": {"seller": "issued", "buyer": "received"}.get(role, ""),
         "number": doc.number,
         "issue_date": doc.date,
@@ -41,6 +42,81 @@ def fields(L: Ledger, raw: bytes, company: str) -> dict:
         "party_tax_id": tax_token(cui),
         "reason": doc.refused,
     }
+    negative = any(Decimal(amount) < 0 for amount, _ in reader.totals(doc.text))
+    explicit = reader.PROFORMA.search(doc.text) or reader.CREDIT.search(doc.text) or negative  # whatever the title
+    if (valid(rules) and rules["party_tax_id"]) or doc.refused in ("proforma", "credit-note") or explicit:
+        return rules
+    return _with_ai(L, raw, company, doc, rules)
+
+
+TAX_SHAPE = re.compile(r"[1-9]\d{1,9}|[A-Z]{2}(?=[A-Z0-9]*\d)[A-Z0-9]{2,13}")  # a CUI, or a country-prefixed VAT id
+
+
+def _ai_fields(x: ai_extract.Extraction, company: str, text: str) -> tuple[dict, bool]:
+    """The history fields an AI reading gives, the firm's role decided by the engine's match of its CUI or name, and
+    whether a value it gave was dropped here (a contradiction, not a gap: the reading is then never certain)."""
+    way = "received" if x.buyer == company else "issued" if x.seller == company else ""
+    name, raw_tax = {"received": (x.seller_name, x.seller_tax_id), "issued": (x.buyer_name, x.buyer_tax_id)}.get(
+        way, ("", "")
+    )
+    tax = tax_token(raw_tax)
+    if not (TAX_SHAPE.fullmatch(tax) and identity.firm_id(tax)) or (text and not ai_extract.printed_id(tax, text)):
+        tax = ""  # not a firm's id, or one the document doesn't print whole
+    out = {
+        "direction": way,
+        "number": x.number if plausible_number(x.number) else "",
+        "issue_date": x.issue_date,
+        "total": x.total if x.currency else "",
+        "currency": x.currency if x.total else "",
+        "party_name": name if way else "",
+        "party_tax_id": tax,
+    }
+    given = {"number": x.number, "total": x.total, "currency": x.currency, "party_tax_id": raw_tax}
+    return out, any(v and not out[k] for k, v in given.items())
+
+
+def _certain(x: ai_extract.Extraction, company: str, doc: reader.Doc, rules: dict, ai: dict) -> bool:
+    """Files without review only a confident invoice reading that contradicts nothing the rules found or doubted."""
+    same = {"number": lambda a, b: number_key(a) == number_key(b), "party_name": lambda a, b: True}  # a name's spelling
+    agree = all(not rules[k] or not v or same.get(k, str.__eq__)(rules[k], v) for k, v in ai.items())
+    # A number the rules saw but couldn't pick (several, a separate series, an FGO export) stays the reviewer's choice.
+    seen = reader.numbers(doc.text) or re.search(r"\bseria\b", doc.text, re.I) or ARCHIVE_HEADER.search(doc.text)
+    total = (rules["total"] or ai["total"], rules["currency"] or ai["currency"])
+    if doc.totals:  # one of the rules' totals, in the currency they read
+        money = total in doc.totals
+    else:  # none the rules could read: printed positive with its currency, as for a mailed invoice
+        money = not doc.text.strip() or reader.printed_total(doc.text, total[0] or "0", total[1])
+    return all(
+        (
+            x.confident,
+            not x.rejected,
+            x.doc_type == "invoice",
+            doc.refused in ("", "unreadable"),  # a text without an invoice title stays a person's call
+            set(doc.firms) <= {company},  # another firm named on it: never decided by the AI
+            agree,
+            rules["number"] or not seen,
+            rules["issue_date"] or len(docs._dates(doc.text)) <= 1,  # dates the rules couldn't pick between
+            money,
+            rules["party_tax_id"] or ai["party_tax_id"],  # a partner id printed whole, as an import requires
+            company not in reader.disputed(doc.text, [company]),  # never its delivery address
+        )
+    )
+
+
+def _with_ai(L: Ledger, raw: bytes, company: str, doc: reader.Doc, rules: dict) -> dict:
+    """The rules' fields completed by one checked AI reading (fiscalm.ai_extract), in Sandbox and Live: reading a
+    local document has no outward effect. A certain reading files without review; anything else waits in review with
+    the AI's fields filled in."""
+    image = None
+    if not doc.text.strip():
+        png = first_page_png(raw) if raw.startswith(b"%PDF-") and ai_extract.ready(L) else None
+        image = ("image/png", png) if png else None
+    x = ai_extract.extract(L, [company], text=doc.text, image=image) if doc.text.strip() or image else None
+    if x is None:
+        return rules
+    ai, dropped = _ai_fields(x, company, doc.text)
+    certain = not dropped and _certain(x, company, doc, rules, ai)
+    return {k: rules[k] or v for k, v in ai.items()} | {"reason": "" if certain else "unsure"}
 
 
 def _archive_party(lines: list[str]) -> tuple[str, str] | None:
@@ -96,10 +172,13 @@ def _archive_total(text: str) -> tuple[str, str] | None:
     return f"{Decimal(value):.2f}", "RON" if currency.upper() == "LEI" else currency.upper()
 
 
+ARCHIVE_HEADER = re.compile(r"^\s*Furnizor\s{2,}Client\s*$", re.M)  # an FGO/SmartBill export's party columns
+
+
 def _archive_fields(text: str, co: companies.Company) -> dict:
     """Read the export's two explicit party columns, never a filename's claims."""
     lines = text.splitlines()
-    headers = [i for i, line in enumerate(lines) if re.fullmatch(r"\s*Furnizor\s{2,}Client\s*", line)]
+    headers = [i for i, line in enumerate(lines) if ARCHIVE_HEADER.fullmatch(line)]
     if len(headers) != 1:
         return {}
     i = headers[0]

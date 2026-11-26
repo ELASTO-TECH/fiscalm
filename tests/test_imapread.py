@@ -1,5 +1,7 @@
 """Read-only IMAP reading (fiscalm.mail.imap) against a fake IMAP server on localhost; synthetic mails only."""
 
+import email
+import email.policy
 import json
 from datetime import date, timedelta
 from email.message import EmailMessage
@@ -407,6 +409,116 @@ def test_texts_and_sent_are_read_only_searches(ledger, fake):
     assert [(m["key"], m["subject"], m["text"]) for m in got] == [
         ("imap:inv-1@cloud.example", "Plata primita", "Lumen 486,00 lei")
     ]
+    assert got[0]["complete"] and got[0]["firms"] == "all"  # fetched whole, dated: it may prove a payment
     account(ledger, fake, name="Second")  # the same mail seen through a second account is still one proof
     assert len(imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)) == 1
+    two = EmailMessage()  # a confirmation, and a second text that _text never reads: never complete
+    two["From"], two["Subject"], two["Date"] = "Lumen <shop@lumen.example>", "Plata", "Mon, 02 Nov 2026 10:00:00 +0000"
+    two["Message-ID"] = "<two@lumen.example>"
+    two.set_content("Lumen plata confirmata")
+    two.add_attachment("<p>Lumen: payment reversed</p>", subtype="html", disposition="inline")
+    fake.add(two.as_bytes(), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    assert {m["key"]: m["complete"] for m in got}["imap:two@lumen.example"] is False
+    alt = EmailMessage()  # one text in two forms, the HTML one saying more than the plain one _text reads
+    alt["From"], alt["Subject"], alt["Date"] = two["From"], "Plata", two["Date"]
+    alt["Message-ID"] = "<alt@lumen.example>"
+    alt.set_content("Lumen plata confirmata")
+    alt.add_alternative("<p>Lumen plata <b>confirmata</b></p><p>Payment reversed</p>", subtype="html")
+    fake.add(alt.as_bytes(), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    assert {m["key"]: m["complete"] for m in got}["imap:alt@lumen.example"] is False
+    rel = EmailMessage()  # the HTML alternative inside multipart/related (inline images): not read, not complete
+    rel["From"], rel["Subject"], rel["Date"] = two["From"], "Plata", two["Date"]
+    rel["Message-ID"] = "<rel@lumen.example>"
+    rel.set_content("Lumen plata confirmata")
+    rel.add_alternative("<p>Lumen plata confirmata</p>", subtype="html")
+    rel.get_payload()[1].add_related(b"GIF89a", maintype="image", subtype="gif", cid="<logo>")
+    fake.add(rel.as_bytes(), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    assert {m["key"]: m["complete"] for m in got}["imap:rel@lumen.example"] is False
+    fake.add(mail(sender="Lumen <shop@lumen.example>", subject="Plata", body="Lumen plata anulata"), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    first = next(m for m in got if m["key"] == "imap:inv-1@cloud.example")  # another mail under the same id
+    assert first["collides"] and not first["complete"]
+    for html in ("", "<p>Lumen plata confirmata</p><p>Payment reversed</p>"):  # one text, then the same + more HTML
+        copy = EmailMessage()
+        copy["From"], copy["Subject"], copy["Date"] = two["From"], "Plata", two["Date"]
+        copy["Message-ID"] = "<copy@lumen.example>"
+        copy.set_content("Lumen plata confirmata")
+        if html:
+            copy.add_alternative(html, subtype="html")
+        fake.add(copy.as_bytes(), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    copy_of = {m["key"]: m for m in got}["imap:copy@lumen.example"]
+    assert copy_of["collides"] and not copy_of["complete"]  # one copy says more: never proof, its review spoilt
+    for html in ("<p>Lumen plata confirmata</p><p>reversed</p>", "<p>Lumen plata confirmata</p><p>another payee</p>"):
+        both = EmailMessage()  # two incomplete copies, each saying something else in HTML
+        both["From"], both["Subject"], both["Date"] = two["From"], "Plata", two["Date"]
+        both["Message-ID"] = "<both@lumen.example>"
+        both.set_content("Lumen plata confirmata")
+        both.add_alternative(html, subtype="html")
+        fake.add(both.as_bytes(), TODAY)
+    got = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    assert {m["key"]: m.get("collides") for m in got}["imap:both@lumen.example"]
+    account(ledger, fake, name="Copy")  # the same mails through a second account: one each, the same flags
+    again = imapread.texts(ledger, TODAY - timedelta(days=7), TODAY, ["lumen"], connect=plain_connect)
+    assert [(m["key"], m["complete"]) for m in again] == [(m["key"], m["complete"]) for m in got]
     assert fake.verbs() <= ALLOWED
+
+
+@pytest.mark.parametrize(
+    "sender, results, domain",
+    [
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass (p=reject) header.from=pay.example"], "pay.example"),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=other.example"], ""),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=fail header.from=pay.example"], ""),
+        # a verdict under another service's name is the sender's to write
+        ("Pay <no@pay.example>", ["mx.forged.example; dmarc=pass header.from=pay.example"], ""),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=none", "x; dmarc=pass header.from=pay.example"], ""),
+        ("Pay <no@pay.example>", [], ""),
+        ("a@pay.example, b@pay.example", ["mx.own.example; dmarc=pass header.from=pay.example"], ""),
+        ("Pay <pay.example>", ["mx.own.example; dmarc=pass header.from=pay.example"], ""),
+        # the sender's own text inside the verdict: a quoted address or a comment never passes for DMARC
+        (
+            "Pay <no@pay.example>",
+            ['mx.own.example; spf=pass smtp.mailfrom="dmarc=pass header.from=pay.example"@x.example; dmarc=fail'],
+            "",
+        ),
+        ("Pay <no@pay.example>", ["mx.own.example; spf=pass (dmarc=pass header.from=pay.example); dmarc=none"], ""),
+        (
+            "Pay <no@pay.example>",
+            ["mx.own.example; spf=pass (a (b) ; dmarc=pass header.from=pay.example); dmarc=none"],
+            "",
+        ),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=other.example header.from=pay.example"], ""),
+        # escapes and quotes inside comments, semicolons in quoted values, legal spacing around "=" and "."
+        (
+            "Pay <no@pay.example>",
+            ["mx.own.example; spf=pass (a \\) ; dmarc=pass header.from=pay.example); dmarc=fail"],
+            "",
+        ),
+        ("Pay <no@pay.example>", ['mx.own.example; spf=pass smtp.mailfrom="x;dmarc=pass header.from=pay.example"'], ""),
+        (
+            "Pay <no@pay.example>",
+            ['mx.own.example; spf=pass (")"; dmarc=pass header.from=pay.example); dmarc=fail'],
+            "",
+        ),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=pay.example; dmarc = fail"], ""),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=pay.example header . from = x.example"], ""),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc = pass header . from = pay.example"], "pay.example"),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=pay.example; dmarc/1=fail"], ""),
+        ("Pay <no@pay.example>", ["mx.own.example; dm(x)arc=pass header.from=pay.example"], ""),
+        ("Pay <no@pay.example>", ["mx.own.example; dmarc=pass header.from=pay . example"], ""),
+        ("Pay <no@header.from>", ["mx.own.example; dmarc=pass header.from=header . from"], ""),
+    ],
+)
+def test_only_the_mailbox_providers_dmarc_pass_authenticates_a_sender(sender, results, domain):
+    msg = EmailMessage()
+    msg["From"] = sender
+    for r in results:
+        msg["Authentication-Results"] = r
+    assert imapread.authenticated_domain(msg, "mx.own.example") == domain
+    assert imapread.authenticated_domain(msg, "") == ""  # a provider fiscalm doesn't know: never authenticated
+    doubled = email.message_from_string(f"From: {sender}\n" + msg.as_string(), policy=email.policy.default)
+    assert imapread.authenticated_domain(doubled, "mx.own.example") == ""  # two From headers: whose mail is it?

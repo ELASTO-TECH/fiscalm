@@ -74,7 +74,7 @@ def find(full: dict, kind: str, identity: str) -> dict | None:
 
 
 def context(full: dict, shell: dict, kind: str, row: dict, offset: int, limit: int) -> dict:
-    """Keep the purchase pairing, receipt proposal, supplier refusal and partner capabilities intact."""
+    """Keep the purchase pairing, supplier refusal and partner capabilities intact."""
     if kind == "transaction":
         return transaction_rows.detail(full, shell, row, offset, limit)
     selected = {key: [] for key in ("invoices", "issued", "documents", "expenses", "partners", "refused", "to_check")}
@@ -115,8 +115,6 @@ def purchase_context(full: dict, kind: str, row: dict) -> dict:
     selected = {"expenses": expenses}
     for source, reference in (("invoices", "invoice"), ("documents", "document")):
         ids = {e[reference] for e in expenses}
-        if source == "invoices" and kind == "document":
-            ids.add((row.get("items") or {}).get("proposal"))
         if source == KINDS[kind]:
             ids.add(row["id"])
         selected[source] = [r for r in full[source] if r["id"] in ids]

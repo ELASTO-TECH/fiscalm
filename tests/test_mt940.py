@@ -141,7 +141,6 @@ def test_the_months_open_debits_are_named_by_their_words_never_the_booking_code(
     data = block(closing="C261031RON845,00", lines=lines) + b"\r\n" + block(iban=EUR, ccy="EUR", lines=[], ref="E")
     su.accept(ledger, "NORD", "bt", data.replace(b"C261031EUR750,00", b"C261031EUR1000,00"), "text/plain")
     view = api._month_view(ledger, "NORD", "2026-10")
-    assert SUPPLIER not in recon.build_report(ledger, "NORD", "2026-10")[0]  # the Markdown report masks it too
     assert [(r["who"], r["kind"]) for r in view["missing"]] == [
         ("Exemplu Imobiliare SRL", "transfer"),
         ("POS PLATA CARD BENZINARIA EXEMPLU " + statements.masked(SUPPLIER), "card"),
@@ -153,9 +152,10 @@ def test_an_mt940_is_imported_by_the_operator_and_through_an_upload(ledger, tmp_
     p = tmp_path / "extras.sta"
     p.write_bytes(complete_mt940())
     assert recon.ingest_file(ledger, p)["status"] == "refused"  # mail and links: never (unsigned, like CAMT)
-    with pytest.raises(su.Refused) as e:  # the upload must hold every account of its bank
-        su.accept(ledger, "NORD", "", block(), "text/plain")
-    assert e.value.message == su.incomplete(["EUR 0001"])
+    r = su.accept(ledger, "NORD", "", block(), "text/plain")  # one account of its bank: the other is still to come
+    assert (r["status"], r["message"]) == ("added", su.ADDED + su.still_missing(["EUR 0001"]))
+    ledger.db.execute("DELETE FROM documents")
+    ledger.db.commit()
     r = su.accept(ledger, "NORD", "bt", complete_mt940(), "text/plain")
     assert (r["status"], r["message"]) == ("added", su.ADDED)
     (doc,) = ledger.documents(kind="statement")

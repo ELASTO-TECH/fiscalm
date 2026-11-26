@@ -84,7 +84,7 @@ export function fixtureDetailData(view: View, kind: DetailKind, id: string, curs
   const reversals = issued?.reversed_by?.flatMap((local) => s.issued.filter((r) => r.local_id === local)) ?? [];
   const all = invoice?.credits ?? settlement?.lines ?? reversals, start = Number(cursor || 0);
   const related = { data: all.slice(start, start + 50), total: all.length, next_cursor: start + 50 < all.length ? String(start + 50) : null };
-  const invoices = [invoice ?? row?.invoice, ...(doc?.items?.proposal ? s.invoices.filter((r) => r.id === doc.items?.proposal) : [])].filter((r): r is Invoice => !!r);
+  const invoices = [invoice ?? row?.invoice].filter((r): r is Invoice => !!r);
   if (invoice) invoice.credits = related.data as NonNullable<Invoice["credits"]>;
   const selectedIssued = issued ? [issued, ...s.issued.filter((r) => !!issued.storno_of && r.local_id === issued.storno_of), ...reversals.slice(start, start + 50)]
     : order?.draft_id ? s.issued.filter((r) => r.local_id === order.draft_id).slice(0, 1) : [];
@@ -157,7 +157,8 @@ function fixtureOffered(s: State, t: Transaction, partner: string): TransactionI
     })].map((r, position) => ({ ...r, position }));
 }
 
-/** transaction_choices.proposed: the one open invoice the details name by number, at exactly what is left of it. */
+/** transaction_choices.proposed: the one open invoice the details name by number, at exactly what is left of it; else
+ * the AI integration's invoices that add up to it. */
 function fixtureProposed(s: State, t: Transaction): TransactionInvoiceChoice[] {
   const plain = (v: string) => (fold(v).match(/[0-9a-z]+/g) ?? []).join(" "), text = ` ${plain(t.details ?? "")} `;
   const named = (n: string) => { const p = plain(n);
@@ -168,8 +169,17 @@ function fixtureProposed(s: State, t: Transaction): TransactionInvoiceChoice[] {
     && named(r.number));
   const r = found.length === 1 ? found[0] : undefined, currency = r ? r.currency || "RON" : "";
   const paid = t.currency === currency ? t.amount : t.orig?.currency === currency ? t.orig.amount : null;
-  return r && paid && cents(paid) === cents(r.left) ? [{ id: r.id, number: r.number, date: r.issue_date, left: r.left, total: r.total,
-    currency, partner: r.partner, selected: false, position: 0 }] : [];
+  const pick = (r: typeof source[number], position: number) => ({ id: r.id, number: r.number, date: r.issue_date, left: r.left,
+    total: r.total, currency: r.currency || "RON", partner: r.partner, selected: false, position });
+  if (r && paid && cents(paid) === cents(r.left)) return [pick(r, 0)];
+  // else the AI integration's invoices, while all are open, in one currency, and what is left of them is the amount
+  const ai = !t.explanation && t.proposal?.kind === "ai" ? t.proposal : undefined, ids = ai?.invoices ?? [];
+  const rows = ids.flatMap((id) => source.filter((x) => x.id === id && (x.status === "open" || x.status === "marked") && cents(x.left) > 0n));
+  const cur = new Set(rows.map((x) => x.currency || "RON")), one = cur.size === 1 ? [...cur][0] : "";
+  const due = t.currency === one ? t.amount : t.orig?.currency === one ? t.orig.amount : null;
+  const sum = rows.reduce((n, x) => n + cents(x.left), 0n);
+  const theirs = rows.every((x) => x.partner === ai?.as.partner);
+  return ids.length && rows.length === ids.length && theirs && due && sum === cents(due.replace("-", "")) ? rows.map(pick) : [];
 }
 
 const textOrder = (a: string, b: string) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0;
@@ -186,8 +196,9 @@ export function fixtureTransactionChoicesData(view: View, query: TransactionChoi
       .sort((a, b) => textOrder(a.name || `CUI ${a.cui}`, b.name || `CUI ${b.cui}`)).map((p) => ({ ...p, held: [], report_formats: [] })),
     invoices: offered, selected, proposed, payments: credit || !lei ? []
       : payments.map((payment, i) => ({ id: `fixture-payment-${s.co}-${i}`, payment })).filter((r) => query.q?.trim() || cents(r.payment.amount) === cents(lei)),
+    receipts: credit ? [] : s.documents.filter((d) => d.held && d.amount === null && !d.sent && !d.invoice),
   };
-  const names = query.collection ? [query.collection] : ["proposed", "partners", "invoices", "payments", "selected"] as const;
+  const names = query.collection ? [query.collection] : ["proposed", "partners", "invoices", "payments", "selected", "receipts"] as const;
   const q = fold((query.q ?? "").trim()), start = Number(query.cursor || 0), take = Number(query.limit ?? 50);
   return { pages: Object.fromEntries(names.map((name) => {
     const rows = records[name].filter((r) => !q || fold(name === "partners" ? `${(r as Partner).name || `CUI ${(r as Partner).cui}`} ${(r as Partner).cui || ""}`
@@ -540,9 +551,9 @@ export async function fixtureCompanies(): Promise<CompaniesConfig> {
       palette: c.palette, has_data: true, has_ron_account: i === 0, iban_last4: i === 0 ? "0001" : "",
       aliases: i === 0 ? ["Atelier Nord"] : [], alias_suggestion: i === 0 ? "" : "Studio 9",
       accounts: i === 0 ? [
-        { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-09" },
-        { id: "acc2", iban_last4: "0001", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-09" },
-        { id: "acc3", iban_last4: "0007", currency: "EUR", bank: "ing", bank_name: "ING Bank", pays: false, retired: null, statement_senders: [], last_statement: null },
+        { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-09" },
+        { id: "acc2", iban_last4: "0001", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-09" },
+        { id: "acc3", iban_last4: "0007", currency: "EUR", bank: "ing", bank_name: "ING Bank", pays: false, retired: null, opened: null, statement_senders: [], last_statement: null },
       ] : [],
       banks: i === 0 ? [{ bank: "bt", name: "Banca Transilvania", connect: "ready" as const, statement_password: true, connection: { state: "expiring" as const,
         valid_until: "2026-11-06", last_read: "2026-10-26", accounts: ["0001"], error: null },

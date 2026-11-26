@@ -180,7 +180,7 @@ describe("Tranzacții", () => {
     waits.proposal = { kind: "settlement", settlement: "NORD:set2" };
     s.settlements = [{ id: "NORD:set1", kind: "settlement", company: "NORD", source: "csv", report_key: "R1", reference: "R1", candidate: null,
       payer: { id: "fan", name: "Curier Exemplu" }, date: "2026-09-14", currency: "RON", gross: "3010.00", fee: "10.00",
-      net: "3000.00", credit: null, invoice_count: 2, confirmed_count: 3, auto_after: 3, can_confirm: false, human_confirmed: true,
+      net: "3000.00", credit: null, invoice_count: 2, can_confirm: false, human_confirmed: true,
       status: "collected", error: null, failed_line: null, tx_key: paid.id, sheet: { co: "NORD", set: "NORD:set1" },
       links: { transaction: paid.id, issued: ["5004", "5002"] }, lines: [] }];
     at("?co=NORD&tab=tranzactii&f=in");
@@ -222,7 +222,7 @@ describe("Tranzacții", () => {
     let fail = true;
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], accounts: [
-      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
     renderTransactions({ companies: () => (fail ? new Response("", { status: 500 }) : json(cfg)) });
     expect(await screen.findByText("Conturile nu au putut fi încărcate.")).toBeInTheDocument();
     expect(await rows()).toEqual(DE_EXPLICAT); // the list doesn't wait on them
@@ -237,7 +237,7 @@ describe("Tranzacții", () => {
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], banks: [{ bank: "bt", name: "Banca Transilvania", connect: "ready",
       connection: { state: "expiring", valid_until: "2026-11-06", last_read: "2026-10-26", accounts: ["0001"], error: null } }], accounts: [
-      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-10" }] };
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-10" }] };
     const { p } = await page({ companies: () => json(cfg), state: () => json({ ...fixture(), can_manage_companies: false }) });
     const accounts = within(p.getByRole("region", { name: "Conturi" }));
     expect(accounts.getByText("Banca Transilvania, pentru plăți, citit pe 26 oct")).toBeInTheDocument();
@@ -265,10 +265,10 @@ describe("Tranzacții", () => {
     at("?co=NORD&tab=tranzactii");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], has_ron_account: true, iban_last4: "0001", accounts: [
-      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-10" },
-      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null },
-      { id: "acc3", iban_last4: "0009", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: "2026-09-30", statement_senders: [], last_statement: "2026-09" },
-      { id: "acc4", iban_last4: "0007", currency: "EUR", bank: "", bank_name: "", pays: false, retired: null, statement_senders: [], last_statement: null }] };
+      { id: "acc1", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: "2026-10" },
+      { id: "acc2", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null },
+      { id: "acc3", iban_last4: "0009", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: "2026-09-30", opened: null, statement_senders: [], last_statement: "2026-09" },
+      { id: "acc4", iban_last4: "0007", currency: "EUR", bank: "", bank_name: "", pays: false, retired: null, opened: null, statement_senders: [], last_statement: null }] };
     const { api, p } = await page({ companies: () => json(cfg), onPost: () => answer({ key: "NORD", currency: "EUR", bank: "ing", iban_last4: "0007" }, "Contul a fost adăugat.") });
     const accounts = p.getByRole("region", { name: "Conturi" });
     expect([...accounts.querySelectorAll(".row")].map((r) => r.textContent)).toEqual([
@@ -283,7 +283,7 @@ describe("Tranzacții", () => {
     at("?co=NORD&tab=tranzactii");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], has_ron_account: true, iban_last4: "0001", accounts: [
-      { id: "acc5", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
+      { id: "acc5", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
     const { api, p } = await page({ companies: () => json(cfg), onPost: () => json({ ok: true, message: "Extrasul a fost încărcat.", next: null, done: { status: "added" }, state: null }) });
     const input = (await openUpload("Încarcă extras"))!;
     const file = new File(["<Document/>"], "extras.xml", { type: "text/xml" });
@@ -300,7 +300,7 @@ describe("Tranzacții", () => {
     at("?co=NORD&tab=tranzactii");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], accounts: [
-      { id: "acc8", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: [], last_statement: null }] };
+      { id: "acc8", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null }] };
     const { api } = await page({ companies: () => json(cfg), onPost: () => json({ ok: true, message: "Extrasul a fost încărcat.", next: null, done: { status: "added" }, state: null }) });
     const input = (await openUpload("Încarcă extras"))!;
     const pdf = (name: string) => new File(["%PDF-1.7"], name, { type: "application/pdf" });
@@ -319,7 +319,7 @@ describe("Tranzacții", () => {
     const why = "Extrasul trebuie să cuprindă toată luna (1–30 noiembrie). Încarcă extrasul lunii încheiate.";
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], accounts: [
-      { id: "acc7", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: [], last_statement: null }] };
+      { id: "acc7", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: [], last_statement: null }] };
     let n = 0;
     const { api, p } = await page({ companies: () => json(cfg), onPost: () => (n++ ? json({ ok: true, message: "Extrasul a fost încărcat.", next: null, done: { status: "added" }, state: null })
       : json({ ok: false, message: why, next: null, done: null, state: null }, 422)) });
@@ -337,7 +337,7 @@ describe("Tranzacții", () => {
     at("?co=NORD&tab=tranzactii");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], accounts: [
-      { id: "acc6", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
+      { id: "acc6", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
     const { api } = await page({ companies: () => json(cfg) });
     const input = (await openUpload("Încarcă extras"))!;
     await userEvent.upload(input, new File(["x"], "poza.png", { type: "image/png" }), { applyAccept: false });
@@ -349,8 +349,8 @@ describe("Tranzacții", () => {
     at("?co=NORD&tab=tranzactii");
     const cfg = config();
     cfg.companies[0] = { ...cfg.companies[0], accounts: [
-      { id: "a-ron", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null },
-      { id: "a-eur", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
+      { id: "a-ron", iban_last4: "0001", currency: "RON", bank: "bt", bank_name: "Banca Transilvania", pays: true, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null },
+      { id: "a-eur", iban_last4: "0002", currency: "EUR", bank: "bt", bank_name: "Banca Transilvania", pays: false, retired: null, opened: null, statement_senders: ["EmailExtrase@btrl.ro"], last_statement: null }] };
     let uploads = 0;
     const { api, p } = await page({ companies: () => json(cfg), onPost: (c: Call) => {
       if (c.url.includes("statement-upload")) {
@@ -399,7 +399,7 @@ describe("Tranzacții", () => {
 });
 
 const PREVIEW = { columns: ["AWB", "Factura", "Ramburs", "Comision", "Data plata"], rows: [["1000000001", "TEST-1", "100.00", "2.00", "2026-10-25"]],
-  known: [], guess: { reference: "Factura", gross: "Ramburs", fee: "Comision" }, date: "2026-10-25", orders: false, payer: "", source: "", currency: "",
+  known: [], guess: { reference: "Factura", gross: "Ramburs", fee: "Comision" }, date: "2026-10-25", orders: false, payer: "", source: "", currency: "", proposed: "" as const,
   currencies: ["RON", "EUR"], payers: [{ source: "fan", name: "Curier Exemplu SRL", cui: "12345678", currency: "EUR", courier: "" }] };
 
 it("reads the report when the file is chosen and opens with the guessed columns, only the rest to choose", async () => {
@@ -425,6 +425,41 @@ it("reads the report when the file is chosen and opens with the guessed columns,
   expect(Object.fromEntries(new URL(api.posts()[1].url, "http://example.test").searchParams)).toEqual({ co: "NORD", report: "1", date: "2026-10-25",
     format: JSON.stringify({ source: "fan", name: "Curier Exemplu SRL", cui: "12345678", currency: "EUR", mapping: PREVIEW.guess }) });
   expect(api.posts()[1].raw).toBe(file);
+});
+
+it.each([["preset", "Coloanele sunt recunoscute după antet."], ["ai", "Coloanele sunt propuse de AI."]] as const)(
+  "says the %s proposed the columns, for the person to check", async (proposed, text) => {
+    at("?co=NORD&tab=tranzactii");
+    const cfg = config();
+    cfg.companies[0].accounts = [];
+    await page({ companies: () => json(cfg), onPost: () => json({ ok: false, message: "", state: null, report: { ...PREVIEW, proposed, source: "fan" } }) });
+    await openUpload("Încarcă raport de decontare");
+    await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["x"], "report.csv", { type: "text/csv" }));
+    expect(await screen.findByText(`${text} Verifică-le înainte de încărcare.`)).toBeVisible();
+    expect(screen.getByLabelText("Curier sau procesator")).toHaveValue("fan");
+    // PREVIEW has one saved FAN payer: a proposed source never fills it in; the person names who sent the file.
+    expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue("");
+    expect(screen.getByLabelText("CUI-ul partenerului (opțional)")).toHaveValue("");
+  });
+
+it("starts the next file with no payer from the previous one", async () => {
+  at("?co=NORD&tab=tranzactii");
+  const cfg = config();
+  cfg.companies[0].accounts = [];
+  const previews = [PREVIEW, { ...PREVIEW, proposed: "preset" as const, source: "fan" }, { ...PREVIEW, payers: [] }];
+  await page({ companies: () => json(cfg), onPost: () => json({ ok: false, message: "", state: null, report: previews.shift() }) });
+  await openUpload("Încarcă raport de decontare");
+  await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["a"], "a.csv", { type: "text/csv" }));
+  await choose(await screen.findByLabelText("Curier sau procesator"), "fan"); // fills the saved FAN payer
+  expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue("Curier Exemplu SRL");
+  await userEvent.click(screen.getByRole("button", { name: "Alege alt fișier" }));
+  await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["b"], "b.csv", { type: "text/csv" }));
+  await waitFor(() => expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue(""));
+  expect(screen.getByLabelText("CUI-ul partenerului (opțional)")).toHaveValue("");
+  await userEvent.type(screen.getByLabelText("Numele partenerului din extras"), "Alt Curier");
+  await userEvent.click(screen.getByRole("button", { name: "Alege alt fișier" })); // an ordinary preview, no saved payer
+  await userEvent.upload(screen.getByLabelText("Raport de decontare"), new File(["c"], "c.csv", { type: "text/csv" }));
+  await waitFor(() => expect(screen.getByLabelText("Numele partenerului din extras")).toHaveValue(""));
 });
 
 it("clears a saved payer's CUI when another courier is chosen, keeping the name the person typed", async () => {

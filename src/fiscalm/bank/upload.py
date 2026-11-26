@@ -4,7 +4,8 @@ The bytes are untrusted: the type is read from the content, not the name; the fi
 path fiscalm names; a BT PDF is opened only with that company's password; a CAMT must name that company's accounts;
 when a bank is given every account of the statement must be at that bank. Anything else is refused before a byte is
 stored. What is accepted goes through the same import as a statement from mail or the command line (overlap,
-completeness, matching), so an upload is never a way around a rule."""
+continuity, matching), so an upload is never a way around a rule. A statement that leaves out accounts of its bank is
+imported, and the answer names those still to come."""
 
 from __future__ import annotations
 
@@ -44,11 +45,7 @@ NEEDS_COLUMNS = "E primul CSV al acestui cont: trebuie alese coloanele pentru da
 TOO_BIG = "Fișierul este prea mare pentru un extras."
 WRONG_COMPANY = "Extrasul nu este al acestei firme sau parola extraselor nu îl deschide."
 WRONG_BANK = "Extrasul are conturi de la altă bancă decât cea aleasă."
-INCOMPLETE = (
-    "Extrasul nu cuprinde {accounts}. Încarcă extrasul cu toate conturile firmei de la această bancă "
-    "sau, împreună, extrasele fiecărui cont. "
-    "Dacă firma a deschis contul după luna extrasului, administratorul trece luna deschiderii din linia de comandă."
-)
+STILL_MISSING = " Pentru aceeași lună mai lipsește extrasul pentru {accounts}."
 NOT_READ = "Extrasul nu a putut fi citit. Verifică fișierul, apoi încearcă din nou."
 NO_PASSWORD = "Parola extraselor acestei firme lipsește sau nu poate fi citită. Se adaugă în Setări › Firme › Bănci."
 NOT_SAVED = "Extrasul nu a putut fi încărcat: {why}"
@@ -148,11 +145,14 @@ KNOWN = (
     ("several months", "Extrasul cuprinde mai multe luni. Încarcă din bancă extrasul fiecărei luni."),
     ("files of different months", "Fișierele sunt din luni diferite. Încarcă împreună extrasele unei singure luni."),
     ("appears twice", "Un cont apare de două ori pentru aceleași zile. Încarcă fiecare extras o singură dată."),
+    (
+        "account currency differs",
+        "Un cont din extras are altă monedă decât cea trecută la firmă. Verifică extrasul și contul.",
+    ),
     ("every file must name one period", RESTATE),
     ("do not chain", "Soldurile extraselor nu se leagă: lipsește un extras. Încarcă toate extrasele lunii."),
     ("Overlapping statement", "Extrasul se suprapune cu unul încărcat deja pentru același cont."),
     ("already imported", "Extrasul pentru acest cont și această lună este deja încărcat."),
-    ("missing configured accounts", "Extrasul nu cuprinde toate conturile firmei de la această bancă."),
     ("Cannot read a stored statement", STORED),
     ("Cannot tell which accounts", STORED),
     ("Cannot verify adjacent", STORED),
@@ -193,10 +193,12 @@ KNOWN = (
 OWN = (WRONG_BANK, WRONG_COMPANY, OTHER_ACCOUNT, NOT_READ)
 
 
-def incomplete(accounts: list[str]) -> str:
-    """INCOMPLETE naming each missing account ("EUR 0001") by currency and last four characters."""
+def still_missing(accounts: list[str]) -> str:
+    """STILL_MISSING naming each account ("EUR 0001") by currency and last four characters; "" when none."""
+    if not accounts:
+        return ""
     named = ", ".join(a.replace(" ", " ••••") for a in accounts)
-    return INCOMPLETE.format(accounts=("contul " if len(accounts) == 1 else "conturile ") + named)
+    return STILL_MISSING.format(accounts=("contul " if len(accounts) == 1 else "conturile ") + named)
 
 
 def _say(errors) -> str:
@@ -211,8 +213,6 @@ def _refusal(e: statements.StatementError) -> str:
     if isinstance(e, statements.PartialMonth):
         last = calendar.monthrange(e.month.year, e.month.month)[1]
         return PARTIAL.format(last=last, month=LUNI[e.month.month - 1])
-    if isinstance(e, statements.MissingAccounts):
-        return incomplete(e.accounts)
     return _say([str(e)])
 
 
@@ -309,17 +309,19 @@ def _pdfs(L: Ledger, company: str, bank: str, staging: Path, paths: list[Path]) 
         errors = result.get("errors") or []
         raise Refused(409, _say(errors) if _say(errors) != NOT_READ else NO_PASSWORD)
     if result["status"] == "refused":
-        missing = result.get("missing")  # the engine's own list, never words read back from an error text
         if result.get("partial"):  # the engine's own month
             raise Refused(422, _refusal(statements.PartialMonth("PDF", date.fromisoformat(result["partial"]))))
-        raise Refused(422, incomplete(missing) if missing else _say(result.get("errors")))
+        raise Refused(422, _say(result.get("errors")))
     return result
 
 
 def _answer(result: dict, company: str) -> dict:
     if result.get("company") != company:  # defence in depth: the import named another company
         raise Refused(422, WRONG_COMPANY)
-    result["message"] = DUPLICATE if result["status"] == "duplicate" else ADDED
+    # the engine's own list of accounts, never words read back from the file
+    result["message"] = (DUPLICATE if result["status"] == "duplicate" else ADDED) + still_missing(
+        result.get("missing", [])
+    )
     result.pop("file", None)
     result.pop("unprotected", None)  # no server path leaves fiscalm
     return result

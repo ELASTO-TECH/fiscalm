@@ -10,7 +10,7 @@ import { cap, cents, curOf, fromCents, lei, nOf } from "@/lib/format";
 import type { Co, Invoice, PaymentFile, State } from "@/lib/types";
 import { Actions, Button, Input, Label } from "./Controls";
 import { useApp, useCan } from "./context";
-import { notInFile } from "./derive";
+import { maskedIban, notInFile } from "./derive";
 import { CloseX, Sheet, SheetHead } from "./Sheets";
 
 /** The longest name the engine keeps (its CHECK on payment_files.name). */
@@ -41,6 +41,11 @@ export function AddToFile({ s, invoices, left = [], onDone }: { s: State; invoic
   const [choice, setChoice] = useState<number | "new">(files[0]?.id ?? "new");
   const [name, setName] = useState(s.payment_file_defaults.find((d) => d.co === s.co)?.name ?? "");
   const [sending, setSending] = useState(false);
+  // An invoice listing several IBANs that no evidence decides: the person picks the account; fiscalm remembers it once paid.
+  const [picks, setPicks] = useState<Record<string, number>>({});
+  const asked = invoices.filter((r) => r.accounts.length > 0);
+  // A pick must be one of the accounts offered now: a refresh that narrows the list asks again.
+  const unpicked = asked.some((r) => !r.accounts.some((a) => a.index === picks[r.id]));
   // A file chosen and then imported or deleted elsewhere is no longer offered: nothing is chosen until the person picks again.
   const chosen = files.find((f) => f.id === choice);
   const fresh = choice === "new" || !files.length;
@@ -50,9 +55,15 @@ export function AddToFile({ s, invoices, left = [], onDone }: { s: State; invoic
     : `${cap(nOf(invoices.length, "o factură", "facturi"))}, ${totalOf(invoices)}`;
   const send = async () => {
     const invoice_ids = invoices.map((r) => r.id);
-    if (lost) return;
-    const body: FileAction = fresh || !chosen ? { action: "payment_file_create", co: s.co as Co, name: name.trim(), invoice_ids }
-      : { action: "payment_file_add", file_id: chosen.id, invoice_ids };
+    if (lost || unpicked) return;
+    // Every pick the person made is sent, also for an invoice a refresh no longer asks about: what they chose is paid,
+    // never a default that arrived while the sheet was open (the engine still pays only an account the invoice lists).
+    const chosenAccounts = invoices.filter((r) => picks[r.id] !== undefined).map((r) => [r.id, picks[r.id]]);
+    const accounts = chosenAccounts.length ? { accounts: Object.fromEntries(chosenAccounts) } : {};
+    // The amount shown for each invoice goes along: a credit note arriving meanwhile changes it, and the engine refuses.
+    const shown = { amounts: Object.fromEntries(invoices.map((r) => [r.id, r.left])) };
+    const body: FileAction = fresh || !chosen ? { action: "payment_file_create", co: s.co as Co, name: name.trim(), invoice_ids, ...accounts, ...shown }
+      : { action: "payment_file_add", file_id: chosen.id, invoice_ids, ...accounts, ...shown };
     setSending(true);
     const r = await run(s.co as Co, () => postFile(body), undefined, () => false);
     setSending(false);
@@ -65,7 +76,7 @@ export function AddToFile({ s, invoices, left = [], onDone }: { s: State; invoic
       data-autofocus={files.length ? undefined : true} />
   </>;
   return createPortal(
-    <Sheet onClose={close} label={title} cls="ask" busy={sending}>
+    <Sheet onClose={close} label={title} cls={asked.length ? "ask tall" : "ask"} busy={sending}>
       <CloseX onClose={close} />
       <SheetHead title={title} sub={sum} />
       <fieldset className="m-0 border-0 p-0" disabled={sending}>
@@ -87,13 +98,23 @@ export function AddToFile({ s, invoices, left = [], onDone }: { s: State; invoic
           {choice === "new" ? nameField : null}
         </> : nameField}
       </fieldset>
+      {asked.map((r) => <fieldset key={r.id} className="m-0 mt-4 border-0 p-0" disabled={sending}>
+        <legend className="mb-2 text-sm font-semibold">Contul în care plătești {r.supplier}, nr. {r.number}</legend>
+        <div className="overflow-hidden rounded-card border border-solid border-line">
+          {r.accounts.map((a) => <label key={a.index} className={optionStyle}>
+            <Input type="radio" name={`${ids}-acct-${r.id}`} className="mt-1" checked={picks[r.id] === a.index}
+              onChange={() => setPicks((p) => ({ ...p, [r.id]: a.index }))} />
+            <span className="min-w-0">{a.bank} {maskedIban(a.ending)}</span>
+          </label>)}
+        </div>
+      </fieldset>)}
       {left.length ? <div className="mt-3 text-sm text-muted">
         <p className="m-0">{cap(nOf(left.length, "o factură aleasă nu intră", "facturi alese nu intră"))} în fișier:</p>
         <ul className="m-0 mt-1 pl-5">{left.map((r) => <li key={r.id}>{r.supplier}, nr. {r.number}: {notInFile(s, r)}</li>)}</ul>
       </div> : null}
       {chosen?.downloaded_at ? <p className="mt-3 mb-0 text-sm text-muted">Fișierul a fost descărcat. După ce adaugi facturile, descarcă-l din nou.</p> : null}
       <Actions>
-        <Button type="button" className="btn w-full!" disabled={sending || busy || lost || (fresh && !name.trim())} aria-busy={sending || undefined}
+        <Button type="button" className="btn w-full!" disabled={sending || busy || lost || unpicked || (fresh && !name.trim())} aria-busy={sending || undefined}
           onClick={() => void send()}>Pune în fișier</Button>
       </Actions>
     </Sheet>,

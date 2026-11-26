@@ -19,7 +19,7 @@ from pathlib import Path
 
 from fiscalm import companies
 from fiscalm.api.receipts import directory
-from fiscalm.bank import banking_days, statements
+from fiscalm.bank import banking_days, coverage, statements
 from fiscalm.bank.camt import MAX_XML, parse_camt
 from fiscalm.ledger import Ledger, finance_home
 from fiscalm.pdftext import pdf_text
@@ -73,6 +73,7 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
     before accounts were recorded is read to learn its accounts; if it can't be read, nothing is imported."""
     if not st.period_start or not st.period_end:
         raise statements.StatementError("Cannot verify statement period")
+    refuse_unsound_accounts(st, L)
     lo, hi = span(st)
     mine = set(statement_ibans(st))
     if not mine:
@@ -115,6 +116,22 @@ def refuse_overlap(L: Ledger, st: statements.Statement, digest: str, siblings: C
             raise statements.StatementError("Overlapping statement already imported")
 
 
+def refuse_unsound_accounts(st: statements.Statement, L: Ledger | None = None) -> None:
+    """One statement holds an account's days once, in the currency the firm keeps it in: two sections of one account
+    for the same days, or an account in another currency, settle nothing."""
+    co = companies.get(st.company, L=L)
+    seen: dict[tuple[str, str], list[tuple[date, date]]] = {}
+    for a in st.accounts:
+        own = co.account(a.iban)
+        if own and own.currency != a.currency:
+            raise statements.StatementError("Statement account currency differs from the firm's account")
+        lo, hi = a.period or (st.period_start, st.period_end)
+        run = seen.setdefault((companies.normalize_iban(a.iban), a.currency), [])
+        if any(lo <= theirs_hi and theirs_lo <= hi for theirs_lo, theirs_hi in run):
+            raise statements.StatementError("Statement: an account appears twice for the same days")
+        run.append((lo, hi))
+
+
 def span(st: statements.Statement) -> tuple[date, date]:
     """Every day a statement covers: from its accounts' printed periods (one may start later than another), else
     its own."""
@@ -139,12 +156,17 @@ def _csv_docs(L: Ledger, company: str) -> list:
 
 def learn_accounts(L: Ledger, doc) -> list[str]:
     """The accounts a stored statement covers. One stored before accounts were recorded is read from its file and
-    the answer is kept on the document, so it is read once; a file that can't be read proves no account."""
+    the answer is kept on the document, so it is read once; a file that can't be read, or that reads as another
+    firm's, or has a section that isn't the firm's account in its currency for days of the row's month (a PDF reads
+    under the firm it is opened for, so its accounts are what prove it is that firm's), proves no account."""
     if doc["accounts"]:
         return json.loads(doc["accounts"])
     try:
-        found = statement_ibans(statements.parse(Path(doc["path"]), doc["company"]))
+        st = statements.parse(Path(doc["path"]), doc["company"])
     except (OSError, RuntimeError, ValueError):
+        return []
+    found = statement_ibans(st)
+    if st.company != doc["company"] or not all(_section_of(L, st, a, doc["month"]) for a in st.accounts):
         return []
     if found:
         with L.tx() as db:
@@ -152,6 +174,20 @@ def learn_accounts(L: Ledger, doc) -> list[str]:
                 "UPDATE documents SET accounts=? WHERE sha=? AND accounts IS NULL", (json.dumps(found), doc["sha"])
             )
     return found
+
+
+def _section_of(L: Ledger, st: statements.Statement, a: statements.Account, month: str) -> bool:
+    """A statement section is the firm's account, in the currency the firm keeps it in, for days of `month` only."""
+    own = companies.get(st.company, L=L).account(a.iban)
+    lo, hi = a.period or (st.period_start, st.period_end)
+    return bool(
+        own
+        and own.currency == a.currency
+        and lo
+        and hi
+        and lo <= hi
+        and lo.strftime("%Y-%m") == hi.strftime("%Y-%m") == month
+    )
 
 
 def hold_csv_days(L: Ledger, st: statements.Statement) -> None:
@@ -178,16 +214,6 @@ def hold_csv_days(L: Ledger, st: statements.Statement) -> None:
                 )
 
 
-def covers(L: Ledger, company: str, month: str, iban: str) -> bool:
-    """A statement of `month` is on record for the company's account `iban`. One stored before accounts were recorded
-    covers every account (they were the company's only bank's); one that names its accounts must name this one."""
-    iban = companies.normalize_iban(iban)
-    return any(
-        (not d["accounts"] or iban in json.loads(d["accounts"])) and not str(d["path"]).endswith(".csv")
-        for d in L.documents(company=company, month=month, kind="statement")
-    )  # a CSV is partial: never
-
-
 def _read_stored(doc, company: str) -> statements.Statement:
     try:
         return statements.parse(Path(doc["path"]), company)
@@ -197,7 +223,7 @@ def _read_stored(doc, company: str) -> statements.Statement:
         ) from exc
 
 
-def missing_accounts(st: statements.Statement) -> list[str]:
+def missing_accounts(st: statements.Statement, L: Ledger | None = None) -> list[str]:
     """The company's accounts at the statement's banks that the statement leaves out: a statement covers every
     account the company held at its bank in its period, so none of them is silently skipped. An account opened after
     the period's last month (set by a person) or retired before its first day is not owed; without a period, or with
@@ -207,7 +233,7 @@ def missing_accounts(st: statements.Statement) -> list[str]:
     with one of them must carry both; a different code is another bank, with its own statements."""
     from fiscalm.bank import catalogue as banks
 
-    co = companies.get(st.company)
+    co = companies.get(st.company, L=L)
 
     def bank_of(iban: str) -> str:
         own = co.account(iban)
@@ -235,7 +261,7 @@ def combine(parts: list[statements.Statement]) -> statements.Statement:
     An account's days may start after the 1st only where none is left out (`_late_start`). Older daily statements
     come only for days with movements: numbered ones one after the other may leave days between them, and the month
     may start or end with such days, proven by the neighbouring months' statements (`refuse_unchained`, the caller's,
-    as is completeness, `refuse_incomplete`)."""
+    completeness is a warning, `month_missing`)."""
     if any(not p.period_start or not p.period_end or p.period_end < p.period_start for p in parts):
         raise statements.StatementError("Cannot verify statement period")
     first, last = min(p.period_start for p in parts), max(p.period_end for p in parts)
@@ -293,7 +319,7 @@ def opening(a: statements.Account) -> Decimal:
 def _late_start(start: date, a: statements.Account, co) -> bool:
     """An account's month may start after the 1st only when the days before could hold no movement, and its opening
     balance is proven: no banking day before `start` (weekends, legal holidays), or the account opened on that exact
-    day (set by a person, `company opened` YYYY-MM-DD; only non-banking days between) and opened at zero."""
+    day (set by a person, Setări › Bănci și conturi, or `fiscalm company dates --opened YYYY-MM-DD`; only non-banking days between) and opened at zero."""
     month = start.replace(day=1)
     if not a.trustworthy:
         return False
@@ -459,11 +485,23 @@ def _refuse_break(before: statements.Account, after: statements.Account, numbere
         raise statements.StatementError("Statement balances do not chain with the next or previous month")
 
 
-def refuse_incomplete(st: statements.Statement) -> None:
-    """Refuse a whole-month statement that leaves out an account its bank holds for the company in that month."""
-    missing = [] if st.partial else missing_accounts(st)  # a partial import (CSV) speaks for its one account only
-    if missing:
-        raise statements.MissingAccounts(missing)
+def month_missing(L: Ledger, company: str, month: str) -> list[str] | None:
+    """The accounts the month's stored statements leave out at their banks (missing_accounts of them together); a
+    statement of one account is imported on its own, and this says which ones are still to come. None when a stored
+    statement names no account (stored before accounts were recorded) or one that isn't the firm's, or the firm is
+    unknown: nobody can say the month is complete. Reads only the ledger, never a stored file."""
+    if company not in companies.all(L):
+        return None
+    co = companies.get(company, L=L)
+    docs = [d for d in L.documents(company=company, month=month, kind="statement") if not d["path"].endswith(".csv")]
+    learned = [json.loads(d["accounts"] or "[]") for d in docs]
+    owned = [co.account(i) for ibans in learned for i in ibans]
+    if not all(learned) or not all(owned):
+        return None
+    first = date.fromisoformat(month + "-01")
+    accounts = [statements.Account(a.iban, a.currency) for a in owned]
+    st = statements.Statement(company, first, _month_end(first), accounts)
+    return missing_accounts(st, L) if accounts else []
 
 
 def ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: tuple[str, dict] | None = None) -> dict:
@@ -502,7 +540,6 @@ def _ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: t
     digest = identity(data, csv_account)
     if check:
         check(st)
-    refuse_incomplete(st)
     refuse_overlap(L, st, digest)
     if not st.partial:  # a CAMT or MT940 month next to a BT month that starts after the 1st
         refuse_unchained(L, st)
@@ -567,6 +604,7 @@ def _ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: t
 
     paid = recon.auto_mark_paid(L, st)
     ef_paid = efactura.match_statement(L, st)
+    coverage.record(L, digest, coverage.recorded(st))  # last: its days count only once its lines are matched
     L.set_meta(job, "")
     return {
         "file": str(path),
@@ -576,6 +614,7 @@ def _ingest(L: Ledger, path: Path, company: str = "", check=None, csv_account: t
         "unprotected": str(dest),
         "transactions": len(st.txs),
         "balanced": not issues,
+        "missing": [] if st.partial else month_missing(L, st.company, st.month) or [],
         "payments_marked_paid": paid,
         "efactura_marked_paid": ef_paid,
     }

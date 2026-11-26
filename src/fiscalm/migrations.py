@@ -609,6 +609,52 @@ def account_opened(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE firm_accounts ADD COLUMN opened TEXT NOT NULL DEFAULT ''")
 
 
+def drop_receipt_items(db: sqlite3.Connection) -> None:
+    # Line-by-line receipt transcription is gone (#44). A receipt already associated with an invoice keeps that
+    # association on documents.efactura_id; the tables only held the transcribed lines and a copy of that link.
+    db.execute("DROP TABLE receipt_invoice_links")
+    db.execute("DROP TABLE receipt_items")
+
+
+def credit_references_reread(db: sqlite3.Connection) -> None:
+    # A received credit note with several references was stored without one, like a note that names no invoice.
+    # The next e-Factura sync reads both again from their archives (efactura.fill_credit_references).
+    db.execute("UPDATE efactura SET billing_ref=NULL,billing_date='' WHERE status='credit' AND billing_ref=''")
+
+
+def bank_coverage(db: sqlite3.Connection) -> None:
+    # What each stored statement covers, per account (bank.coverage.recorded), and from which day the open banking
+    # feed has read each account. A CAMT or MT940 stored before this was a whole month of the accounts it names,
+    # proven by its balances, and its lines were matched (the backup before migrating refuses a ledger with an
+    # unfinished, journalled import). A PDF, a CSV, or one that names no account, covers nothing yet: nothing
+    # proves its lines were matched (a PDF set had no journal), so it counts once imported again.
+    # A connection's feed covers its accounts from its next read on.
+    db.execute("ALTER TABLE documents ADD COLUMN coverage TEXT")
+    db.execute("ALTER TABLE bank_connections ADD COLUMN covered TEXT NOT NULL DEFAULT '{}'")
+    db.execute(
+        "UPDATE documents SET coverage=(SELECT json_group_object(a.value, json(json_array(documents.month||'-01', "
+        "date(documents.month||'-01','+1 month','-1 day'), json('true')))) "
+        "FROM json_each(documents.accounts) a) "
+        "WHERE kind='statement' AND accounts IS NOT NULL AND (path LIKE '%.xml' OR path LIKE '%.sta')"
+    )
+
+
+def ai_transaction_proposals(db: sqlite3.Connection) -> None:
+    # What the AI integration proposed for a statement line still to explain (ai_explain): kind label | advance |
+    # documents | none ('none': asked, nothing to propose, so it is not asked again). invoices: a JSON list of ids.
+    db.execute(
+        "CREATE TABLE tx_ai (tx_key TEXT PRIMARY KEY, company TEXT NOT NULL, kind TEXT NOT NULL, partner TEXT, "
+        "invoices TEXT NOT NULL DEFAULT '[]', reason TEXT, note TEXT, at TEXT NOT NULL)"
+    )
+
+
+def statement_tx_readings(db: sqlite3.Connection) -> None:
+    # A statement line read again (a parser that learned the layout, the bank feed adding text to a reference it
+    # already sent) can name its payer differently. The stored line stays as first read; every other reading is kept
+    # here, so a client reminder checks each one for the client.
+    db.execute("CREATE TABLE statement_tx_readings (tx_key TEXT NOT NULL, tx TEXT NOT NULL, PRIMARY KEY (tx_key, tx))")
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     baseline,
     transaction_links,
@@ -650,6 +696,11 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     one_off_switch,
     app_statements_imported,
     account_opened,
+    drop_receipt_items,
+    credit_references_reread,
+    bank_coverage,
+    ai_transaction_proposals,
+    statement_tx_readings,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 

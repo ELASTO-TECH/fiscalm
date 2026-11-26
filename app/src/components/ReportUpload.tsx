@@ -12,11 +12,13 @@ type SavedPayer = { source: string; name: string; cui: string; currency: string;
  * `currency`), which only pre-fill the form. */
 export type ReportPreview = { columns: string[]; rows: string[][]; known: { id: string; name: string; source: string; company_cui_column: string }[];
   guess: Record<string, string>; date: string; orders: boolean; payer: string; source: string; currency: string;
+  /** Who filled `guess`: a built-in courier/processor preset, the install's AI, or header names alone (""). */
+  proposed: "" | "preset" | "ai";
   currencies: string[]; payers: SavedPayer[] };
 const SOURCES = [["fan", "FAN Courier"], ["sameday", "Sameday"], ["cargus", "Cargus"], ["dpd", "DPD"], ["gls", "GLS"],
   ["stripe", "Stripe"], ["netopia", "Netopia"], ["payu", "PayU"], ["courier", "Alt curier"], ["processor", "Alt procesator"]];
 export const REPORT_FIELDS = [["reference", "Numărul facturii"], ["order", "Numărul comenzii"], ["awb", "AWB"], ["gross", "Suma încasată de la client"],
-  ["fee", "Comisionul reținut"], ["net", "Suma netă"], ["batch", "Referința decontării"], ["currency", "Moneda"], ["category", "Categoria operațiunii (Stripe)"], ["company_cui", "CUI-ul firmei (opțional)"]];
+  ["fee", "Comisionul reținut"], ["net", "Suma netă"], ["batch", "Referința decontării"], ["date", "Data fiecărei plăți"], ["currency", "Moneda"], ["category", "Categoria operațiunii (Stripe)"], ["company_cui", "CUI-ul firmei (opțional)"]];
 const SHOP = new Set(["order", "awb"]);
 const REQUIRED = new Set(["reference", "order", "awb", "gross", "fee"]);
 const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -67,19 +69,21 @@ export function ReportUpload({ co, reload }: { co: string; reload: () => void })
     if (r && "report" in r && r.report) {
       const p = r.report as ReportPreview;
       setPreview(p); setDay(p.date); setPartner(p.payer); setMapping(p.guess); setCurrency(p.currency || "RON");
-      pick(p, p.source, p.currency || "RON");
+      // A proposed source (preset, AI) is only a suggestion: the person still picks who sent the file.
+      // A new file's form starts from no payer: nothing typed for the previous file is kept.
+      if (p.proposed) setSource(p.source); else pick(p, p.source, p.currency || "RON", { name: "", cui: "", courier: "" });
     }
     if (r?.ok) { setFile(null); setPreview(null); reload(); }
   };
   /** Choosing the courier or processor fills in the payer the firm already saved for it, when there is exactly one;
    * another choice clears each value the earlier fill wrote and the person left as it was, never what they typed. */
-  const pick = (p: ReportPreview, id: string, shown = currency) => {
+  const pick = (p: ReportPreview, id: string, shown = currency, typed = { name, cui, courier }) => {
     setSource(id);
     const was = filled.current, saved = p.payers.filter((x) => x.source === id), next = saved.length === 1 ? saved[0] : null;
     filled.current = next;
     const keep = (value: string, old: string | undefined, empty = "") => (was && value === old ? empty : value);
-    setName(next ? next.name : keep(name, was?.name)); setCui(next ? next.cui : keep(cui, was?.cui));
-    setCourier(next ? next.courier : keep(courier, was?.courier));
+    setName(next ? next.name : keep(typed.name, was?.name)); setCui(next ? next.cui : keep(typed.cui, was?.cui));
+    setCourier(next ? next.courier : keep(typed.courier, was?.courier));
     if (!p.currency) setCurrency(next?.currency || keep(shown, was?.currency, "RON"));
   };
   const upload = () => {
@@ -103,6 +107,8 @@ export function ReportUpload({ co, reload }: { co: string; reload: () => void })
       <Input ref={input} type="file" hidden accept=".csv,.xlsx" aria-label="Raport de decontare" onChange={(e) => {
         const f = e.target.files?.[0] ?? null;
         e.target.value = ""; setFile(f); setPreview(null); setPartner(""); setMapping({}); setDay("");
+        // Another file is another report: nothing of the previous payer carries over.
+        setSource(""); setName(""); setCui(""); setCourier(""); filled.current = null;
         if (f) void send(f, {});
       }} />
       {preview ? <>
@@ -136,6 +142,7 @@ export function ReportUpload({ co, reload }: { co: string; reload: () => void })
           </div>
           <fieldset className="m-0 mt-5 min-w-0 border-0 p-0">
             <legend className={legendStyle}>Coloanele raportului</legend>
+            {preview.proposed ? <p className="mt-0 text-sm text-muted">{preview.proposed === "ai" ? "Coloanele sunt propuse de AI." : "Coloanele sunt recunoscute după antet."} Verifică-le înainte de încărcare.</p> : null}
             <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2">{shown.map(column)}</div>
             {more.length ? <details className="mt-3">
               <Summary>Alte detalii</Summary>

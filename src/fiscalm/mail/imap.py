@@ -30,6 +30,7 @@ import email.utils
 import hashlib
 import html
 import imaplib
+import json
 import re
 import sqlite3
 import ssl
@@ -96,6 +97,8 @@ class Message:
     subject: str
     date: str  # YYYY-MM-DD from the Date header, else the day it was read
     attachments: tuple[Attachment, ...]
+    # CSV or XLSX tables (kind "csv"/"xlsx"): only a settlement report from a sender a person named reads them.
+    tables: tuple[Attachment, ...] = ()
 
 
 def accounts(L: Ledger) -> list[integrations.Instance]:
@@ -329,15 +332,28 @@ def _kind(part, data: bytes) -> str | None:
     return None
 
 
+def _table(part, data: bytes) -> str | None:
+    """A CSV or XLSX by its name and bytes: an XLSX is a ZIP, a CSV is UTF-8 text."""
+    name = (part.get_filename() or "").lower()
+    if name.endswith(".xlsx") and data.startswith(b"PK\x03\x04"):
+        return "xlsx"
+    try:
+        return "csv" if name.endswith(".csv") and data.decode("utf-8-sig") else None
+    except UnicodeError:
+        return None
+
+
 def parse(account: str, raw: bytes, today: date) -> Message:
     """A message as plain data. Its attachments: every non-body part whose bytes are a PDF or an XML document, in
     order, up to ATTACHMENTS_MAX, each at most ATTACHMENT_MAX bytes (larger ones are left out)."""
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     found: list[Attachment] = []
+    tables: list[Attachment] = []
     for part in msg.walk():
-        if len(found) >= ATTACHMENTS_MAX:
+        if len(found) >= ATTACHMENTS_MAX and len(tables) >= ATTACHMENTS_MAX:
             break
-        if part.is_multipart() or part.get_content_type() in ("text/plain", "text/html"):
+        named_csv = (part.get_filename() or "").lower().endswith(".csv")
+        if part.is_multipart() or (part.get_content_type() in ("text/plain", "text/html") and not named_csv):
             continue
         try:
             data = part.get_payload(decode=True)
@@ -346,8 +362,10 @@ def parse(account: str, raw: bytes, today: date) -> Message:
         if not isinstance(data, bytes) or not data or len(data) > ATTACHMENT_MAX:
             continue
         kind = _kind(part, data)
-        if kind:
+        if kind and len(found) < ATTACHMENTS_MAX:  # invoices and tables each keep their own allowance
             found.append(Attachment(kind, data, _plain(part.get_filename())[:120]))
+        elif (table := _table(part, data)) and len(tables) < ATTACHMENTS_MAX:
+            tables.append(Attachment(table, data, _plain(part.get_filename())[:120]))
     try:
         sender = _plain(msg.get("From"))
         subject = _plain(msg.get("Subject"))
@@ -355,7 +373,8 @@ def parse(account: str, raw: bytes, today: date) -> Message:
         sender, subject = "", ""
     address = email.utils.parseaddr(sender)[1].lower()
     mid = _message_id(msg.get("Message-ID")) or "sha256:" + hashlib.sha256(raw).hexdigest()
-    return Message(account, mid, sender, address if "@" in address else "", subject, _date(msg, today), tuple(found))
+    address = address if "@" in address else ""
+    return Message(account, mid, sender, address, subject, _date(msg, today), tuple(found), tuple(tables))
 
 
 def _record(
@@ -524,10 +543,139 @@ def _text(msg) -> str:
     return re.sub(r"\s+", " ", raw).strip()
 
 
+# The receiving services whose own Authentication-Results fiscalm reads, by the IMAP host of the account: each removes
+# a header claiming its id from incoming mail (RFC 8601 section 5), so the one carrying its id is its own verdict.
+RECEIVERS = {"imap.gmail.com": "mx.google.com", "imap.googlemail.com": "mx.google.com"}
+
+
+def authenticated_domain(msg, authserv: str) -> str:
+    """The From domain when the receiving service `authserv` says DMARC passed for exactly that domain; else "".
+    Any other Authentication-Results header is the sender's to write, as is the display name: never trusted. Its
+    comments and quoted strings (where a sender's own address or text lands) are dropped before the clauses are read."""
+    froms = msg.get_all("From") or []
+    addresses = email.utils.getaddresses([str(f) for f in froms])
+    own = [r for r in msg.get_all("Authentication-Results") or [] if str(r).split(";")[0].strip().lower() == authserv]
+    if not authserv or len(froms) != 1 or len(addresses) != 1 or not own:
+        return ""
+    local, at, domain = addresses[0][1].rpartition("@")
+    if not (local and at and re.fullmatch(r"[a-z0-9.-]+", domain := domain.lower())):
+        return ""
+    clauses = _clauses(str(own[0]))
+    dmarc = [c for c in clauses or [] if c and c[0].startswith("dmarc")]  # "dmarc/1=" too: any second verdict refuses
+    if not dmarc or len(dmarc) != 1 or dmarc[0][0] != "dmarc=pass":
+        return ""
+    senders = [w.removeprefix("header.from=") for w in dmarc[0][1:] if w.startswith("header.from=")]
+    return domain if senders == [domain] else ""
+
+
+def _clauses(header: str) -> list[list[str]] | None:
+    """The results of an Authentication-Results header after its authserv-id, each as lowercase tokens: comments (nested,
+    with escapes) and quoted strings read in one pass and dropped, spaces closed around "=" and in "header . from"
+    (RFC 8601 2.2).
+    None when the syntax doesn't close: nothing is read from it."""
+    out, depth, quoted, escaped = [], 0, False, False
+    for ch in header:
+        if escaped:
+            escaped = False
+        elif ch == "\\" and (depth or quoted):
+            escaped = True
+        elif quoted:
+            quoted = ch != '"'
+        elif ch == "(":
+            depth += 1
+            out.append(" ")  # a comment still separates tokens
+        elif ch == ")":
+            if not depth:
+                return None
+            depth -= 1
+        elif not depth:
+            quoted = ch == '"'
+            out.append(" " if quoted else ch)
+    if depth or quoted or escaped:
+        return None
+    text = re.sub(r"\s*=\s*", "=", "".join(out).lower())
+    text = re.sub(r"(^|\s)header\s*\.\s*from=", r"\1header.from=", text, flags=re.M)  # the property's name only
+    return [c.split() for c in text.split(";")[1:]]
+
+
+def _bodies(part) -> int:
+    """How many separate texts a message carries: an alternative (plain and HTML of one text) counts once."""
+    if part.is_multipart() and part.get_content_subtype() == "alternative":  # one plain and one HTML leaf, nothing else
+        kinds = sorted(p.get_content_type() for p in part.iter_parts())
+        return 1 if kinds == ["text/html", "text/plain"] else 2
+    if part.is_multipart():
+        return sum(_bodies(p) for p in part.iter_parts())
+    return int(part.get_content_type() in ("text/plain", "text/html") and not part.get_filename())
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"\w+", text.lower()))
+
+
+def _alternatives_agree(msg) -> bool:
+    """Every word of each HTML alternative is in its plain one: _text reads the plain text alone, so an HTML part saying
+    more (a reversal, another firm) would go unread."""
+    for part in msg.walk():
+        if part.get_content_type() != "multipart/alternative":
+            continue
+        texts = {p.get_content_type(): p for p in part.iter_parts() if p.get_content_maintype() == "text"}
+        if "text/plain" in texts and "text/html" in texts:
+            try:
+                plain, rich = texts["text/plain"].get_content(), texts["text/html"].get_content()
+            except Exception:  # a part that can't be decoded: nothing proves they agree
+                return False
+            rich = html.unescape(re.sub(r"<(style|script)\b.*?</\1>|<[^>]+>", " ", rich, flags=re.S | re.I))
+            if not _words(rich) <= _words(plain):
+                return False
+    return True
+
+
+def _digest(msg) -> str:
+    """Every text part's content, plain and HTML, as one value: two copies differing anywhere are two mails."""
+    parts = []
+    for part in msg.walk():
+        if part.get_content_maintype() == "text" and not part.get_filename():
+            try:
+                parts.append(part.get_content())
+            except Exception:  # undecodable: its bytes stand for it
+                parts.append(repr(part.get_payload(decode=True)))
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
+
+
+def _text_record(msg, mid: str, end: date, account: integrations.Instance, size: int) -> dict:
+    """complete: the whole message was fetched, it has one text (_text reads only the plain parts of several, so they
+    must agree), its
+    subject is not clipped and its Date readable (else the date is `end`, a guess): only a complete mail can settle an
+    invoice on its own."""
+    authserv = RECEIVERS.get(str(account.config.get("host") or "").lower(), "")
+    subject = _plain(msg.get("Subject"))
+    try:
+        dated = email.utils.parsedate_to_datetime(str(msg.get("Date"))) is not None
+    except (TypeError, ValueError, IndexError, OverflowError):
+        dated = False
+    return {
+        "key": f"imap:{mid}",
+        "sender": _plain(msg.get("From")),
+        "subject": _plain(msg.get("Subject")),
+        "date": date.fromisoformat(_date(msg, end)),
+        "text": _text(msg),
+        "domain": authenticated_domain(msg, authserv),
+        "firms": account.firm_scope,
+        "digest": _digest(msg),
+        "complete": size < TEXT_BYTES
+        and _bodies(msg) == 1
+        and _alternatives_agree(msg)
+        and len(subject) < TEXT_MAX
+        and dated,
+    }
+
+
 def texts(L: Ledger, start: date, end: date, words: list[str], *, connect=None) -> list[dict]:
     """Messages of the reading folders dated start..end whose text holds one of `words`, newest SEARCH_MAX per account,
-    as {"key", "sender", "subject", "date", "text"} (key: imap:<Message-ID>, the same in every account, so a mail
-    reserved as one invoice's proof can't prove another through a copy). Read-only, bounded like read();
+    as {"key", "sender", "subject", "date", "text", "domain", "firms"} (key: imap:<Message-ID>, the same in every
+    account, so a mail reserved as one invoice's proof can't prove another through a copy; domain: authenticated_domain;
+    firms: the firm scope of the account it was read in, of the first account when several hold it).
+    Read-only, bounded like read();
     an account that can't be read is skipped. Untrusted content: callers look only for fixed phrases and amounts."""
     words = [w for w in words if w.isascii() and w.strip()]
     if not words:
@@ -556,17 +704,14 @@ def texts(L: Ledger, start: date, end: date, words: list[str], *, connect=None) 
                     continue
                 msg = email.message_from_bytes(rec[1], policy=email.policy.default)
                 mid = _message_id(msg.get("Message-ID")) or "sha256:" + hashlib.sha256(rec[1]).hexdigest()
-                if any(m["key"] == f"imap:{mid}" for m in out):
-                    continue  # the same mail in two accounts is one mail: one proof, ever
-                out.append(
-                    {
-                        "key": f"imap:{mid}",
-                        "sender": _plain(msg.get("From")),
-                        "subject": _plain(msg.get("Subject")),
-                        "date": date.fromisoformat(_date(msg, end)),
-                        "text": _text(msg),
-                    }
-                )
+                record = _text_record(msg, mid, end, account, len(rec[1]))
+                same = next((m for m in out if m["key"] == record["key"]), None)
+                if same is None:
+                    out.append(record)
+                elif any(same[k] != record[k] for k in ("sender", "subject", "date", "digest", "complete")):
+                    # two different mails under one id (or one copy saying more than the other): neither proves
+                    same |= {"collides": True, "complete": False}
+                # else the same mail in two accounts is one mail: one proof, ever
         except (OSError, imaplib.IMAP4.error, ValueError, _OutOfTime, _TooLarge, ReadError):
             continue
         finally:

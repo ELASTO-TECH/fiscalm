@@ -35,12 +35,23 @@ fallbacks and workflows when replacing them; do not preserve installation-specif
    file and documents to download. A human imports payments and sends documents or copied reminder text.
    Mail access is read-only IMAP for incoming invoices; never request write/APPEND capabilities or scopes.
    Don't add a code path that pays, transfers, sends or changes anything in the mail account.
-2. **When in doubt, do nothing.** A debit that fits several invoices settles none. A missing file
-   is never regenerated on its own. An invoice the user marks paid stays "În curs de confirmare" until
-   a statement or a mail proves it. A wrong "paid" hides a debt, so any rule that could settle the wrong item
-   must refuse instead.
+2. **When in doubt, do nothing.** A debit that fits several invoices settles none. A debit with the exact amount
+   of exactly one candidate settles it on its own, even when its bank text names no supplier; a person is asked only
+   about real ambiguity (maintainer decision, 2026-11-25). A missing file is never regenerated on its own.
+   An invoice the user marks paid stays "În curs de confirmare" until a statement or a mail proves it.
+   A payment mail settles a received invoice on its own only when the AI reads it as sure proof, the engine finds
+   that invoice alone fits it (supplier, exact total and currency, date window) and the mailbox's own provider
+   authenticated a payment processor's domain; anything less waits as a Sarcină, and the invoice's later bank debit
+   replaces the mail as proof (maintainer decision, 2026-11-25). A wrong "paid" hides a debt, so any rule that could
+   settle the wrong item must refuse instead.
 3. **One statement transaction settles one item, or exactly the items of one verified settlement report.**
    A debit pays one invoice or payment; a credit collects one issued invoice, or one complete batch.
+   A credit collects the one open issued invoice it fits by exact amount: from its client, or, from a bank account
+   that shows no other client, naming it or alone of its amount with no other credit of the statement fitting it
+   too. A credit from an identified client that fits no single invoice collects the one exact set of that client's
+   open invoices it names by whole identifier, or the only set of 2 to 5 of them (or all of them) summing to it;
+   it is reserved once, collects the whole set or nothing, and an ambiguous set settles none (maintainer
+   decision, 2026-11-25).
    A settlement is identified by firm + payer + report reference. The credit, report and every invoice
    belong to that same firm; a line naming another firm refuses the whole report.
    A batch requires an identified payer, a report from that payer dated within a fixed window before a trustworthy statement credit,
@@ -52,11 +63,10 @@ fallbacks and workflows when replacing them; do not preserve installation-specif
    transaction, or settle nothing and raise a Sarcină opening `set`, identifying the failed line or reason.
    A report without a matching credit is also a Sarcină opening `set`; its settled credit links back
    to the Decontare from `tx`.
-   Until a firm has three settlements from a payer confirmed by a person, every new batch from that payer
-   waits as a Sarcină showing the credit, the invoice count and the net total, and settles only when a user
-   confirms it; after that, batches that pass every check above settle on their own (maintainer decision,
-   2026-11-02). Only a payer the report names by CUI or IBAN earns that; one known only by name always
-   waits for a person (2026-11-08).
+   A batch that passes every check above settles on its own, from the first report of any payer; no count of
+   earlier confirmations is required (maintainer decision, 2026-11-25). A person confirms only a credit read
+   from a legacy statement copy without a stored checksum, and a report that arrived by mail (a sender address
+   is no proof of who sent it).
    Every writer goes through guarded `Ledger` methods whose `WHERE` clauses re-check the state read.
    Two connections racing must not double-settle; write a test that proves it.
 4. **Crash-safe file moves.** Moving payment files is journalled in the ledger first and finished on

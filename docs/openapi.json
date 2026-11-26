@@ -1421,7 +1421,8 @@
                 "partners",
                 "invoices",
                 "payments",
-                "selected"
+                "selected",
+                "receipts"
               ]
             }
           },
@@ -4412,6 +4413,8 @@
                 "issued-mark",
                 "issued-unmark",
                 "resolve-debit",
+                "credit-pick",
+                "mail-proof",
                 "upload-link-create",
                 "upload-link-revoke",
                 "integration-add",
@@ -4565,6 +4568,8 @@
           "issued-mark": "id, method (bank: payment order, cash, card, other), detail: for other, how it was collected (1 to 200 characters); else empty. Never proof: the invoice awaits a statement credit. Effect: local; allowed in shadow.",
           "issued-unmark": "id Effect: local; allowed in shadow.",
           "resolve-debit": "tx, target (one of its candidates[].id) Effect: local; allowed in shadow.",
+          "credit-pick": "id: a received credit note with credit_question; target: one of its credit_question[].id, or \"-\" when it cancels none of them. The first answer stands; local operation. Effect: local; allowed in shadow.",
+          "mail-proof": "id (a mail_proofs[].id), target (one of its candidates[].id: the mail proves that invoice paid; \"\": it is no payment, the mail leaves this company's tasks) Effect: local; allowed in shadow.",
           "upload-link-create": "label; optional all_firms (boolean), expires_in_days (1..365), max_files (positive integer). Write scope required; explicit upload-link routes are also available. Effect: local; allowed in shadow.",
           "upload-link-revoke": "id: upload link ID. Write scope required; explicit upload-link routes are also available. Effect: local; allowed in shadow.",
           "integration-add": "App authentication required; bearer requests return 403 app_required. Effect: local; allowed in shadow.",
@@ -10092,8 +10097,6 @@
     "user-reset": "local",
     "session-close": "local",
     "history-review": "local",
-    "receipt-lines-save": "local",
-    "receipt-invoice-confirm": "local",
     "setup-card-dismiss": "local",
     "setup-card-show": "local",
     "telemetry-settings": "local",
@@ -10101,11 +10104,11 @@
     "accountant-save": "local",
     "settlement-withdraw": "local",
     "settlement-format-delete": "local",
+    "settlement-format-senders": "local",
     "settlement-confirm": "local",
     "order-discard": "local",
     "emag-refund": "local",
     "emag-resolve": "local",
-    "payment_file_not_imported": "local",
     "payment_file_restore": "payment_file",
     "payment_file_missing_import": "payment_file",
     "payment_file_create": "local",
@@ -10134,8 +10137,11 @@
     "issued-mark": "local",
     "issued-unmark": "local",
     "resolve-debit": "local",
+    "credit-pick": "local",
+    "mail-proof": "local",
     "card-owner": "local",
     "tx-link": "local",
+    "tx-receipt": "local",
     "tx-await": "local",
     "tx-unlink": "local",
     "memory-forget": "local",
@@ -10159,6 +10165,7 @@
     "company-bank": "local",
     "company-account": "local",
     "company-statement-password": "local",
+    "company-account-dates": "local",
     "company-alias-add": "local",
     "company-alias-remove": "local",
     "statement-csv-format": "local",
@@ -10183,8 +10190,6 @@
     "user-reset": "manage_users",
     "session-close": "manage_users",
     "history-review": "manage_firms",
-    "receipt-lines-save": "member",
-    "receipt-invoice-confirm": "member",
     "setup-card-dismiss": "manage_firms",
     "setup-card-show": "manage_firms",
     "telemetry-settings": "manage_firms",
@@ -10192,11 +10197,11 @@
     "accountant-save": "manage_firms",
     "settlement-withdraw": "member",
     "settlement-format-delete": "member",
+    "settlement-format-senders": "manage_firms",
     "settlement-confirm": "member",
     "order-discard": "member",
     "emag-refund": "member",
     "emag-resolve": "member",
-    "payment_file_not_imported": "member",
     "payment_file_restore": "member",
     "payment_file_missing_import": "member",
     "payment_file_create": "member",
@@ -10225,8 +10230,11 @@
     "issued-mark": "member",
     "issued-unmark": "member",
     "resolve-debit": "member",
+    "credit-pick": "member",
+    "mail-proof": "member",
     "card-owner": "member",
     "tx-link": "member",
+    "tx-receipt": "member",
     "tx-await": "member",
     "tx-unlink": "member",
     "memory-forget": "member",
@@ -10250,6 +10258,7 @@
     "company-bank": "manage_firms",
     "company-account": "manage_firms",
     "company-statement-password": "manage_firms",
+    "company-account-dates": "manage_firms",
     "company-alias-add": "manage_firms",
     "company-alias-remove": "manage_firms",
     "statement-csv-format": "member",
@@ -10297,8 +10306,6 @@
     "user-reset": "Account administration; fresh administrator session required. id.",
     "session-close": "Account administration; fresh administrator session required. id.",
     "history-review": "Review one pending history PDF by digest, correcting invoice fields or excluding it. Local only; never confirms payment.",
-    "receipt-lines-save": "id: receipt SHA; revision: displayed version; payload: JSON string with lines (name, unit, quantity, net after discounts excluding VAT, vat percentage), total, currency, payment (cash/card/empty). Empty lines skip. 4 KB.",
-    "receipt-invoice-confirm": "id: receipt SHA; revision; invoice: displayed unique proposal ID. Rechecks under lock, never confirms payment. Local operation.",
     "setup-card-dismiss": "Close the selected firm's Configurează card on Acasă; the items it listed stay in Setări, and `setup-card-show` reopens it. Administrator only; repeating it changes nothing.",
     "setup-card-show": "Show the selected firm's closed Configurează card on Acasă again, while something is left to set up. Administrator only; repeating it changes nothing.",
     "telemetry-settings": "on (\"1\" or \"0\"). Administrator only. Daily anonymous Live install statistics, enabled by default; FISCALM_TELEMETRY=0 overrides this local preference.",
@@ -10306,6 +10313,7 @@
     "accountant-save": "cui (existing partner), senders (newline-separated addresses, at most ten), recipient, co. App admin configuration.",
     "settlement-withdraw": "Withdraw pending settlement evidence; never release a reserved credit.",
     "settlement-format-delete": "partner, signature: one of the partner's report_formats. Forgets the saved columns; uploaded reports are unchanged.",
+    "settlement-format-senders": "partner, signature: one of the partner's report_formats; senders: newline-separated exact addresses (at most ten, empty to stop). Mailed CSV/XLSX reports in that format from those addresses are imported, read-only.",
     "order-discard": "co, id: company-scoped order sheet ID. App-only local configuration.",
     "pack-unsent": "month, version: the sent ZIP SHA-256; mark: the report's mark as shown. Undoes pack-sent: the snapshot is prepared again and the documents only it covers are unsent. Local operation.",
     "document-correct": "Correct receipt/document metadata only. amount: exact two-decimal string; currency: engine currency code; date and number optional. Refuses settled proof and sent accountant packs; records actor, time and previous values. Never settles money.",
@@ -10318,6 +10326,7 @@
     "rule-reminders": "after_days (digit string, 1..365)",
     "card-owner": "tx (an observed card transaction), owner (a companies[].key or personal); first answer wins, never confirms payment",
     "tx-link": "kind (documents, the default; label: Fără document, reason one of bank_fee, interest, personal, other and an optional note for the accountant, required for other, at most 200 characters; transfer: Transfer între conturi; advance: Avans, who the administrator or associate, 1 to 100 characters), tx (a transactions.rows[].id; for an explanation already made, its link.tx), invoices (comma-separated ids: issued[].id for a credit, invoices[].id for a debit) or payment (one payments.*[].item_id, debits only), reason (\"\" or one of rest, courier_fee, bank_fee, fx, other), note (other only, 1 to 200 characters), was (the row's explanation.link.id, \"\" for none), remember (\"\", or one of the row's remember keys: iban, card for a label only, name; never for a transfer)",
+    "tx-receipt": "tx (a card debit in transactions.rows[].id, not explained), id (documents[].id of an upload of this firm whose amount is still null): the upload is this debit's bon and takes its amount, day and card. Local bookkeeping; refused when the debit or the upload is already explained or the upload has data of its own.",
     "tx-await": "tx (a debit in transactions.rows[].id, not explained or settled), on (\"1\" waits, \"0\" stops waiting), note (on=1 only, optional, what is expected, at most 200 characters). Aștept factura: the debit stays to explain, listed last, and reserves nothing. Local operation.",
     "tx-unlink": "tx, was (the explanation's id)",
     "memory-forget": "id (a transactions.remembered[].id)",
@@ -10339,6 +10348,7 @@
     "company-bank": "{ \"key\": \"EXEMPLU\", \"iban\": \"<RON IBAN>\" } (both required)",
     "company-account": "{ \"key\": \"EXEMPLU\", \"iban\": \"<IBAN>\", \"currency\": \"EUR\" } (all required)",
     "company-statement-password": "{ \"key\": \"EXEMPLU\", \"bank\": \"bt\", \"password\": \"<parola>\" } (all required; bank: a catalogue bank with password-protected PDF statements). Write-only: never returned or logged.",
+    "company-account-dates": "{ \"key\": \"EXEMPLU\", \"account\": \"<account id>\", \"opened\": \"2024-03\" or \"2024-03-14\" or \"\", \"retired\": \"2026-10-31\" or \"\" } (key, account and at least one date; \"\" forgets a date, one left out is kept; a closing day after today is refused). The account payment files debit is never closed here.",
     "company-alias-add": "{ \"key\": \"EXEMPLU\", \"alias\": \"Exemplu Grup\" } (both required)",
     "company-alias-remove": "{ \"key\": \"EXEMPLU\", \"alias\": \"Exemplu Grup\" } (both required)",
     "statement-csv-format": "account, co; column names from fiscalm.bank.csv.FIELDS plus date_format and decimal, all strings. App admin configuration.",
@@ -10668,6 +10678,38 @@
             },
             "description": "Unambiguously linked received credit notes, scoped to this company, supplier and currency."
           },
+          "credit_question": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "number": {
+                  "type": "string"
+                },
+                "amount": {
+                  "description": "Exact decimal amount with two places; never binary floating point. Currency is a separate field.",
+                  "type": "string",
+                  "pattern": "^-?[0-9]+\\.[0-9]{2}$"
+                },
+                "date": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "number",
+                "amount",
+                "date"
+              ]
+            },
+            "description": "For a credit note naming no invoice: the invoices it could cancel (same supplier and currency, exact opposite total, issued up to 14 days before), when several fit or SPV order or an archived invoice leaves one in doubt. None is cancelled until credit-pick."
+          },
           "credit_note": {
             "type": "boolean",
             "description": "An unmatched received credit note; never payable."
@@ -10686,6 +10728,28 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "accounts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "bank": {
+                  "type": "string"
+                },
+                "ending": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "index",
+                "bank",
+                "ending"
+              ]
             }
           },
           "overdue": {
@@ -10743,10 +10807,12 @@
           "paid_method",
           "total",
           "credits",
+          "credit_question",
           "credit_note",
           "covered",
           "left",
           "previous_iban_last4",
+          "accounts",
           "overdue",
           "can_approve",
           "can_mark_paid",
@@ -11165,90 +11231,6 @@
               }
             ]
           },
-          "items": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "lines": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": {
-                        "name": {
-                          "type": "string"
-                        },
-                        "unit": {
-                          "type": "string"
-                        },
-                        "quantity": {
-                          "type": "string"
-                        },
-                        "net": {
-                          "type": "string"
-                        },
-                        "vat": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "name",
-                        "unit",
-                        "quantity",
-                        "net",
-                        "vat"
-                      ]
-                    }
-                  },
-                  "total": {
-                    "type": "string"
-                  },
-                  "currency": {
-                    "type": "string"
-                  },
-                  "payment": {
-                    "type": "string"
-                  },
-                  "provenance": {
-                    "type": "string"
-                  },
-                  "state": {
-                    "type": "string"
-                  },
-                  "revision": {
-                    "type": "integer"
-                  },
-                  "verified": {
-                    "type": "boolean"
-                  },
-                  "proposal": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "payment_mismatch": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "lines",
-                  "total",
-                  "currency",
-                  "payment",
-                  "provenance",
-                  "state",
-                  "revision",
-                  "verified",
-                  "proposal",
-                  "payment_mismatch"
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "links": {
             "type": "object",
             "additionalProperties": {
@@ -11288,7 +11270,6 @@
           "held",
           "files",
           "mail",
-          "items",
           "links"
         ]
       },
@@ -12056,6 +12037,64 @@
                           ]
                         },
                         {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "ai",
+                              "description": "The AI integration's checked proposal; never applied."
+                            },
+                            "as": {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "enum": [
+                                    "documents",
+                                    "label",
+                                    "transfer",
+                                    "advance"
+                                  ]
+                                },
+                                "partner": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "reason": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "note": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "partner",
+                                "reason",
+                                "note"
+                              ]
+                            },
+                            "invoices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              },
+                              "description": "Open invoices whose remaining total is the amount."
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "as",
+                            "invoices"
+                          ]
+                        },
+                        {
                           "type": "null"
                         }
                       ]
@@ -12413,13 +12452,20 @@
                       },
                       "courier": {
                         "type": "string"
+                      },
+                      "senders": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     },
                     "required": [
                       "signature",
                       "source",
                       "mapping",
-                      "courier"
+                      "courier",
+                      "senders"
                     ]
                   }
                 },
@@ -12769,6 +12815,37 @@
                     ]
                   }
                 },
+                "credit_question": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "number": {
+                        "type": "string"
+                      },
+                      "amount": {
+                        "description": "Exact decimal amount with two places; never binary floating point. Currency is a separate field.",
+                        "type": "string",
+                        "pattern": "^-?[0-9]+\\.[0-9]{2}$"
+                      },
+                      "date": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "number",
+                      "amount",
+                      "date"
+                    ]
+                  }
+                },
                 "credit_note": {
                   "type": "boolean"
                 },
@@ -12786,6 +12863,28 @@
                   "type": "array",
                   "items": {
                     "type": "string"
+                  }
+                },
+                "accounts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "index": {
+                        "type": "integer"
+                      },
+                      "bank": {
+                        "type": "string"
+                      },
+                      "ending": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "index",
+                      "bank",
+                      "ending"
+                    ]
                   }
                 },
                 "overdue": {
@@ -12827,6 +12926,9 @@
                       "type": "null"
                     }
                   ]
+                },
+                "amount_changed": {
+                  "type": "boolean"
                 }
               },
               "required": [
@@ -12845,17 +12947,20 @@
                 "paid_method",
                 "total",
                 "credits",
+                "credit_question",
                 "credit_note",
                 "covered",
                 "left",
                 "previous_iban_last4",
+                "accounts",
                 "overdue",
                 "can_approve",
                 "can_mark_paid",
                 "can_withdraw",
                 "can_reopen",
                 "proved",
-                "payment_file"
+                "payment_file",
+                "amount_changed"
               ]
             }
           },
@@ -13335,90 +13440,6 @@
                       "type": "null"
                     }
                   ]
-                },
-                "items": {
-                  "anyOf": [
-                    {
-                      "type": "object",
-                      "properties": {
-                        "lines": {
-                          "type": "array",
-                          "items": {
-                            "type": "object",
-                            "properties": {
-                              "name": {
-                                "type": "string"
-                              },
-                              "unit": {
-                                "type": "string"
-                              },
-                              "quantity": {
-                                "type": "string"
-                              },
-                              "net": {
-                                "type": "string"
-                              },
-                              "vat": {
-                                "type": "string"
-                              }
-                            },
-                            "required": [
-                              "name",
-                              "unit",
-                              "quantity",
-                              "net",
-                              "vat"
-                            ]
-                          }
-                        },
-                        "total": {
-                          "type": "string"
-                        },
-                        "currency": {
-                          "type": "string"
-                        },
-                        "payment": {
-                          "type": "string"
-                        },
-                        "provenance": {
-                          "type": "string"
-                        },
-                        "state": {
-                          "type": "string"
-                        },
-                        "revision": {
-                          "type": "integer"
-                        },
-                        "verified": {
-                          "type": "boolean"
-                        },
-                        "proposal": {
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "payment_mismatch": {
-                          "type": "boolean"
-                        }
-                      },
-                      "required": [
-                        "lines",
-                        "total",
-                        "currency",
-                        "payment",
-                        "provenance",
-                        "state",
-                        "revision",
-                        "verified",
-                        "proposal",
-                        "payment_mismatch"
-                      ]
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
                 }
               },
               "required": [
@@ -13439,8 +13460,7 @@
                 "sent",
                 "held",
                 "files",
-                "mail",
-                "items"
+                "mail"
               ]
             }
           },
@@ -13627,9 +13647,6 @@
                 "invoice_count": {
                   "type": "integer"
                 },
-                "confirmed_count": {
-                  "type": "integer"
-                },
                 "can_confirm": {
                   "type": "boolean"
                 },
@@ -13683,13 +13700,6 @@
                     "integer",
                     "null"
                   ]
-                },
-                "auto_after": {
-                  "type": [
-                    "integer",
-                    "null"
-                  ],
-                  "description": "Person-confirmed settlements after which this payer's batches settle on their own; null when the payer has no CUI or IBAN, so every batch waits for a person."
                 },
                 "sheet": {
                   "type": "object",
@@ -13800,7 +13810,6 @@
                 "reference",
                 "candidate",
                 "invoice_count",
-                "confirmed_count",
                 "can_confirm",
                 "human_confirmed",
                 "payer",
@@ -13810,7 +13819,6 @@
                 "error",
                 "tx_key",
                 "failed_line",
-                "auto_after",
                 "sheet",
                 "links",
                 "lines"
@@ -14290,6 +14298,12 @@
                 },
                 "body": {
                   "type": "string"
+                },
+                "warning": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -14297,7 +14311,8 @@
                 "id",
                 "label",
                 "subject",
-                "body"
+                "body",
+                "warning"
               ]
             }
           },
@@ -14377,7 +14392,7 @@
                 "type": "null"
               }
             ],
-            "description": "Automatic payments held until last month's (month, YYYY-MM) statement of the paying account is in: one task with the count; uploading the statement releases them. Null when none wait."
+            "description": "Automatic payments held until the bank's record of the paying account covers every day of last month (month, YYYY-MM): a statement, CSV exports or the open banking feed. One task with the count; uploading the statement releases them. Null when none wait."
           },
           "files": {
             "type": "array",
@@ -14420,7 +14435,6 @@
                 "question": {
                   "enum": [
                     "missing",
-                    "downloads",
                     "orphan",
                     null
                   ]
@@ -14800,6 +14814,44 @@
               "type": "object"
             }
           },
+          "mail_proofs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string"
+                },
+                "subject": {
+                  "type": "string"
+                },
+                "date": {
+                  "type": "string"
+                },
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "candidate_count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "from",
+                "subject",
+                "date",
+                "candidates",
+                "candidate_count"
+              ]
+            },
+            "description": "Payment mails the AI read as proof that settled nothing on their own: pick the invoice each paid, or none (mail-proof)."
+          },
           "unreadable": {
             "type": "array",
             "items": {
@@ -14922,6 +14974,7 @@
           "news",
           "ambiguous",
           "bank_connections",
+          "mail_proofs",
           "unreadable",
           "refused",
           "system",
@@ -16088,9 +16141,11 @@
             "enum": [
               null,
               "saved",
-              "bank"
+              "bank",
+              "transfer",
+              "ai"
             ],
-            "description": "Made by no person: a saved rule (saved) or the bank's own fee or interest line (bank). Undoing or changing it leaves the transaction to people."
+            "description": "Made by no person: a saved rule (saved), the bank's own fee or interest line (bank), or both ends of a transfer between the firm's accounts, one naming the other's account (transfer), or a Fără document label the AI integration was sure of on a line no open document fits by amount (ai). Undoing or changing it leaves the transaction to people."
           }
         },
         "required": [
@@ -16779,13 +16834,20 @@
                           },
                           "courier": {
                             "type": "string"
+                          },
+                          "senders": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
                           }
                         },
                         "required": [
                           "signature",
                           "source",
                           "mapping",
-                          "courier"
+                          "courier",
+                          "senders"
                         ]
                       }
                     },
@@ -17075,6 +17137,37 @@
                                 ]
                               }
                             },
+                            "credit_question": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "id": {
+                                    "type": "string"
+                                  },
+                                  "number": {
+                                    "type": "string"
+                                  },
+                                  "amount": {
+                                    "description": "Exact decimal amount with two places; never binary floating point. Currency is a separate field.",
+                                    "type": "string",
+                                    "pattern": "^-?[0-9]+\\.[0-9]{2}$"
+                                  },
+                                  "date": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "number",
+                                  "amount",
+                                  "date"
+                                ]
+                              }
+                            },
                             "credit_note": {
                               "type": "boolean"
                             },
@@ -17092,6 +17185,28 @@
                               "type": "array",
                               "items": {
                                 "type": "string"
+                              }
+                            },
+                            "accounts": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "index": {
+                                    "type": "integer"
+                                  },
+                                  "bank": {
+                                    "type": "string"
+                                  },
+                                  "ending": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "index",
+                                  "bank",
+                                  "ending"
+                                ]
                               }
                             },
                             "overdue": {
@@ -17133,6 +17248,9 @@
                                   "type": "null"
                                 }
                               ]
+                            },
+                            "amount_changed": {
+                              "type": "boolean"
                             }
                           },
                           "required": [
@@ -17151,17 +17269,20 @@
                             "paid_method",
                             "total",
                             "credits",
+                            "credit_question",
                             "credit_note",
                             "covered",
                             "left",
                             "previous_iban_last4",
+                            "accounts",
                             "overdue",
                             "can_approve",
                             "can_mark_paid",
                             "can_withdraw",
                             "can_reopen",
                             "proved",
-                            "payment_file"
+                            "payment_file",
+                            "amount_changed"
                           ]
                         },
                         {
@@ -17305,90 +17426,6 @@
                                   "type": "null"
                                 }
                               ]
-                            },
-                            "items": {
-                              "anyOf": [
-                                {
-                                  "type": "object",
-                                  "properties": {
-                                    "lines": {
-                                      "type": "array",
-                                      "items": {
-                                        "type": "object",
-                                        "properties": {
-                                          "name": {
-                                            "type": "string"
-                                          },
-                                          "unit": {
-                                            "type": "string"
-                                          },
-                                          "quantity": {
-                                            "type": "string"
-                                          },
-                                          "net": {
-                                            "type": "string"
-                                          },
-                                          "vat": {
-                                            "type": "string"
-                                          }
-                                        },
-                                        "required": [
-                                          "name",
-                                          "unit",
-                                          "quantity",
-                                          "net",
-                                          "vat"
-                                        ]
-                                      }
-                                    },
-                                    "total": {
-                                      "type": "string"
-                                    },
-                                    "currency": {
-                                      "type": "string"
-                                    },
-                                    "payment": {
-                                      "type": "string"
-                                    },
-                                    "provenance": {
-                                      "type": "string"
-                                    },
-                                    "state": {
-                                      "type": "string"
-                                    },
-                                    "revision": {
-                                      "type": "integer"
-                                    },
-                                    "verified": {
-                                      "type": "boolean"
-                                    },
-                                    "proposal": {
-                                      "type": [
-                                        "string",
-                                        "null"
-                                      ]
-                                    },
-                                    "payment_mismatch": {
-                                      "type": "boolean"
-                                    }
-                                  },
-                                  "required": [
-                                    "lines",
-                                    "total",
-                                    "currency",
-                                    "payment",
-                                    "provenance",
-                                    "state",
-                                    "revision",
-                                    "verified",
-                                    "proposal",
-                                    "payment_mismatch"
-                                  ]
-                                },
-                                {
-                                  "type": "null"
-                                }
-                              ]
                             }
                           },
                           "required": [
@@ -17409,8 +17446,7 @@
                             "sent",
                             "held",
                             "files",
-                            "mail",
-                            "items"
+                            "mail"
                           ]
                         },
                         {
@@ -17567,6 +17603,37 @@
                                         ]
                                       }
                                     },
+                                    "credit_question": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "id": {
+                                            "type": "string"
+                                          },
+                                          "number": {
+                                            "type": "string"
+                                          },
+                                          "amount": {
+                                            "description": "Exact decimal amount with two places; never binary floating point. Currency is a separate field.",
+                                            "type": "string",
+                                            "pattern": "^-?[0-9]+\\.[0-9]{2}$"
+                                          },
+                                          "date": {
+                                            "type": [
+                                              "string",
+                                              "null"
+                                            ]
+                                          }
+                                        },
+                                        "required": [
+                                          "id",
+                                          "number",
+                                          "amount",
+                                          "date"
+                                        ]
+                                      }
+                                    },
                                     "credit_note": {
                                       "type": "boolean"
                                     },
@@ -17584,6 +17651,28 @@
                                       "type": "array",
                                       "items": {
                                         "type": "string"
+                                      }
+                                    },
+                                    "accounts": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "index": {
+                                            "type": "integer"
+                                          },
+                                          "bank": {
+                                            "type": "string"
+                                          },
+                                          "ending": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "index",
+                                          "bank",
+                                          "ending"
+                                        ]
                                       }
                                     },
                                     "overdue": {
@@ -17625,6 +17714,9 @@
                                           "type": "null"
                                         }
                                       ]
+                                    },
+                                    "amount_changed": {
+                                      "type": "boolean"
                                     }
                                   },
                                   "required": [
@@ -17643,17 +17735,20 @@
                                     "paid_method",
                                     "total",
                                     "credits",
+                                    "credit_question",
                                     "credit_note",
                                     "covered",
                                     "left",
                                     "previous_iban_last4",
+                                    "accounts",
                                     "overdue",
                                     "can_approve",
                                     "can_mark_paid",
                                     "can_withdraw",
                                     "can_reopen",
                                     "proved",
-                                    "payment_file"
+                                    "payment_file",
+                                    "amount_changed"
                                   ]
                                 },
                                 {
@@ -17797,90 +17892,6 @@
                                           "type": "null"
                                         }
                                       ]
-                                    },
-                                    "items": {
-                                      "anyOf": [
-                                        {
-                                          "type": "object",
-                                          "properties": {
-                                            "lines": {
-                                              "type": "array",
-                                              "items": {
-                                                "type": "object",
-                                                "properties": {
-                                                  "name": {
-                                                    "type": "string"
-                                                  },
-                                                  "unit": {
-                                                    "type": "string"
-                                                  },
-                                                  "quantity": {
-                                                    "type": "string"
-                                                  },
-                                                  "net": {
-                                                    "type": "string"
-                                                  },
-                                                  "vat": {
-                                                    "type": "string"
-                                                  }
-                                                },
-                                                "required": [
-                                                  "name",
-                                                  "unit",
-                                                  "quantity",
-                                                  "net",
-                                                  "vat"
-                                                ]
-                                              }
-                                            },
-                                            "total": {
-                                              "type": "string"
-                                            },
-                                            "currency": {
-                                              "type": "string"
-                                            },
-                                            "payment": {
-                                              "type": "string"
-                                            },
-                                            "provenance": {
-                                              "type": "string"
-                                            },
-                                            "state": {
-                                              "type": "string"
-                                            },
-                                            "revision": {
-                                              "type": "integer"
-                                            },
-                                            "verified": {
-                                              "type": "boolean"
-                                            },
-                                            "proposal": {
-                                              "type": [
-                                                "string",
-                                                "null"
-                                              ]
-                                            },
-                                            "payment_mismatch": {
-                                              "type": "boolean"
-                                            }
-                                          },
-                                          "required": [
-                                            "lines",
-                                            "total",
-                                            "currency",
-                                            "payment",
-                                            "provenance",
-                                            "state",
-                                            "revision",
-                                            "verified",
-                                            "proposal",
-                                            "payment_mismatch"
-                                          ]
-                                        },
-                                        {
-                                          "type": "null"
-                                        }
-                                      ]
                                     }
                                   },
                                   "required": [
@@ -17901,8 +17912,7 @@
                                     "sent",
                                     "held",
                                     "files",
-                                    "mail",
-                                    "items"
+                                    "mail"
                                   ]
                                 },
                                 {
@@ -18937,6 +18947,64 @@
                               ]
                             },
                             {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "const": "ai",
+                                  "description": "The AI integration's checked proposal; never applied."
+                                },
+                                "as": {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "enum": [
+                                        "documents",
+                                        "label",
+                                        "transfer",
+                                        "advance"
+                                      ]
+                                    },
+                                    "partner": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    },
+                                    "reason": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    },
+                                    "note": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "partner",
+                                    "reason",
+                                    "note"
+                                  ]
+                                },
+                                "invoices": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  },
+                                  "description": "Open invoices whose remaining total is the amount."
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "as",
+                                "invoices"
+                              ]
+                            },
+                            {
                               "type": "null"
                             }
                           ]
@@ -19968,6 +20036,9 @@
           "bank_connections": {
             "$ref": "#/components/schemas/State/properties/bank_connections"
           },
+          "mail_proofs": {
+            "$ref": "#/components/schemas/State/properties/mail_proofs"
+          },
           "unreadable": {
             "$ref": "#/components/schemas/State/properties/unreadable"
           },
@@ -20044,6 +20115,7 @@
           "news",
           "ambiguous",
           "bank_connections",
+          "mail_proofs",
           "unreadable",
           "refused",
           "system",
@@ -20628,6 +20700,32 @@
                   "total",
                   "next_cursor"
                 ]
+              },
+              "receipts": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/State/properties/documents/items"
+                    },
+                    "maxItems": 200
+                  },
+                  "total": {
+                    "type": "integer"
+                  },
+                  "next_cursor": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "data",
+                  "total",
+                  "next_cursor"
+                ]
               }
             },
             "required": []
@@ -20636,7 +20734,7 @@
         "required": [
           "pages"
         ],
-        "description": "Current transaction-form choices, without linking or settling anything. Without collection, one full owner projection returns initial partners, invoices, payments and selected pages; with collection, just that page. Each has an exact matching total and offset cursor (default 50, maximum 200). Only partners of the transaction's direction are offered, including a credit holder's complete exposure. Invoices retain the existing open/marked, SPV-ready, non-rejected, positive-left and account/original-currency filters; amounts restore this link's own contribution before editing. Closed items selected by the current link remain available. selected pages all existing invoice choices independently of the primary row's nested-list cap; position preserves invoice order across pages/search. Invoices sort by date then case-folded number; partners by case-folded display name. Prepared payments retain held/in-file/lost/imported order, for debits with RON account or original currency only. Payment page IDs are keyed opaque identifiers; raw item_id is private and never appears in a cursor. q is an accent-insensitive display-text substring (maximum 200 characters); it excludes private payment keys. partner applies only to invoices or the initial bundle; selected always uses the current link's partner. Only the initial bundle has proposed: at most the one open invoice of either partner whose number the bank details name, when the transaction equals its remaining amount in its currency (never for an explained transaction); its partner is the default partner before the one the bank text points to. A proposal is never applied: the user confirms it. Reads are current, not a cross-request snapshot; replace choices after writes."
+        "description": "Current transaction-form choices, without linking or settling anything. Without collection, one full owner projection returns initial partners, invoices, payments, selected and receipts pages; with collection, just that page. Each has an exact matching total and offset cursor (default 50, maximum 200). Only partners of the transaction's direction are offered, including a credit holder's complete exposure. Invoices retain the existing open/marked, SPV-ready, non-rejected, positive-left and account/original-currency filters; amounts restore this link's own contribution before editing. Closed items selected by the current link remain available. selected pages all existing invoice choices independently of the primary row's nested-list cap; position preserves invoice order across pages/search. Invoices sort by date then case-folded number; partners by case-folded display name. Prepared payments retain held/in-file/lost/imported order, for debits with RON account or original currency only. Payment page IDs are keyed opaque identifiers; raw item_id is private and never appears in a cursor. receipts lists, for a debit only, the firm's uploaded files with no amount yet (held, unsent, without an invoice), in the documents order: the bon a person may name for it with tx-receipt. q is an accent-insensitive display-text substring (maximum 200 characters); it excludes private payment keys. partner applies only to invoices or the initial bundle; selected always uses the current link's partner. Only the initial bundle has proposed: at most the one open invoice of either partner whose number the bank details name, when the transaction equals its remaining amount in its currency (never for an explained transaction); else the open invoices of an AI proposal whose remaining amounts add up to the transaction in one currency. Its partner is the default partner before the one the bank text points to. A proposal is never applied: the user confirms it. Reads are current, not a cross-request snapshot; replace choices after writes."
       },
       "CoveredRow": {
         "oneOf": [
@@ -20725,7 +20823,7 @@
         "properties": {
           "state": {
             "$ref": "#/components/schemas/StateSummary",
-            "description": "Company shell with only the requested document and its purchase, receipt proposal, refusal and partner context populated."
+            "description": "Company shell with only the requested document and its purchase, refusal and partner context populated."
           },
           "related": {
             "type": "object",
@@ -21298,7 +21396,7 @@
           "state",
           "related"
         ],
-        "description": "One document, settlement, transaction or eMAG-task sheet, including an issued invoice's local-id alias. Money, identities and capabilities come from the complete company projection. related pages received credit notes, issued reversals or settlement lines in their existing order (default 50, maximum 200); its cursor continues through this same endpoint. The selected invoice contains the current related page. Receipt articles remain complete (at most 40). Other nested historical lists are capped at 50. Reads are current, not a cross-request snapshot. Order id uses the existing company:task_id sheet link; issued context identifies an already issued draft. The app also accepts ALL, reading only candidate owners of global IDs (or the first offered mail company), without retaining other firms' histories. Settlement totals/counts and confirmation capabilities precede paging. For transaction sheets only, transaction contains the complete said descriptor and exact link part/payment counts; related pages covered invoices then prepared payments in source order. Invoice numbers, remaining amounts and currencies have the existing missing-reference fallbacks. The shell keeps the selected transaction, its transfer counterpart, selected partner identities and settlement fee context; no unbounded form-choice arrays are included. The primary transaction's nested lists are capped at 50; use related and its exact total for covered rows. Invoice and issued sheets also carry lines: an invoice written here lists its stored lines, one read from SPV the lines of its stored XML (at most 200, truncated says more exist; descriptions at most 300 characters). unavailable means no stored document could be read, or one was refused or malformed; every line is checked, also those past the 200 returned, so it is never partial. Lines are display only: the totals above remain the invoice's amounts. A line's vat and gross are its net times vat_rate, rounded half up to the cent (null without a rate), so they can differ from the document's VAT by rounding. totals are the document's own: the totals an invoice written here was issued with (payable is its total), or the stored XML's LegalMonetaryTotal and its TaxTotal in the document currency, one tax per subtotal; null when they are missing or not decimal numbers, never summed from the lines. A null unit_price means a valid price per a positive base quantity other than one; a missing price or a malformed base quantity makes the document unavailable. Editable transactions also bundle four initial transaction-choices pages from the same owner projection; immutable transactions carry an empty choices object. Continue/filter through transaction-choices."
+        "description": "One document, settlement, transaction or eMAG-task sheet, including an issued invoice's local-id alias. Money, identities and capabilities come from the complete company projection. related pages received credit notes, issued reversals or settlement lines in their existing order (default 50, maximum 200); its cursor continues through this same endpoint. The selected invoice contains the current related page. Receipt articles remain complete (at most 40). Other nested historical lists are capped at 50. Reads are current, not a cross-request snapshot. Order id uses the existing company:task_id sheet link; issued context identifies an already issued draft. The app also accepts ALL, reading only candidate owners of global IDs (or the first offered mail company), without retaining other firms' histories. Settlement totals/counts and confirmation capabilities precede paging. For transaction sheets only, transaction contains the complete said descriptor and exact link part/payment counts; related pages covered invoices then prepared payments in source order. Invoice numbers, remaining amounts and currencies have the existing missing-reference fallbacks. The shell keeps the selected transaction, its transfer counterpart, selected partner identities and settlement fee context; no unbounded form-choice arrays are included. The primary transaction's nested lists are capped at 50; use related and its exact total for covered rows. Invoice and issued sheets also carry lines: an invoice written here lists its stored lines, one read from SPV the lines of its stored XML (at most 200, truncated says more exist; descriptions at most 300 characters). unavailable means no stored document could be read, or one was refused or malformed; every line is checked, also those past the 200 returned, so it is never partial. Lines are display only: the totals above remain the invoice's amounts. A line's vat and gross are its net times vat_rate, rounded half up to the cent (null without a rate), so they can differ from the document's VAT by rounding. totals are the document's own: the totals an invoice written here was issued with (payable is its total), or the stored XML's LegalMonetaryTotal and its TaxTotal in the document currency, one tax per subtotal; null when they are missing or not decimal numbers, never summed from the lines. A null unit_price means a valid price per a positive base quantity other than one; a missing price or a malformed base quantity makes the document unavailable. Editable transactions also bundle five initial transaction-choices pages from the same owner projection; immutable transactions carry an empty choices object. Continue/filter through transaction-choices."
       },
       "StateListPage": {
         "type": "object",
@@ -21531,7 +21629,10 @@
         "type": "object",
         "properties": {
           "kind": {
-            "const": "order_refused"
+            "enum": [
+              "order_refused",
+              "order_vat_review"
+            ]
           },
           "id": {
             "type": "string"
@@ -21541,6 +21642,12 @@
           },
           "order_id": {
             "type": "string"
+          },
+          "draft_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "sheet": {
             "const": "ord"
@@ -21565,7 +21672,10 @@
             "type": "string"
           },
           "action": {
-            "const": "order-discard"
+            "enum": [
+              "order-discard",
+              null
+            ]
           }
         },
         "required": [
@@ -21573,6 +21683,7 @@
           "id",
           "company",
           "order_id",
+          "draft_id",
           "sheet",
           "reason",
           "label",
@@ -24290,7 +24401,6 @@
           "question": {
             "enum": [
               "missing",
-              "downloads",
               "orphan",
               null
             ]
@@ -24377,7 +24487,6 @@
           "question": {
             "enum": [
               "missing",
-              "downloads",
               "orphan",
               null
             ]
@@ -24546,50 +24655,6 @@
                     "kind",
                     "version",
                     "count"
-                  ]
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "kind": {
-                      "const": "downloads"
-                    },
-                    "versions": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "id": {
-                            "type": "integer"
-                          },
-                          "version": {
-                            "type": "string"
-                          },
-                          "at": {
-                            "type": "string"
-                          },
-                          "count": {
-                            "type": "integer"
-                          },
-                          "total": {
-                            "description": "Exact decimal amount with two places; never binary floating point. Currency is a separate field.",
-                            "type": "string",
-                            "pattern": "^-?[0-9]+\\.[0-9]{2}$"
-                          }
-                        },
-                        "required": [
-                          "id",
-                          "version",
-                          "at",
-                          "count",
-                          "total"
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "versions"
                   ]
                 },
                 {

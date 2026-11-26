@@ -9,8 +9,8 @@ import { Act, L, Task } from "./ui";
 
 export function SettlementTasks({ s, co }: { s: State; co?: string }) {
   return (s.settlements ?? []).filter((r) => r.status === "pending").map((r) => (
-    <Task key={`${s.co}set${r.id}`} co={co} icon="bank" title={["confirmation_required", "statement_confirmation_required"].includes(r.error || "") ? "Decontare de confirmat" : "Decontare de verificat"}
-      body={[`${nOf(r.invoice_count, "O factură", "facturi")}, net ${lei(r.net)} ${curOf(r.currency)}, de la ${r.payer.name}.`, details(r, s.today), progress(r)].filter(Boolean).join(" ")}>
+    <Task key={`${s.co}set${r.id}`} co={co} icon="bank" title={r.can_confirm ? "Decontare de confirmat" : "Decontare de verificat"}
+      body={[`${nOf(r.invoice_count, "O factură", "facturi")}, net ${lei(r.net)} ${curOf(r.currency)}, de la ${r.payer.name}.`, details(r, s.today)].filter(Boolean).join(" ")}>
       {r.can_confirm && r.credit ? <Confirm r={r} /> : null}
       <L to={{ co: s.co, set: r.id }} className="btn g">Vezi decontarea</L>
     </Task>
@@ -34,15 +34,9 @@ function Confirm({ r }: { r: Settlement }) {
   return <Act action="settlement-confirm" body={{ id: r.id, tx: r.credit!.id, confirmed: "yes" }} label="Confirmă decontarea" />;
 }
 
-/** How many confirmations are left before this payer's batches close on their own; nothing for a payer known only by name. */
-function progress(r: Settlement) {
-  const left = r.can_confirm && r.auto_after !== null ? r.auto_after - r.confirmed_count : 0;
-  return left > 0 ? `După încă ${nOf(left, "o confirmare", "confirmări")}, următoarele decontări care trec verificările se confirmă automat.` : "";
-}
-
 function details(r: Settlement, today: string) {
   if (r.status === "collected") return "Intrarea în cont apare în extras.";
-  if (r.can_confirm && r.credit) return `Așteaptă confirmarea ta: intrare de ${lei(r.credit.amount)} ${curOf(r.credit.currency)} pe ${dm(r.credit.date, today)}.`;
+  if (r.can_confirm && r.credit) return `${r.error === "mail_confirmation_required" ? "Raportul a venit pe mail: verifică-l. " : ""}Așteaptă confirmarea ta: intrare de ${lei(r.credit.amount)} ${curOf(r.credit.currency)} pe ${dm(r.credit.date, today)}.`;
   const reasons: Record<string, string> = {
     statement_unavailable: "Extrasul încărcat nu poate fi citit. Încarcă din nou extrasul corect.",
     statement_changed: "Extrasul s-a schimbat. Verifică noua intrare înainte de confirmare.",
@@ -68,6 +62,7 @@ function details(r: Settlement, today: string) {
 /** Why a report line names no single open invoice, with the value it carries when this page of lines has it. */
 function lineError(r: Settlement) {
   const line = r.lines.find((l) => l.position === r.failed_line), error = r.error ?? "";
+  if (error.endsWith("adjustment")) return "este o rambursare sau o ajustare. Verific-o manual.";
   if (error.endsWith("awb_unknown")) return `${line?.awb ? `AWB ${line.awb}` : "AWB-ul"} nu corespunde niciunei comenzi.`;
   if (error.endsWith("order_unknown")) return `${line?.order ? `comanda ${line.order}` : "comanda"} nu există în comenzile firmei.`;
   if (error.endsWith("invoice_missing_or_ambiguous")) return !line?.reference ? "factura nu poate fi găsită."
@@ -98,19 +93,18 @@ function SettlementBody({ id, onClose }: { id: string; onClose: () => void }) {
       </dl>
       <p className="mt-4 mb-0 text-sm leading-relaxed">{details(r, s.today)}</p>
     </Panel>
-    {progress(r) ? <p className="text-sm text-muted">{progress(r)}</p> : null}
     <div className={sectionHeadingStyle}><h3 className="m-0 text-base font-semibold">Facturile din raport</h3></div>
     <Panel padded={false}>
       <DetailPages />
       <ul className="m-0 list-none divide-x-0 divide-y divide-solid divide-line p-0">
         {r.lines.map((line) => <li className="flex items-start justify-between gap-4 p-4 text-sm leading-relaxed" key={line.position}>
-          <span className="min-w-0 wrap-anywhere">{line.invoice ? <L to={{ co: s.co, iss: line.invoice }}>Factura {line.reference || line.order || line.awb || "emisă"}</L> : line.reference || line.awb || line.order}</span>
+          <span className="min-w-0 wrap-anywhere">{line.invoice ? <L to={{ co: s.co, iss: line.invoice }}>Factura {line.reference || line.order || line.awb || "emisă"}</L> : line.reference || line.awb || line.order || "Ajustare"}</span>
           <span className="shrink-0 tabular-nums">{lei(line.gross)} {curOf(r.currency)}</span>
         </li>)}
       </ul>
     </Panel>
     {r.can_confirm && r.credit && <Actions><Confirm r={r} /></Actions>}
-    {!r.can_confirm && r.status === "pending" && <Actions><Act action="settlement-withdraw" body={{ id: r.id }}
+    {(!r.can_confirm || r.error === "mail_confirmation_required") && r.status === "pending" && <Actions><Act action="settlement-withdraw" body={{ id: r.id }}
       label="Șterge raportul" cls="btn g" confirm={{ text: "Ștergi raportul greșit? Facturile rămân neîncasate.", yes: "Șterge raportul", danger: true }} /></Actions>}
     {(r.tx_key || r.credit?.id || r.candidate?.id) && <p><L to={{ co: s.co, tx: r.tx_key || r.credit?.id || r.candidate?.id }}>Vezi tranzacția</L></p>}
     {r.status === "collected" && <p>{r.human_confirmed ? "Decontare confirmată." : "Decontare confirmată automat, pe baza raportului și a extrasului."}</p>}

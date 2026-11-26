@@ -60,11 +60,13 @@ def state__invoices(
                 "currency": r["currency"] or "RON",
                 "total": money(r["total"]),
                 "credits": [],
+                "credit_question": [],
                 "credit_note": False,
                 "status": status,
                 "payment_state": ps,
                 "item_id": r["item_id"],
                 "payment_file": None,  # Scale fixtures contain no named-file membership.
+                "amount_changed": False,
                 "covered": money(part),
                 "left": money(Decimal(r["total"]) - part if status in ("open", "marked", "linked") else 0),
                 "paid_at": iso_dt(r["paid_at"]) if status in ("marked", "paid", "skipped") else None,
@@ -72,6 +74,7 @@ def state__invoices(
                 "paid_detail": (r["paid_detail"] or None) if status in ("marked", "paid") else None,
                 "overdue": owed and bool(r["due_date"]) and r["due_date"] < today.isoformat(),
                 "previous_iban_last4": [],  # The scale fixture has no proved supplier accounts.
+                "accounts": [],  # nor invoices listing several IBANs.
                 "can_approve": status == "open" and not part and efactura.payment_refusal(L, r) is None,
                 "can_mark_paid": status == "open",
                 "can_withdraw": ps in ("held", "in_file"),

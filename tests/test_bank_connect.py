@@ -765,3 +765,15 @@ def test_a_firm_without_accounts_can_choose_every_catalogue_bank_without_changin
     assert next(b for b in nord["banks"] if b["bank"] == "bt")["connect"] == "ready"
     assert all(b["sources"][-1]["default"] for b in nord["banks"])
     assert bc.status(setup, companies.get("NORD", L=setup), date(2026, 11, 4)) == []
+
+
+@pytest.mark.parametrize("last_page", [{"transactions": []}, {}, {"transactions": None}])
+def test_a_page_without_its_transaction_list_is_a_failed_read_not_an_empty_one(setup, last_page):
+    """An empty list is a page with no bookings; an answer without one proves nothing, so the read fails."""
+    pages = iter([{"transactions": [{"entry_reference": "E1"}], "continuation_key": "k"}, last_page])
+    api = client(lambda method, url, body, headers: (200, next(pages)))
+    if "transactions" in last_page and last_page["transactions"] == []:
+        assert api.transactions("u1", "2026-10-01", "2026-10-31") == [{"entry_reference": "E1"}]
+    else:
+        with pytest.raises(eb.BankError):
+            api.transactions("u1", "2026-10-01", "2026-10-31")

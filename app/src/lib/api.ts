@@ -273,14 +273,13 @@ export function docFile(co: Co, f: DocFile, png = false): string {
 /** The payment files' own actions (POST payment-files): exact bodies, the firm resolved by the engine from the file, so only
  * `payment_file_create` names it (docs/openapi.json). */
 export type FileAction =
-  | { action: "payment_file_add"; file_id: number; invoice_ids: string[] }
-  | { action: "payment_file_create"; co: Co; name: string; invoice_ids: string[] }
+  | { action: "payment_file_add"; file_id: number; invoice_ids: string[]; accounts?: Record<string, number>; amounts?: Record<string, string> }
+  | { action: "payment_file_create"; co: Co; name: string; invoice_ids: string[]; accounts?: Record<string, number>; amounts?: Record<string, string> }
   | { action: "payment_file_rename"; file_id: number; name: string }
   | { action: "payment_file_remove"; file_id: number; payment_id: string }
   | { action: "payment_file_delete"; file_id: number }
   | { action: "payment_file_download"; file_id: number }
   | { action: "payment_file_import"; file_id: number; download_id: number }
-  | { action: "payment_file_not_imported"; file_id: number; download_id: number }
   | { action: "payment_file_restore" | "payment_file_missing_import"; file_id: number; version: string };
 export type FileActionName = FileAction["action"];
 /** create answers with the new file; download with the file's bytes, which the app saves and never sends again. */
@@ -302,16 +301,16 @@ export async function getPaymentFile(id: number, signal?: AbortSignal): Promise<
 }
 
 export type UserAction = "user-create" | "user-update" | "user-disable" | "user-enable" | "user-unlock" | "user-setup-link" | "user-reset" | "session-close";
-export type Action = "upload-assign" | "document-correct" | "mode-switch" | UserAction | "history-review" | "receipt-lines-save" | "receipt-invoice-confirm" | "emag-refund" | "emag-resolve" | "mark-paid" | "reopen" | "withdraw" | "pack-prepare" | "pack-sent" | "pack-unsent" | "check" | "mail-answer"
-  | "settlement-confirm" | "settlement-withdraw" | "settlement-format-delete" | "issued-mark" | "issued-unmark" | "resolve-debit" | "card-owner" | "tx-link" | "tx-unlink" | "tx-await" | "memory-forget" | ProductAction | ConfigAction;
+export type Action = "upload-assign" | "document-correct" | "mode-switch" | UserAction | "history-review" | "emag-refund" | "emag-resolve" | "mark-paid" | "reopen" | "withdraw" | "pack-prepare" | "pack-sent" | "pack-unsent" | "check" | "mail-answer"
+  | "settlement-confirm" | "settlement-withdraw" | "settlement-format-delete" | "settlement-format-senders" | "issued-mark" | "issued-unmark" | "resolve-debit" | "mail-proof" | "credit-pick" | "card-owner" | "tx-link" | "tx-unlink" | "tx-await" | "tx-receipt" | "memory-forget" | ProductAction | ConfigAction;
 export type ProductAction = "product-add" | "product-update" | "product-archive" | "product-delete";
 
 
 /** Configuration action names; shadow policy comes from the generated effect contract. */
 export const CONFIG_ACTIONS = ["telemetry-settings", "update-checks", "setup-card-dismiss", "setup-card-show", "accountant-save", "rule-pause", "rule-resume", "rule-supplier-autopay", "rule-partner-not-mailed", "rule-reminders", "rule-spv-delay", "mail-detect", "mail-test", "mail-microsoft-start", "mail-microsoft-poll", "integration-add", "integration-update", "integration-clear", "integration-enable",
   "integration-default", "integration-remove", "upload-link-create", "upload-link-revoke", "token-create", "token-revoke",
-  "company-lookup", "company-add", "company-update", "company-bank", "company-account", "company-statement-password", "company-alias-add", "company-alias-remove",
-  "statement-csv-format", "bank-connect", "bank-disconnect", "bank-accounts", "bank-setup",
+  "company-lookup", "company-add", "company-update", "company-bank", "company-account", "company-account-dates", "company-statement-password", "company-alias-add",
+  "company-alias-remove", "statement-csv-format", "bank-connect", "bank-disconnect", "bank-accounts", "bank-setup",
   "integration-connect"] as const;
 export type ConfigAction = (typeof CONFIG_ACTIONS)[number];
 export const actionRole = (action: Action | FileActionName): keyof Capabilities => (ACTION_ROLES as Record<string, string>)[action] as keyof Capabilities;
@@ -550,7 +549,7 @@ export async function postUser(action: UserAction, body: Record<string, string>)
 export type CompanyResult = ActionResult & { done?: (Done & Partial<CompanyEntry> & Partial<CompanyLookup> & { retry?: boolean }) | null };
 
 export async function postCompany(action: "company-lookup" | "company-add" | "company-update" | "company-bank" | "company-account"
-  | "company-statement-password" | "company-alias-add" | "company-alias-remove", body: Record<string, string>): Promise<CompanyResult> {
+  | "company-account-dates" | "company-statement-password" | "company-alias-add" | "company-alias-remove", body: Record<string, string>): Promise<CompanyResult> {
   return (await send(action, body)) as CompanyResult; // install-wide: no company named
 }
 

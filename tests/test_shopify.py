@@ -12,7 +12,7 @@ from threading import Barrier
 
 import pytest
 from test_invoicing import setup_invoice as setup_invoice
-from test_settlements import collect, statement, store_bank
+from test_settlements import statement, store_bank
 
 from fiscalm import integrations
 from fiscalm.commerce import shopify as s
@@ -382,7 +382,7 @@ def test_http_hook_is_public_post_only(shop, monkeypatch):
         worker.join()
 
 
-def test_gross_mixed_tax_discount_shipping_and_zero_vat_refusal(shop):
+def test_gross_mixed_tax_discount_shipping_and_zero_vat_review(shop, home):
     L, iid, row = shop
     row["lineItems"][0]["discountAllocations"] = [dict(allocatedAmountSet=amount("24.20"))]
     row["lineItems"][0]["taxLines"][0]["priceSet"] = amount("37.80")
@@ -398,8 +398,11 @@ def test_gross_mixed_tax_discount_shipping_and_zero_vat_refusal(shop):
     result = s.ingest(L, iid, row, "2026-10-31")
     assert inv.invoice(L, result["draft_id"], company="NORD")["data"]["totals"]["total"] == "228.90"
     row["lineItems"][0]["taxLines"] = []
-    with pytest.raises(s.commerce.Error):
-        s.ingest(L, iid, row, "2026-10-31")
+    (home / "state" / "LIVE").touch()
+    integrations.update(L, iid, {"auto_issue": "true"})
+    row["id"], row["createdAt"] = "gid://shopify/Order/14", "2026-10-31T10:00:00Z"
+    result = s.ingest(L, iid, row, "2026-10-31")  # a new order placed today, in Live, with auto issue
+    assert result["status"] == "draft" and s.commerce.get(L, "NORD", result["id"])["reason"]["code"] == "vat_review"
 
 
 def test_tax_mismatch_refuses_before_live_auto_issue(shop, home):
@@ -634,10 +637,9 @@ def test_payout_atomic_import_and_bank_collection(shop, monkeypatch, home):
     with pytest.raises(settlements.SettlementError, match="wrong_company"):
         L.settle_report(rid, settlements.BankEvidence("STUDIO9", None, None, st.accounts))
     assert L.issued_rows()[0]["status"] == "open"
-    # Shared bank guards retain first-three confirmation and atomic reservation.
+    # The shared bank guards settle the verified payout on its own, with one atomic reservation.
     store_bank(L, st)
-    assert settlements.match_statement(L, st) == []
-    assert collect(L, rid, st) == [own]
+    assert settlements.match_statement(L, st) == [own]
     assert len(L.used_txs()) == 1
     assert L.db.execute("SELECT amount FROM settlement_fees").fetchone()[0] == "2.00"
 

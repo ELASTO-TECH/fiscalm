@@ -17,7 +17,7 @@ from test_mt940 import block
 
 from fiscalm import companies, company_config, pack, recon
 from fiscalm.api import actions
-from fiscalm.bank import csv as cs, intake as statement_intake, statements, upload as su
+from fiscalm.bank import coverage, csv as cs, intake as statement_intake, statements, upload as su
 from fiscalm.bank.mt940 import parse_mt940
 from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import finance_home
@@ -251,7 +251,17 @@ def test_csvs_of_one_account_add_up_day_by_day_and_never_cover_a_month(ledger):
     )
     with pytest.raises(su.Refused):
         su.accept(ledger, "NORD", "", overlapping, "text/csv", rid(RON))
-    assert not statement_intake.covers(ledger, "NORD", "2026-10", RON)  # partial: never the month's statement
+    # each CSV covers the days from its first line to its last, without the balances that prove them complete
+    october = (date(2026, 10, 1), date(2026, 10, 31))
+    assert coverage.gaps(ledger, "NORD", RON, *october) == [
+        (date(2026, 10, 1), date(2026, 10, 1)),
+        (date(2026, 10, 16), date(2026, 10, 19)),
+        (date(2026, 10, 29), date(2026, 10, 31)),
+    ]
+    assert coverage.gaps(ledger, "NORD", RON, date(2026, 10, 2), date(2026, 10, 15)) == []
+    assert coverage.gaps(ledger, "NORD", RON, date(2026, 10, 2), date(2026, 10, 15), trusted_only=True) == [
+        (date(2026, 10, 2), date(2026, 10, 15))
+    ]
 
 
 def test_a_crash_after_publishing_a_csv_is_finished_on_the_next_run(ledger, monkeypatch):
@@ -264,6 +274,9 @@ def test_a_crash_after_publishing_a_csv_is_finished_on_the_next_run(ledger, monk
         ledger.db.execute("SELECT count(*) FROM meta WHERE key LIKE 'statement_import:%' AND value!=''").fetchone()[0]
         == 1
     )
+    # its days don't count while its lines are unmatched: a payment it proves made can't go out again meanwhile
+    october = (date(2026, 10, 2), date(2026, 10, 15))
+    assert not coverage.covered(ledger, "NORD", RON, *october)
     monkeypatch.setattr(efactura, "match_statement", real)
     statement_intake.recover(ledger)
     assert (
@@ -271,7 +284,7 @@ def test_a_crash_after_publishing_a_csv_is_finished_on_the_next_run(ledger, monk
         == 0
     )
     (doc,) = ledger.documents(kind="statement")
-    assert doc["path"].endswith(".csv")
+    assert doc["path"].endswith(".csv") and coverage.covered(ledger, "NORD", RON, *october)
 
 
 def test_amounts_are_kept_with_two_decimals_whatever_the_export_wrote():

@@ -7,7 +7,7 @@ from test_invoicing import PARTY, setup_invoice as setup_invoice
 from fiscalm import integrations, rules
 from fiscalm.api import actions, tokens
 from fiscalm.api.v1 import Error
-from fiscalm.commerce import orders as c
+from fiscalm.commerce import orders as c, state as commerce_state
 from fiscalm.invoicing import engine as i
 from fiscalm.ledger import Ledger
 
@@ -158,6 +158,47 @@ def test_shop_never_overwrites_saved_client(shop):
     assert L.db.execute("SELECT data FROM invoice_clients WHERE id=?", (cid,)).fetchone()[0] == before
 
 
+@pytest.mark.parametrize(
+    "saved,typed,country,same",
+    [
+        ("Firma Fictivă SRL", "S.C. FIRMA FICTIVA S.R.L.", "RO", True),
+        ("Firma Fictivă SRL", "Firma Fictivă", "RO", True),
+        ("Spa SRL", "spa s.r.l.", "RO", True),
+        ("Atelier Spa SRL", "Atelier Spa", "RO", True),
+        ("Atelier SRL", "Atelier Spa", "RO", False),
+        ("Atelier SRL", "Atelier SA", "RO", False),
+        ("Atelier Spa Design SRL", "Atelier Design SRL", "RO", False),
+        ("Atelier Spa SRL", "Atelier SRL", "RO", False),
+        ("Atelier Fittizio S.p.A.", "Atelier Fittizio", "IT", True),
+        ("Fictional Spa", "Fictional", "GB", False),
+        ("Fictional Spa", "Fictional", "MC", False),
+        ("SC Harbour Ltd", "Harbour Ltd", "GB", False),
+        ("S.C. Harbour SRL", "Harbour SRL", "RO", True),
+        ("...", "!!!", "RO", False),
+    ],
+)
+def test_same_firm_names(saved, typed, country, same):
+    assert c.same_firm(dict(name=saved, country=country), dict(name=typed)) is same
+    assert not c.same_firm(dict(name=saved, country=country), dict(name=saved, private=True))
+    assert not c.same_firm(dict(name=saved, country=country, private=True), dict(name=saved))
+
+
+@pytest.mark.parametrize("name", ["S.C. FIRMA FICTIVA S.R.L.", "firma fictivă"])
+def test_returning_firm_accepts_address_and_email_drift(shop, name):
+    L, body = shop
+    cid = i.save_client(L, "NORD", PARTY | dict(street="Strada Exemplu nr. 10"))
+    before = L.db.execute("SELECT data FROM invoice_clients WHERE id=?", (cid,)).fetchone()[0]
+    buyer = dict(type="company", name=name, cui=PARTY["cui"], email="comenzi@example.invalid")
+    buyer["address"] = body["buyer"]["address"] | dict(street="Str. Exemplu 10")
+    result = c.intake(L, "NORD", body | dict(buyer=buyer), "2026-10-31")
+    order = c.get(L, "NORD", result["id"])
+    assert order["client_id"] == cid and order["body"]["buyer"] == buyer
+    client = i.invoice(L, result["draft_id"], company="NORD")["data"]["client"]
+    assert (client["street"], client["email"]) == ("Strada Exemplu nr. 10", PARTY["email"])
+    assert L.db.execute("SELECT data FROM invoice_clients WHERE id=?", (cid,)).fetchone()[0] == before
+    assert i.issue(L, result["draft_id"], "2026-10-31", company="NORD", version=1)["status"] == "issued"
+
+
 @pytest.mark.parametrize("price,qty", [("1.99", "1"), ("0.99", "3"), ("33.33", "1")])
 def test_gross_rounding_preserves_amount(shop, price, qty):
     L, body = shop
@@ -249,10 +290,58 @@ def test_disabled_and_distinct_channels(shop):
         c.intake(L, "NORD", body | dict(channel=second["id"]), "2026-10-31")
 
 
-def test_vat_payer_zero_rate_refuses_without_guessing(shop):
+def test_taxed_order_keeps_a_foreign_identifier_as_sent(shop, home):
     L, body = shop
-    with pytest.raises(Error) as err:
-        c.intake(L, "NORD", body | dict(lines=[body["lines"][0] | dict(vat_rate="0")]), "2026-10-31")
-    assert err.value.code == "invalid_order"
-    assert L.db.execute("SELECT count(*) FROM invoices").fetchone()[0] == 0
-    assert L.db.execute("SELECT count(*) FROM commerce_orders WHERE status='refused'").fetchone()[0] == 1
+    (home / "state").mkdir(exist_ok=True)
+    (home / "state" / "LIVE").touch()
+    integrations.update(L, body["channel"], {"auto_issue": "true"})
+    address = dict(street="Musterstraße 1", city="Wien", county="Wien", country="AT")
+    buyer = dict(type="company", name="Firma Fictivă GmbH", cui="AT1", address=address)
+    result = c.intake(L, "NORD", body | dict(buyer=buyer), "2026-10-31")
+    client = i.invoice(L, result["draft_id"], company="NORD")["data"]["client"]
+    assert result["status"] == "issued" and (client["cui"], client.get("vat_id", "")) == ("AT1", "")
+
+
+@pytest.mark.parametrize(
+    "country,cui,lines,category",
+    [
+        ("DE", "DE123456789", 1, "K"),  # EU firm under its own VAT id: intra-community supply proposed
+        ("US", None, 1, "G"),  # outside the EU VAT territory: export proposed
+        ("RO", None, 1, None),  # domestic 0%: a person chooses
+        ("GB", None, 1, None),  # may be Northern Ireland
+        ("DE", "DE12", 1, None),  # a local id, not a German VAT id: kept as the buyer's fiscal code
+        ("DE", "person", 1, None),  # a person's identifier is never read as a VAT id
+        ("DE", "DE123456789", 2, None),  # mixed with a 21% line
+    ],
+)
+def test_vat_payer_zero_rate_lines_wait_for_a_person(shop, home, monkeypatch, country, cui, lines, category):
+    from fiscalm import bnr
+
+    L, body = shop
+    (home / "state").mkdir(exist_ok=True)
+    (home / "state" / "LIVE").touch()
+    integrations.update(L, body["channel"], {"auto_issue": "true"})
+    days = []
+    monkeypatch.setattr(bnr, "rate", lambda L, cur, day, today: days.append(day) or ("5", "2026-10-02"))
+    person = cui == "person"
+    buyer = body["buyer"] | (dict(type="company", name="Firma Fictivă GmbH", cui=cui) if cui else {})
+    buyer |= dict(type="person", cui="DE123456789") if person else {}
+    if country != "RO":
+        buyer["address"] = dict(street="Musterstraße 1", city="Musterstadt", county="Hessen", country=country)
+    lines = [body["lines"][0] | dict(vat_rate="0")] + body["lines"][: lines - 1]
+    body |= dict(buyer=buyer, lines=lines, currency="EUR", placed_at="2026-10-05")
+    result = c.intake(L, "NORD", body, "2026-10-31")
+    invoice = i.invoice(L, result["draft_id"], company="NORD")
+    assert (result["status"], invoice["lines"][0]["vat_category"]) == ("draft", category or "Z")
+    assert [t["kind"] for t in commerce_state.project(L, "NORD", [])["order_tasks"]] == ["order_vat_review"]
+    assert c.get(L, "NORD", result["id"])["reason"]["code"] == "vat_review"
+    assert invoice["data"]["client"].get("vat_id", "") == (cui if cui == "DE123456789" else "")
+    assert days == ["2026-10-31" if category == "K" else "2026-10-05"]  # K's tax point is art. 283's
+    if category:  # the proposal is issuable once a person confirms it
+        i.issue(L, result["draft_id"], "2026-10-31", company="NORD", version=1)
+    else:  # or the order is cancelled, which is not a refused order to discard
+        c.command(L, "NORD", result["id"], "orders_cancel", {}, "2026-10-31")
+        with pytest.raises(Error):
+            c.command(L, "NORD", result["id"], "orders_discard", {}, "2026-10-31")
+    assert c.get(L, "NORD", result["id"])["reason"] is None
+    assert commerce_state.project(L, "NORD", [])["order_tasks"] == []

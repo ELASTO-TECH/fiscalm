@@ -8,12 +8,12 @@ import json
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 from fiscalm import companies
-from fiscalm.bank import intake as statement_intake
+from fiscalm.bank import coverage
 from fiscalm.efactura.credits import credited
 from fiscalm.ledger import Ledger, finance_home, is_live
 from fiscalm.migrations import payment_file_name
@@ -46,19 +46,23 @@ def to_pay_dir() -> Path:
     return finance_home() / TO_PAY
 
 
-def _previous_month(d: date) -> str:
-    return f"{d.year - 1}-12" if d.month == 1 else f"{d.year}-{d.month - 1:02d}"
-
-
 def missing_statement(ledger: Ledger, company: str, today: date) -> str:
-    """Require last month's paying-account statement only for firms that receive statements."""
-    month = _previous_month(today)
-    connected = ledger.db.execute("SELECT 1 FROM bank_connections WHERE company=? LIMIT 1", (company,)).fetchone()
-    earlier = any(d["month"] < today.strftime("%Y-%m") for d in ledger.documents(company=company, kind="statement"))
-    if not connected and not earlier:
+    """Last month (YYYY-MM) when the bank's record of the paying account doesn't cover all of it yet, else "". Any
+    record counts (bank.coverage: a statement, a CSV, the open banking feed). Only for firms that receive the bank's
+    record: one with a bank connection or a statement of an earlier month."""
+    last = today.replace(day=1) - timedelta(days=1)
+    first = last.replace(day=1)
+    receives = ledger.db.execute(
+        "SELECT EXISTS(SELECT 1 FROM bank_connections WHERE company=:co) OR EXISTS(SELECT 1 FROM documents "
+        "WHERE company=:co AND kind='statement' AND month<:month)",
+        {"co": company, "month": today.strftime("%Y-%m")},
+    ).fetchone()[0]
+    if not receives:
         return ""
     account = companies.get(company).paying_account
-    return month if account and not statement_intake.covers(ledger, company, month, account.iban) else ""
+    if not account or coverage.covered(ledger, company, account.iban, first, last):
+        return ""
+    return first.strftime("%Y-%m")
 
 
 @contextmanager
@@ -122,11 +126,16 @@ def version(item_ids) -> str:
 
 
 def _without_credits(ledger: Ledger, rows: list) -> list:
-    """Under pay_lock: no unimported payment retains its original amount after a linked credit."""
+    """Under pay_lock: no unimported invoice payment keeps an amount that is not its invoice's total minus its linked
+    credits now (efactura.payment_item): one built before a credit, or for a credit that no longer links, is withdrawn."""
     with ledger.tx():
-        credits = {key for co in {r["company"] for r in rows} for key in credited(ledger, co)}
+        credits = {k: v for co in {r["company"] for r in rows} for k, v in credited(ledger, co).items()}
+        amounts = {r["item_id"]: Decimal(r["amount"]) for r in rows}
         by_item = {
-            r["item_id"]: r["message_id"] for r in ledger.efactura_rows(status="linked") if r["message_id"] in credits
+            r["item_id"]: r["message_id"]
+            for r in ledger.efactura_rows(status="linked")
+            if r["item_id"] in amounts
+            and amounts[r["item_id"]] != Decimal(r["total"]) - credits.get(r["message_id"], Decimal(0))
         }
         for row in rows:
             if row["item_id"] in by_item and not ledger.withdraw_credited_payment(
@@ -237,20 +246,12 @@ def named_files(ledger: Ledger, company: str) -> list[dict]:
         (company,),
     ):
         snapshots.setdefault(row["file_id"], []).append(dict(row) | {"items": json.loads(row["items"])})
-    answers = {
-        r["id"]: int(r["value"])
-        for r in ledger.db.execute(
-            "SELECT f.id,m.value FROM payment_files f JOIN meta m ON m.key='payment_download_answer:' || f.id WHERE f.company=?",
-            (company,),
-        )
-    }
-    return [
-        _named_summary(ledger, f, members.get(f["id"], []), snapshots.get(f["id"], []), proofs, answers.get(f["id"], 0))
-        for f in files
-    ]
+    return [_named_summary(ledger, f, members.get(f["id"], []), snapshots.get(f["id"], []), proofs) for f in files]
 
 
-def _named_summary(ledger: Ledger, file, rows: list, downloads_: list[dict], proofs: dict, answered: int) -> dict:
+def _named_summary(ledger: Ledger, file, rows: list, downloads_: list[dict], proofs: dict) -> dict:
+    """A file downloaded several times stays editable: the latest download is the one to import, and an edit since
+    then only shows `changed_since_download` (import waits for a new download). Questions are about the file itself."""
     confirmable = [r for r in rows if r["status"] != "skipped"]
     confirmed = bool(confirmable) and all("payment " + r["item_id"] in proofs for r in confirmable)
     changed = bool(downloads_) and downloads_[0]["revision"] != file["revision"]
@@ -260,8 +261,6 @@ def _named_summary(ledger: Ledger, file, rows: list, downloads_: list[dict], pro
         if file["path"] and not path.exists() and not file["imported_at"] and not confirmed
         else "orphan"
         if path.exists() and not rows
-        else "downloads"
-        if sum(d["id"] > answered for d in downloads_) > 1 and not file["imported_at"] and not confirmed
         else None
     )
     return {
@@ -303,14 +302,6 @@ def editable_file(ledger: Ledger, file_id: int, company: str):
     return file
 
 
-def mark_not_imported(ledger: Ledger, file_id: int, company: str, download_id: int) -> bool:
-    with pay_lock(), ledger.tx():
-        file = open_file(ledger, file_id, company)
-        if file["path"] and not named_path(file).exists():
-            raise FileRefusal("Fișierul lipsește. Confirmă dacă l-ai importat înainte să-l schimbi.")
-        return ledger.answer_file_not_imported(file_id, company, file["revision"], download_id)
-
-
 def add_invoices(
     ledger: Ledger,
     company: str,
@@ -319,7 +310,11 @@ def add_invoices(
     file_id: int | None = None,
     name: str | None = None,
     approve_invoice: Callable,
+    accounts: dict[str, str] | None = None,
+    amounts: dict[str, str] | None = None,
 ) -> int:
+    """`accounts`: the IBAN a person picked for an invoice listing several (efactura.approve's `account`). `amounts`:
+    the amount the person saw for an invoice; its payment must be that amount, or nothing is added."""
     with pay_lock(), ledger.tx():
         if file_id is None:
             file_id = ledger.create_payment_file(company, name or "")
@@ -332,7 +327,10 @@ def add_invoices(
             row = ledger.efactura(mid)
             if not row or row["company"] != company:
                 raise FileRefusal("Factura nu aparține firmei.")
-            item = approve_invoice(ledger, mid, origin="person", unfiled=True)["item_id"]
+            account = (accounts or {}).get(mid)
+            item = approve_invoice(ledger, mid, origin="person", unfiled=True, account=account)["item_id"]
+            if mid in (amounts or {}) and Decimal(ledger.payment(item)["amount"]) != Decimal(amounts[mid]):
+                raise FileRefusal("Suma de plată s-a schimbat. Verifică factura din nou.")
             if not ledger.attach_payment_file(file_id, company, item, origin="person"):
                 raise FileRefusal("Factura este deja într-un fișier sau s-a schimbat.")
         return file_id
@@ -488,6 +486,10 @@ def import_file(ledger: Ledger, file_id: int, company: str, download_id: int, to
                     "Versiunea nu mai este actuală. Verifică în bancă ce plăți ai importat înainte să continui."
                 )
             source = named_path(file)
+            # The file on disk is what the bank got last: a row that is not those bytes (two downloads recorded in one
+            # second before #51 can order wrong) is never imported; a new download settles it.
+            if source.exists() and hashlib.sha256(source.read_bytes()).hexdigest() != pick["version"]:
+                raise FileRefusal("Descarcă fișierul din nou înainte să-l imporți.")
             dest = finance_home() / company / "plati" / f"payment-file-{file_id}{named_path(file).suffix}"
             job = {
                 "src": str(source),

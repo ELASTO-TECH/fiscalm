@@ -521,7 +521,9 @@ and payment-file generation/downloads. Local work retains every authorization an
 an offline mode. ANAF reads, IMAP intake and bank reads use their respective credentials and
 configuration. Adding a firm by CUI contacts ANAF’s public service without credentials. The configured AI integration also works in Sandbox:
 its configuration by the administrator consents to document text being sent to that provider. AI only assists
-where rules cannot decide; checked answers never choose the firm or settle a payment.
+where rules cannot decide; checked answers never choose the firm or settle a payment. Statement lines the rules
+left to explain are sent with the firm's open invoices and partners (`tx-rules`, each tick); the answer is a proposal
+on the transaction's sheet, applied alone only as a Fără document label on a line no open document fits by amount.
 
 Existing payment files encountered in Sandbox are journalled and moved to
 `.shadow/*.blocked` under the payment folder, preserving their bytes
@@ -588,13 +590,16 @@ text is supplied as document data. A failed call or invalid JSON produces no dec
 Supported bank statements: BT monthly PDF (encrypted or unprotected) and ISO 20022 CAMT.053 XML
 (camt.053.001.02 through .08), selected by content. Older BT exports come as one PDF per account, or as daily PDFs
 of one account: pass all of a month's files to one `fiscalm ingest FILE...`, or pick them together in Încarcă extras. They are checked as one statement (the
-whole calendar month, every account the firm held at BT that month, each day once, no gap, balances chaining from
-file to file) and stored together, or none is stored. A BT PDF is recognised by "allmerge" in its name,
+whole calendar month, each account's days once, no gap, balances chaining from file to file) and stored together, or
+none is stored. A statement may hold only some of the firm's accounts at its bank: it is imported, the answer names
+the accounts still to come, and the month's pack for the accountant waits for them. An account twice for the same
+days refuses the statement. A BT PDF is recognised by "allmerge" in its name,
 by its password, or by its text (an unprotected BT statement under any name, whose header CUI names the firm; no
-password is read for it). `fiscalm ingest` refuses a CSV on its own: it is uploaded on its account. A BT account's
+password is read for it). `fiscalm ingest` refuses a CSV on its own: it is uploaded on its account. A stored statement copy passed to `fiscalm ingest` again
+(after a parser fix) is its own document: `duplicate`, its lines recorded and matched again, nothing new stored. A BT account's
 month may start after the 1st, as older statements print it, only when no day with movements is left out: the days
 before are no banking day (weekends and Romanian legal holidays, Orthodox Easter included, `bank.banking_days`), or
-the account opened on that day (`fiscalm company opened --month YYYY-MM-DD`; a month alone is not enough) at a zero
+the account opened on that day (set in Setări › Firme › Bănci și conturi, Date cont, or `fiscalm company dates --opened YYYY-MM-DD`; a month alone is not enough) at a zero
 balance. The month's accounts are those held from its 1st. A BT statement of several months (quarterly) is split by
 its pages into one statement per month, each stored and checked as that month's, with the accounts owed that month; a
 file whose pages can't be split that way, or whose parts don't read back to exactly its sections, is refused (and the
@@ -619,8 +624,8 @@ up, one full calendar month, booked lines only; reversals are refused. CSV expor
 once per account in fiscalm (date, amount or debit and credit, details, optionally the other party, its IBAN and the
 reference); a CSV names no account, so it is uploaded on one, and it carries no balances, so its document says its
 totals can't be checked. A CSV is a partial import: it proves only the days it holds (CSVs of one account add up day
-by day, overlapping days are refused), it never stands for the month's statement (automatic payments still wait for
-one), and two identical rows are refused (map the bank's reference column). Amounts must be written as the mapping
+by day, overlapping days are refused), it never stands for the month's statement in the accountant's pack (automatic
+payments go out once statements, CSVs or the bank's feed cover every day of last month), and two identical rows are refused (map the bank's reference column). Amounts must be written as the mapping
 says (thousands only by threes, at most two decimals). The same CSV read on another account or with other columns is
 another document. MT940 needs final opening and closing balances (60F, 62F), no missing days between daily
 statements, and lines that add up to the balances. MT940 and CSV are accepted from the operator CLI (MT940) and from an administrator's upload
@@ -935,6 +940,11 @@ explicitly checks the saved application. The private key never leaves `FISCALM_S
 Restricted mode is free for the owner's own accounts. A hosted fiscalm serving clients needs the commercial
 tier. Open banking is read-only and works in Sandbox. These written steps are the guide's authority;
 no third-party panel screenshots are distributed or claimed to be current.
+
+A connection that reads every day counts as the bank's record of its accounts, like a statement: automatic
+payments that wait for last month's statement go out once the feed has read the whole month. Bookings can land
+a few days late, so the feed covers an account up to five days before its last read, from the first day it read
+of that account.
 
 The primary return address is the install's origin followed by `/bank/return`. Additional addresses can be
 entered in “Alte adrese de întoarcere”, separated by whitespace, for example a domain and a Tailscale name.

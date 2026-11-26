@@ -16,7 +16,7 @@ from firms import set_firms
 from imap_fake import Fake, mail, plain_connect
 from pdf_fake import text_pdf
 
-from fiscalm import ai, companies, history_pdf, integrations, recon
+from fiscalm import ai, ai_extract, companies, history_pdf, integrations, recon
 from fiscalm.api import browse, state as api
 from fiscalm.bank import statements
 from fiscalm.ledger import Ledger
@@ -70,6 +70,32 @@ def invoice(
             if x
         ]
     )
+
+
+def reading(*, fail=False, **fields):
+    """A fake AI provider answering one extraction (fiscalm.ai_extract.SCHEMA); `fail` raises instead."""
+    answer = {
+        "doc_type": "invoice",
+        "buyer_name": "Atelier Nord SRL",
+        "buyer_tax_id": "RO11111111",
+        "seller_name": "",
+        "seller_tax_id": "",
+        "number": "INV-2026-0042",
+        "issue_date": "2026-10-28",
+        "total": "12.10",
+        "currency": "EUR",
+        "card_last4": "",
+        "confidence": "high",
+    } | fields
+
+    def ask(system, prompt, schema, image=None):
+        if fail:
+            raise RuntimeError("down")
+        ask.calls.append((prompt, image))
+        return answer
+
+    ask.calls = []
+    return ask
 
 
 def message(*atts, address="billing@cloud.example", mid="m1@cloud.example", name="Example Cloud"):
@@ -276,29 +302,218 @@ def test_several_totals_need_the_user_or_a_checked_ai_answer(ledger, home, live_
         mi.answer(ledger, q["sha"], "NORD")  # which total?
     mi.answer(ledger, q["sha"], "NORD", total=1)
     assert [(d["amount"], d["currency"]) for d in docs_of(ledger)] == [("12.10", "EUR")]
-    # The AI narrows to one of the totals found: filed. An amount the rules didn't find counts for nothing.
+    # A confident AI reading narrows to one of the totals found: filed. An amount the rules didn't find counts for nothing.
     three = invoice("Total paid 16.00 EUR", number="Invoice number: INV-2026-0050")
-    assert (
-        mi.handle(
-            ledger, message(("pdf", three), mid="a1"), ask=lambda s, p, schema: {"total": "16.00", "currency": "EUR"}
-        )
-        == "filed:1"
-    )
+    ask = reading(number="INV-2026-0050", total="16.00")
+    assert mi.handle(ledger, message(("pdf", three), mid="a1"), ask=ask) == "filed:1"
     four = invoice("Total paid 17.00 EUR", number="Invoice number: INV-2026-0051")
-    assert (
-        mi.handle(
-            ledger, message(("pdf", four), mid="a2"), ask=lambda s, p, schema: {"total": "999.00", "currency": "EUR"}
-        )
-        == "asked:1"
+    assert mi.handle(ledger, message(("pdf", four), mid="a2"), ask=reading(total="999.00")) == "asked:1"
+    down = invoice("Total paid 18.00 EUR", number="Invoice number: INV-9")
+    assert mi.handle(ledger, message(("pdf", down), mid="a3"), ask=reading(fail=True)) == "asked:1"
+
+
+SAAS = [
+    "Receipt",
+    "Example SaaS Inc        Atelier Nord SRL",
+    "Receipt number SAAS-7781",
+    "Paid on 2026-10-28",
+    "Charged $49.00 to Visa 4242",
+]
+
+
+@pytest.mark.parametrize("live_mode", [False, True])
+def test_a_confident_ai_reading_files_what_the_rules_could_not(ledger, home, live_mode):
+    if live_mode:
+        go_live(home)
+    ask = reading(
+        seller_name="Example SaaS Inc",
+        buyer_tax_id="",
+        number="SAAS-7781",
+        total="49.00",
+        currency="USD",
+        card_last4="4242",
     )
-    assert (
-        mi.handle(
-            ledger,
-            message(("pdf", invoice("Total paid 18.00 EUR", number="Invoice number: INV-9")), mid="a3"),
-            ask=lambda s, p, schema: (_ for _ in ()).throw(RuntimeError("down")),
+    assert mi.handle(ledger, message(("pdf", text_pdf(SAAS))), ask=ask) == "filed:1"
+    (doc,) = docs_of(ledger)
+    got = (doc["company"], doc["amount"], doc["currency"], doc["vendor"], doc["card_last4"])
+    assert got == ("NORD", "49.00", "USD", "Example SaaS Inc", "4242")
+    assert mi.questions(ledger) == [] and "Charged $49.00" in ask.calls[0][0]
+
+
+@pytest.mark.parametrize(
+    ("fields", "result"),
+    [
+        ({"confidence": "low"}, "asked:1"),  # low confidence: only the number and supplier fill the question
+        ({"total": "50.00"}, "asked:1"),  # an amount the document doesn't print
+        ({"currency": "EUR"}, "asked:1"),  # a currency the document doesn't show
+        ({"buyer_name": "Studio 9 SRL", "buyer_tax_id": "RO33333333"}, "asked:1"),  # a firm not on the document
+        ({"buyer_name": "Atelier Nord SRL", "buyer_tax_id": "RO33333333"}, "asked:1"),  # id and name disagree
+        ({"buyer_name": "Atelier Nord SRL", "buyer_tax_id": "RO44444444"}, "asked:1"),  # an id none of the firms'
+        ({"total": "-49.00"}, "asked:1"),
+        # A refusal only the AI sees keeps the question: only the rules refuse.
+        ({"doc_type": "proforma"}, "asked:1"),
+        ({"doc_type": "credit_note"}, "asked:1"),
+        ({"seller_tax_id": "RO44444444"}, "asked:1"),
+        ({"seller_name": "Atelier Nord SRL", "buyer_name": "", "buyer_tax_id": ""}, "asked:1"),
+    ],
+)
+def test_an_ai_reading_never_overrules_the_document(ledger, fields, result):
+    base = {
+        "seller_name": "Example SaaS Inc",
+        "buyer_tax_id": "",
+        "number": "SAAS-7781",
+        "total": "49.00",
+        "currency": "USD",
+    }
+    assert mi.handle(ledger, message(("pdf", text_pdf(SAAS))), ask=reading(**base | fields)) == result
+    assert docs_of(ledger) == []
+    if fields == {"confidence": "low"}:
+        (q,) = mi.questions(ledger)
+        assert (q["data"]["number"], q["data"]["supplier"], q["data"]["totals"]) == (
+            "SAAS-7781",
+            "Example SaaS Inc",
+            [],
         )
-        == "asked:1"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "kept"),
+    [
+        ("issue_date", "2026-02-30", ""),
+        ("issue_date", "28.10.2026", ""),
+        ("total", "12.345", ""),
+        ("total", "0.00", ""),
+        ("total", "49", "49.00"),
+        ("currency", "usd", "USD"),
+        ("currency", "XBT", ""),
+        ("number", "Data: 2026", ""),
+        ("card_last4", "42", ""),
+    ],
+)
+def test_ai_fields_pass_fixed_rules_or_stay_empty(ledger, field, value, kept):
+    got = ai_extract.check(reading(**{field: value})("", "", {}), companies.all(ledger))
+    assert (getattr(got, field), got.rejected) == (kept, () if kept else (field,))
+    for text, card, kept in (
+        ("Date 2026-10-28", "2026", ""),
+        ("Visa total 4242.00", "4242", ""),
+        ("Visa 4242", "4242", "4242"),
+    ):
+        assert ai_extract.check(reading(card_last4=card)("", "", {}), {}, text).card_last4 == kept
+
+
+@pytest.mark.parametrize(
+    ("doc", "fields"),
+    [
+        (invoice(buyer="Atelier Nord SRL"), {"total": "999.00"}),  # a total it doesn't print: its buyer counts neither
+        (invoice("Total paid 15.00 EUR"), {"total": "15.00", "buyer_tax_id": "RO44444444"}),  # an id none of ours
+        (invoice("Order ABC-1984", buyer="Atelier Nord SRL", number=""), {"number": "ABC-1984"}),  # our own number
+        (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {}),  # a currency the document never shows
+        (
+            invoice("Ship to: Atelier", "Nord SRL", buyer="Bill to: Foreign Customer Ltd"),
+            {"buyer_tax_id": ""},
+        ),  # a wrapped name
+        (
+            invoice("    Ship to: Atelier", "    Nord SRL", buyer="Bill to: Foreign Customer Ltd"),
+            {"buyer_tax_id": ""},
+        ),  # indented
+        (invoice(buyer="Atelier Nord SRL", total="Charged 12.10 EUR"), {"buyer_tax_id": "RO11111111"}),  # unprinted id
+        (
+            invoice(buyer="Bill to: Other Client SA", total="Charged 12.10 EUR"),
+            {"buyer_name": "Other Client SA", "buyer_tax_id": ""},
+        ),
+        (
+            invoice("Ship to: Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"),
+            {"buyer_tax_id": ""},
+        ),  # only its delivery address
+        (invoice("Ship to:  Atelier Nord SRL", buyer="Bill to: Foreign Customer Ltd"), {"buyer_tax_id": ""}),
+        (invoice(buyer="Atelier Nord SRL", total="Total 12.10 EUR MegaCloud"), {"seller_name": "Cloud"}),
+        (invoice(buyer="Atelier Nord SRL"), {"seller_name": "Invented Vendor"}),  # a supplier it doesn't print
+        (text_pdf(["INVOICE", "Atelier Nord SRL", "Total 12.10"]), {"total": "", "currency": ""}),
+        (invoice(buyer="Atelier Nord SRL"), {"total": "", "currency": "USD"}),  # another currency than the rules'
+        (
+            invoice("Order ABC-1984", "Total paid 15.00 EUR", number=""),
+            {"buyer_name": "", "buyer_tax_id": "", "number": "ABC-1984", "total": "15.00"},
+        ),
+        (
+            invoice(buyer="Customer: Other Client SA", total="Ship to: Atelier Nord SRL"),
+            {"buyer_name": "Other Client SA"},
+        ),
+    ],
+)
+def test_a_contradicted_or_unsure_ai_reading_keeps_the_question(ledger, doc, fields):
+    ledger.db.execute(
+        "INSERT INTO issued(message_id,company,number,raw_path,status,created_at) VALUES('x','NORD','ABC-1984','x','open','t')"
     )
+    ledger.db.commit()
+    assert mi.handle(ledger, message(("pdf", doc)), ask=reading(**fields)) == "asked:1"
+
+
+@pytest.mark.parametrize(
+    ("token", "text", "printed"),
+    [
+        ("77777777", "CUI: RO 7777 7777", True),
+        ("11111111", "RO77777777      RO11111111", True),
+        ("7777", "CUI RO7777 7777", False),
+        ("7777", "RO5555   7777", False),
+        ("7777", "RO77777777", False),
+        ("77777777", "VAT: DE 77777777", False),
+        ("77777777", "VAT: DE                 77777777", False),
+        ("77777777", "VAT: DE-77777777", False),
+        ("77777777", "VAT: CHE 77777777", False),
+        ("77777777", "Tax ID 77777777", True),
+        ("77777777", "VAT: ID-77777777", False),
+        ("2026", "03.11.2026", False),
+        ("119", "119,00 lei", False),
+    ],
+)
+def test_a_tax_id_counts_only_printed_whole(token, text, printed):
+    assert ai_extract.printed_id(token, text) is printed
+
+
+def test_a_number_the_ai_read_never_matches_another_document(ledger):
+    assert mi.handle(ledger, message(("pdf", invoice()))) == "filed:1"
+    other = invoice(buyer="Atelier Nord SRL", number="", title="INVOICE Ref INV-2026-0042")
+    asked = mi.handle(ledger, message(("pdf", other), address="a@b.example"), ask=reading(confidence="low"))
+    (q,) = mi.questions(ledger)
+    assert asked == "asked:1" and api._to_check(ledger, "NORD")[-1]["number"] == "INV-2026-0042"
+    assert mi.answer(ledger, q["sha"], "NORD")["status"] == "filed"
+
+
+def test_a_scanned_invoice_is_read_from_its_picture(ledger):
+    scan = text_pdf([])  # a page without text, as a scanner makes
+    assert mi.handle(ledger, message(("pdf", scan)), ask=reading(fail=True)) == "unreadable:1"
+    ask = reading(seller_name="Beispiel GmbH", seller_tax_id="DE123456789", number="R-2026-17", total="80.00")
+    assert mi.handle(ledger, message(("pdf", scan)), ask=ask) == "filed:1"
+    assert ask.calls[0][1][0] == "image/png" and ask.calls[0][1][1].startswith(b"\x89PNG")
+    (doc,) = docs_of(ledger)
+    assert (doc["company"], doc["amount"], doc["currency"], doc["doc_date"]) == ("NORD", "80.00", "EUR", "2026-10-28")
+    low = text_pdf([" "])  # a low-confidence reading of a scan waits as a question, with what it read
+    assert mi.handle(ledger, message(("pdf", low), mid="m2"), ask=reading(confidence="low")) == "asked:1"
+    (q,) = mi.questions(ledger)
+    assert (q["data"]["reason"], q["data"]["number_read"], q["data"]["totals"]) == ("no-firm", "INV-2026-0042", [])
+
+
+@pytest.mark.parametrize(
+    ("text", "total", "currency", "ok"),
+    [
+        ("Charged EUR 12.00\nFee USD 1.00", "12.00", "USD", False),  # the amount in another currency
+        ("Charged EUR 12.00\nFee USD 1.00", "12.00", "EUR", True),
+        ("Refund USD -12.00", "12.00", "USD", False),  # a negative amount
+        ("Paid 12.00\nAll prices in EUR", "12.00", "EUR", True),
+        ("Paid 12.00\nFee USD 1.00\nEUR", "12.00", "EUR", False),  # no currency on its line, two on the document
+        ("Charged 12.10", "12.10", "EUR", False),  # no currency anywhere: the AI's alone counts for nothing
+        ("Subtotal 10.00 EUR\nCharged EUR 12.10", "10.00", "EUR", False),
+        ("VAT 2.10 EUR\nCharged 12.10 EUR", "2.10", "EUR", False),
+        ("Date: 28.10.2026\nCharged 49.00 EUR", "28.10", "EUR", False),  # a date
+        ("Standard rate 19.00%\nCharged 49.00 EUR", "19.00", "EUR", False),  # a rate
+        ("Standard rate 19.00 %\nCharged 49.00 EUR", "19.00", "EUR", False),
+        ("Standard rate 19.00\u00a0%\nCharged 49.00 EUR", "19.00", "EUR", False),
+        ("VAT 2.10 EUR\nTotal incl. VAT 12.10 EUR", "12.10", "EUR", True),
+    ],
+)
+def test_an_ai_total_needs_its_amount_printed_with_its_currency(text, total, currency, ok):
+    x = ai_extract.Extraction("invoice", "", "", "", "", "", "", "", "", total, currency, "", True)
+    assert mi._agreed_totals(mi.Doc("pdf", text=text), x) == ([(total, currency)] if ok else None)
 
 
 def test_duplicates_are_filed_once(ledger):
@@ -528,6 +743,7 @@ def test_totals_reader():
     assert mi.totals(text) == [("1234.56", "EUR"), ("12.00", "USD")]
     assert mi.totals("Total de plată 100,00 lei") == [("100.00", "RON")]
     assert mi.totals("Total 50.00\nPaid in RON") == [("50.00", "RON")]
+    assert mi.totals("Total 1\u00a0234,56 EUR") == [("1234.56", "EUR")]
 
 
 def test_without_an_ai_integration_no_ai_is_asked(ledger, monkeypatch):
@@ -556,7 +772,7 @@ def test_a_firm_added_later_is_offered_for_a_document_without_a_firm(ledger):
 @pytest.mark.parametrize("live_mode", [False, True])
 @pytest.mark.parametrize("configured", [False, True])
 @pytest.mark.parametrize("source", ["mail", "history"])
-def test_document_ai_respects_configuration_and_history_shadow_boundary(
+def test_document_ai_runs_in_sandbox_and_live_only_when_configured(
     ledger, home, monkeypatch, live_mode, configured, source
 ):
     if live_mode:
@@ -567,20 +783,20 @@ def test_document_ai_respects_configuration_and_history_shadow_boundary(
         )
     calls = []
 
-    def ask(L, system, prompt, schema):
-        calls.append(json.loads(prompt))
-        return {"total": "15.00", "currency": "EUR"}
+    def ask(L, system, prompt, schema, image=None):
+        calls.append(prompt)
+        return reading(total="15.00")(system, prompt, schema)
 
     monkeypatch.setattr(ai, "ask_json", ask)
     raw = invoice("Total paid 15.00 EUR")
-    allowed = configured and (source == "mail" or live_mode)
+    allowed = configured
     if source == "mail":
         assert mi.handle(ledger, message(("pdf", raw))) == ("filed:1" if configured else "asked:1")
     else:
         assert history_pdf.fields(ledger, raw, "NORD")["total"] == ("15.00" if allowed else "")
     assert len(calls) == int(allowed)
     if calls:
-        assert "Total paid 15.00 EUR" in calls[0]["text"]
+        assert "Total paid 15.00 EUR" in calls[0]
 
 
 @pytest.mark.parametrize(
@@ -813,6 +1029,14 @@ def test_ubl_tax_identities_are_compared_whole(ledger):
     assert mi.handle(ledger, message(("xml", own.encode()), mid="own")) == "issued:1"  # STUDIO9 sold it
 
 
+def test_an_ai_never_reads_over_the_ubl_of_its_pdf(ledger):
+    foreign = UBL.format(country="DE", supplier="DE123456789").replace("RO11111111", "DE11111111").encode()
+    pdf = text_pdf(["Rechnung DE-77", "Atelier Nord SRL", "Gesamtbetrag 49,00 EUR"])
+    ask = reading(total="49.00")
+    assert mi.handle(ledger, message(("xml", foreign), ("pdf", pdf)), ask=ask) == "asked:1,same-as-pdf:1"
+    assert ask.calls == []
+
+
 def test_a_pdf_that_disagrees_with_its_ubl_is_judged_on_its_own(ledger):
     xml = UBL.format(country="DE", supplier="DE123456789").encode()
     pdf = text_pdf(["Rechnung", "Ref. DE-77", "Bill to: Studio 9 SRL", "Gesamtbetrag 12,00 EUR"])
@@ -971,7 +1195,7 @@ def test_history_reader_reuses_fields_but_accepts_romanian_parties(ledger):
     assert not doc.refused
     assert (doc.number, doc.date, doc.roles) == ("TEST-42", "2023-11-03", {"NORD": "buyer"})
     assert mi.pdf_party(doc.text, "seller") == ("Furnizor Exemplu SRL", "77777777")
-    assert mi.pdf_total(ledger, doc) == ("119.00", "RON")
+    assert doc.totals == [("119.00", "RON")]
 
 
 def test_history_reader_refuses_ambiguous_party_blocks():

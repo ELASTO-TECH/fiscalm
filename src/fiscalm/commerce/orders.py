@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from fiscalm import bnr, integrations
 from fiscalm.api.responses import Error, fail, page
+from fiscalm.identity import firm_name
 from fiscalm.invoicing import engine as inv
 from fiscalm.ledger import Ledger, is_live
 
@@ -92,6 +93,129 @@ def validate(body: object) -> dict:
     return row
 
 
+# Legal forms by the saved firm's country ('Spa' is a word in a Romanian or British name, S.p.A. in Italy).
+# A country without an entry keeps every word.
+LEGAL_FORMS = {
+    country: frozenset(forms.split())
+    for country, forms in {
+        "RO": "srl srld sa pfa ii if snc scs sca",
+        "IT": "spa srl srls sas snc",
+        "DE": "gmbh ag ug kg ohg",
+        "AT": "gmbh ag kg og",
+        "FR": "sa sas sasu sarl",
+        "ES": "sa sl",
+        "NL": "bv nv",
+        "BE": "bv nv sa srl",
+        "GB": "ltd plc llp",
+        "IE": "ltd plc dac",
+        "US": "inc llc corp",
+    }.items()
+}
+
+
+def _name_parts(name: str, country: str) -> tuple[list[str], str]:
+    """The words of a firm name and its trailing legal form ('' when it has none)."""
+    # firm_name drops a leading Romanian 'S.C.'; a lead word keeps it for firms elsewhere ('SC Harbour Ltd').
+    words = [w for w in firm_name(name if country == "RO" else "zz " + name).split("-") if w][country != "RO" :]
+    forms = LEGAL_FORMS.get(country, frozenset())
+    return (words[:-1], words[-1]) if len(words) > 1 and words[-1] in forms else (words, "")
+
+
+def same_firm(saved: dict, buyer: dict) -> bool:
+    """A company buyer is the saved company under its tax id when the names agree: case, accents and punctuation
+    don't count, a legal form counts only when both names write one. A person or a private client never matches."""
+    if buyer.get("private") or saved.get("private"):
+        return False
+    country = saved.get("country", "")
+    (words, form), (typed, typed_form) = _name_parts(saved["name"], country), _name_parts(buyer["name"], country)
+    return bool(words) and words == typed and (form == typed_form or not form or not typed_form)
+
+
+# A 0% line is never issued on its own: the order carries the billing address, not where the goods went. The draft
+# proposes what that address suggests (goods to an EU firm under its own country's VAT id: intra-community supply K;
+# to a buyer outside the EU VAT territory: export G; GB may be Northern Ireland and Monaco is French VAT territory)
+# and a person confirms it or chooses another treatment.
+INTRA_EU = dict(vat_category="K", exemption_reason="VATEX-EU-IC")
+EXPORT = dict(vat_category="G", exemption_reason="VATEX-EU-G")
+NOT_EXPORT = frozenset({"GB", "MC"})
+VAT_REVIEW = dict(code="vat_review", message="Order saved as a draft: confirm the VAT treatment of its 0% lines.")
+
+
+def eu_vat_id(value: str, country: str) -> bool:
+    """A buyer tax id the engine accepts as the VAT id of its own EU country other than Romania (EL for Greece)."""
+    vat_id = inv.normalize_vat_id(value)
+    if country not in inv.EU_COUNTRIES - {"RO"} or not vat_id.startswith("EL" if country == "GR" else country):
+        return False
+    try:
+        inv._client_foreign_vat_id(dict(vat_id=vat_id, country=country))
+    except inv.InvoiceError:
+        return False
+    return True
+
+
+def zero_rated(seller: dict, buyer: dict, lines: list[dict]) -> dict | None:
+    """The treatment an all-0% order's billing data suggests, for a person to confirm."""
+    country = buyer["country"]
+    if any(inv.decimal(line["vat_rate"]) for line in lines) or country == seller["country"]:
+        return None
+    if not buyer.get("private") and eu_vat_id(buyer.get("vat_id", ""), country):
+        return INTRA_EU
+    return EXPORT if country not in inv.EU_COUNTRIES | NOT_EXPORT else None
+
+
+def waits_for_vat(seller: dict, body: dict) -> bool:
+    """A VAT-paying seller's order with a 0% line: its draft waits for a person to confirm the VAT."""
+    return seller["vat_payer"] and any(inv.decimal(line["vat_rate"]) == 0 for line in body["lines"])
+
+
+def buyer_profile(buyer: dict, review: bool) -> dict:
+    """The buyer as a client. Only a company's draft a person reviews may read an EU VAT id out of `cui`; a person,
+    or an order issued on its own, keeps the identifier as the shop sent it."""
+    address = buyer["address"]
+    profile = {k: v for k, v in buyer.items() if k in ("name", "cui", "email")}
+    profile |= {k: v for k, v in address.items() if k != "postal"}
+    profile |= dict(postal_code=address.get("postal", ""), private=buyer["type"] == "person", vat_payer=False)
+    if review and buyer["type"] == "company" and eu_vat_id(profile.get("cui", ""), address["country"]):
+        profile["vat_id"] = profile.pop("cui")
+    return profile
+
+
+def rate_day(L: Ledger, co: str, body: dict, today: str) -> str:
+    """The tax point the BNR rate belongs to: the engine's, for the lines this order becomes (K has its own)."""
+    try:
+        seller = inv._seller(L, co)
+        lines, _ = order_lines(seller, inv._party(buyer_profile(body["buyer"], waits_for_vat(seller, body))), body)
+        return inv.chargeability_date(dict(issue_date=today, delivery_date=body["placed_at"], lines=lines))
+    except (Error, inv.InvoiceError):
+        return min(today, body["placed_at"])  # intake refuses the same order below
+
+
+def order_lines(seller: dict, buyer: dict, body: dict) -> tuple[list[dict], bool]:
+    """Invoice lines for the order, and whether a person must confirm the VAT of its 0% lines first. Those lines wait
+    with the suggested treatment, else zero rate (Z), on a draft that is never issued on its own."""
+    treatment = zero_rated(seller, buyer, body["lines"]) if seller["vat_payer"] else None
+    lines = []
+    for source in body["lines"]:
+        line = {k: v for k, v in source.items() if k != "sku"}
+        rate = inv.decimal(line["vat_rate"])
+        if not seller["vat_payer"] and rate != 0:
+            fail(400, "invalid_order", "A non-VAT seller requires zero VAT order lines.")
+        if not seller["vat_payer"]:
+            line |= dict(vat_category="O", exemption_reason="Scutire conform art. 310")
+        elif rate:
+            line["vat_category"] = "S"
+        else:
+            line |= treatment or dict(vat_category="Z")
+        # UBL prices stay nonnegative; discounts are negative quantities.
+        if inv.decimal(line["unit_price"]) < 0:
+            line["quantity"] = format(-inv.decimal(line["quantity"]), "f")
+            line["unit_price"] = format(-inv.decimal(line["unit_price"]), "f")
+        if body["prices_include_vat"]:
+            line["gross_unit_price"] = line["unit_price"]
+        lines.append(line)
+    return lines, waits_for_vat(seller, body)
+
+
 def channel(L: Ledger, co: str, iid: str) -> integrations.Instance:
     found = next((x for x in integrations.enabled(L, "shop") if x.id == iid and x.config["company"] == co), None)
     if not found:
@@ -123,6 +247,10 @@ def get(L: Ledger, co: str, oid: str) -> dict:
         else ("cancelled" if invoice is None else "draft" if invoice["status"] == "draft" else "issued")
     )
     result["reason"] = json.loads(row["reason"]) if row["reason"] else None
+    if (result["reason"] or {}).get("code") == VAT_REVIEW[
+        "code"
+    ] and status != "draft":  # the review ends when the draft is issued or cancelled
+        result["reason"] = None
     result["invoice_summary"] = (
         {"currency": invoice["data"]["currency"], "totals": invoice["data"]["totals"]} if invoice else None
     )
@@ -169,7 +297,7 @@ def _intake(
         not prior or prior_status == "refused" or (json.loads(prior["body"]) != body and prior_status == "draft")
     )
     rates = (
-        bnr.rate(L, body["currency"], min(today, body["placed_at"]), today=today)
+        bnr.rate(L, body["currency"], rate_day(L, co, body, today), today=today)
         if body["currency"] != "RON" and needs_rate
         else None
     )
@@ -187,10 +315,8 @@ def _intake(
             fail(409, "order_changed", "Only an unissued order can be changed.")
         if order and order["status"] == "draft":
             inv._draft_version(L, order["draft_id"], co, order["draft_version"])
-        buyer, address = body["buyer"], body["buyer"]["address"]
-        profile = {k: v for k, v in buyer.items() if k in ("name", "cui", "email")}
-        profile |= {k: v for k, v in address.items() if k != "postal"}
-        profile |= dict(postal_code=address.get("postal", ""), private=buyer["type"] == "person", vat_payer=False)
+        seller = inv._seller(L, co)
+        profile = buyer_profile(body["buyer"], waits_for_vat(seller, body))
         normalized = inv._party(profile)
         identity = inv._identity(normalized)
         matches = [
@@ -201,40 +327,19 @@ def _intake(
         if matches:
             if len(matches) != 1:
                 fail(409, "client_conflict", "Resolve duplicate saved client identities first.")
-            saved = json.loads(matches[0]["data"])
-            if any(
-                saved.get(k, "") != normalized.get(k, "")
-                for k in ("name", "street", "city", "county", "country", "postal_code", "email")
-            ):
-                fail(409, "client_conflict", "Shop buyer differs from the saved client. Review the client first.")
+            if not same_firm(json.loads(matches[0]["data"]), normalized):
+                fail(
+                    409,
+                    "client_conflict",
+                    "Shop buyer names another firm than the saved client. Review the client first.",
+                )
+            # Address and email drift is accepted: the invoice carries the saved client, the order keeps what was typed.
             cid = matches[0]["id"]
         else:
             # Private clients belong to this order only; never edit another draft's client.
             cid = inv.save_client(L, co, profile)
 
-        seller = inv._seller(L, co)
-        lines = []
-        for source in body["lines"]:
-            line = {k: v for k, v in source.items() if k != "sku"}
-            rate = inv.decimal(line["vat_rate"])
-            if not seller["vat_payer"] and rate != 0:
-                fail(400, "invalid_order", "A non-VAT seller requires zero VAT order lines.")
-            if seller["vat_payer"] and rate == 0:
-                fail(
-                    400,
-                    "invalid_order",
-                    "A zero-VAT line requires an explicit tax treatment; review it before invoicing.",
-                )
-            line["vat_category"] = "S" if rate else "O"
-            if not seller["vat_payer"]:
-                line["exemption_reason"] = "Scutire conform art. 310"
-            # UBL prices stay nonnegative; discounts are negative quantities.
-            if inv.decimal(line["unit_price"]) < 0:
-                line["quantity"] = format(-inv.decimal(line["quantity"]), "f")
-                line["unit_price"] = format(-inv.decimal(line["unit_price"]), "f")
-            if body["prices_include_vat"]:
-                line["gross_unit_price"] = line["unit_price"]
-            lines.append(line)
+        lines, review = order_lines(seller, normalized, body)
         data = dict(
             issue_date=today, due_date=today, delivery_date=body["placed_at"], currency=body["currency"], lines=lines
         )
@@ -254,8 +359,8 @@ def _intake(
             db.execute("DELETE FROM commerce_delivery WHERE order_id=?", (order["id"],))
         oid = order["id"] if order else uuid4().hex
         db.execute(
-            "INSERT INTO commerce_orders(id,company,channel,external_id,placed_at,body,draft_id,client_id,draft_version,status,awb) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
-            "body=excluded.body,client_id=excluded.client_id,draft_id=excluded.draft_id,status=excluded.status,reason=NULL,placed_at=excluded.placed_at,draft_version=excluded.draft_version,awb=COALESCE(excluded.awb,commerce_orders.awb)",
+            "INSERT INTO commerce_orders(id,company,channel,external_id,placed_at,body,draft_id,client_id,draft_version,status,awb,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "body=excluded.body,client_id=excluded.client_id,draft_id=excluded.draft_id,status=excluded.status,reason=excluded.reason,placed_at=excluded.placed_at,draft_version=excluded.draft_version,awb=COALESCE(excluded.awb,commerce_orders.awb)",
             (
                 oid,
                 co,
@@ -268,12 +373,15 @@ def _intake(
                 version,
                 "draft",
                 json.dumps(body.get("awb")) if body.get("awb") else None,
+                json.dumps(VAT_REVIEW) if review else None,
             ),
         )
         if body.get("awb"):
             _awb_delivery(L, oid, body["awb"])
     message = ""
-    if auto_issue and shop.config["auto_issue"] == "true" and is_live():
+    if review:
+        message = VAT_REVIEW["message"]
+    elif auto_issue and shop.config["auto_issue"] == "true" and is_live():
         try:
             inv.issue(L, did, today, company=co, version=version, authorize=authorize)
         except inv.InvoiceError:

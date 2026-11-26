@@ -265,6 +265,38 @@ describe("sections", () => {
     }
   });
 
+  it("a payment mail left for review becomes one invoice's proof, or leaves the tasks", async () => {
+    const cand = (id: string, number: string) => ({ id, number, supplier: "Lumen Ambient SRL", amount: "240.00", currency: "RON", date: "2026-10-01" });
+    const proof = { id: "0123456789abcdef0123", from: "Plăți <no@processor.example>", subject: "Plata confirmata",
+      date: "2026-10-21", candidates: [cand("3001", "F-LUM 1"), cand("3002", "F-LUM 1")] };
+    const s = taskState({ reminder_tasks: [], mail_proofs: [{ ...proof, candidate_count: 2 }] });
+    const api = renderApp({ state: () => json(s), onPost: () => json({ ok: true, message: "", state: s }) });
+    open("?co=NORD&tab=sarcini");
+    const card = (await screen.findByText("Plată găsită în e-mail")).closest(".task") as HTMLElement;
+    expect(card).toHaveTextContent("Plăți <no@processor.example>, 21 oct: „Plata confirmata”. Se potrivește cu mai multe facturi.");
+    // two choices that read the same: the invoice's internal number tells them apart
+    await userEvent.click(within(card).getByRole("button", { name: "Lumen Ambient SRL, factura F-LUM 1, 240,00 lei, din 1 oct (nr. intern 3002)" }));
+    await answer();
+    await userEvent.click(within(card).getByRole("button", { name: "Nu este o plată" }));
+    await waitFor(() => expect(api.posts()).toHaveLength(2));
+    expect(api.posts().map((p) => [p.url.split("/").pop(), p.body])).toEqual([
+      ["mail-proof", { co: "NORD", id: proof.id, target: "3002" }],
+      ["mail-proof", { co: "NORD", id: proof.id, target: "" }],
+    ]);
+  });
+
+  it("a mail fitting more invoices than a page carries offers no partial choice", async () => {
+    const cand = { id: "3001", number: "F-LUM 1", supplier: "Lumen Ambient SRL", amount: "240.00", currency: "RON", date: "2026-10-01" };
+    const proof = { id: "0123456789abcdef0123", from: "Plăți <no@processor.example>", subject: "Plata", date: "2026-10-21",
+      candidates: [cand], candidate_count: 51 };
+    renderApp({ state: () => json(taskState({ reminder_tasks: [], mail_proofs: [proof] })) });
+    open("?co=NORD&tab=sarcini");
+    const card = (await screen.findByText("Plată găsită în e-mail")).closest(".task") as HTMLElement;
+    expect(card).toHaveTextContent("Se potrivește cu 51 de facturi. Marchează factura ca plătită din fișa ei.");
+    expect(within(card).queryByRole("button", { name: /factura F-LUM 1/ })).toBeNull();
+    expect(within(card).getByRole("button", { name: "Nu este o plată" })).toBeInTheDocument();
+  });
+
   it("Sarcini under Toate firmele names each company's tasks and acts for the task's own company", async () => {
     at("?co=ALL&tab=sarcini");
     const [a] = fixture("STUDIO9").ambiguous;
@@ -279,6 +311,23 @@ describe("sections", () => {
     await waitFor(() => expect(api.posts()).toHaveLength(1));
     expect(api.posts()[0].url).toMatch(/api\/resolve-debit$/);
     expect(api.posts()[0].body).toEqual({ co: "STUDIO9", tx: a.tx, target: "204" });
+  });
+
+  it("a credit note naming no invoice asks which of the supplier's invoices it cancels", async () => {
+    const s = fixture("NORD"), [a, b] = s.invoices.filter((r) => !r.credit_note);
+    const question = [a, b].map((r) => ({ id: r.id, number: r.number, amount: r.total, date: r.issue_date }));
+    s.invoices = [...s.invoices, { ...a, id: "123", number: "TT-13", supplier: "Tipografia Test SRL", total: "-480.00",
+      status: "skipped", credit_note: true, credits: [], credit_question: question }];
+    at("?co=NORD&tab=sarcini");
+    const api = server({ state: () => json(s), onPost: () => json({ ok: true, message: "", state: s }) });
+    render(<App />);
+    const card = (await screen.findByText("Tipografia Test SRL: ce factură anulează stornarea?")).closest(".task") as HTMLElement;
+    expect(within(card).getByRole("button", { name: "Niciuna" })).toBeTruthy();
+    await userEvent.click(within(card).getByRole("button", { name: new RegExp(`^Factura ${b.number}, din `) }));
+    await answer();
+    await waitFor(() => expect(api.posts()).toHaveLength(1));
+    expect(api.posts()[0].url).toMatch(/api\/credit-pick$/);
+    expect(api.posts()[0].body).toEqual({ co: "NORD", id: "123", target: b.id });
   });
 
 });

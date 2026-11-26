@@ -28,7 +28,7 @@ export type TransactionInvoiceChoice = { id: string; number: string; date: strin
   currency: string; partner: string | null; selected: boolean; position: number };
 export type TransactionChoiceRows = { partners: Partner; invoices: TransactionInvoiceChoice; selected: TransactionInvoiceChoice;
   proposed: TransactionInvoiceChoice;
-  payments: { id: string; payment: Payment } };
+  payments: { id: string; payment: Payment }; receipts: CardInvoice };
 /** What can be paged on its own; `proposed` comes only with the first bundle. */
 export type TransactionChoiceCollection = Exclude<keyof TransactionChoiceRows, "proposed">;
 export type TransactionChoices = { pages: { [K in keyof TransactionChoiceRows]?: Page<TransactionChoiceRows[K]> } };
@@ -60,6 +60,8 @@ export type CollectedMethod = Exclude<PaidMethod, "own">;
 
 export type Invoice = {
   credits?: { id: string; number: string; amount: string }[];
+  /** A credit note naming no invoice: the invoices it could cancel; the person picks one or none (credit-pick). */
+  credit_question?: { id: string; number: string; amount: string; date: string | null }[];
   credit_note?: boolean;
   id: string;
   company: Co;
@@ -77,6 +79,8 @@ export type Invoice = {
   payment_state: "held" | "in_file" | "lost" | "imported" | null;
   /** The payment file its payment is in, if any. */
   payment_file?: { id: number; name: string } | null;
+  /** In a payment file whose row is no longer the invoice's net (a credit note since): check it in the bank. */
+  amount_changed?: boolean;
   item_id: string | null;
   paid_at: string | null;
   /** How the person who marked it said they paid (`mark-paid`), null when unsaid: a fact, never proof. */
@@ -86,6 +90,9 @@ export type Invoice = {
   /** Past due and not paid by the user yet (the engine's rule, the same as `late`). */
   overdue: boolean;
   previous_iban_last4: string[];
+  /** The invoice lists several IBANs and no evidence decides which one is paid: a person picks one (by `index`).
+   * `ending`: the IBAN's last characters, as many as tell the accounts apart (4 or more), never the whole IBAN. */
+  accounts: { index: number; bank: string; ending: string }[];
   can_approve: boolean;
   can_mark_paid: boolean;
   can_withdraw: boolean;
@@ -102,17 +109,12 @@ export type Invoice = {
 /** A receipt's file, served by the engine's docfile: an uploaded photo or PDF, or a mailed PDF. */
 export type DocFile = { id: string; type: "image" | "pdf" };
 
-export type ReceiptLine = { name: string; unit: string; quantity: string; net: string; vat: string };
-export type ReceiptItems = { lines: ReceiptLine[]; total: string; currency: string; payment: string; provenance: string;
-  revision: number; verified: boolean; proposal: string | null; state: string; payment_mismatch: boolean };
-
 /** A receipt: an invoice from mail, or an uploaded photo or file. */
 export type CardInvoice = {
   document_type: "invoice" | "receipt";
   can_correct?: boolean;
   number?: string | null;
   partner?: string | null;
-  items?: ReceiptItems | null;
   id: string;
   company: Co;
   vendor: string;
@@ -147,6 +149,8 @@ export type Expense = {
 
 export type ReminderTask = {
   kind: "client_reminder"; id: string; label: string; subject: string; body: string;
+  /** Why to check the bank before sending: the statements are behind or missing (engine words); null when current. */
+  warning: string | null;
 };
 
 export type PartnerTask = {
@@ -214,7 +218,7 @@ export type SpvState = "not_required" | "none" | "uploading" | "uploaded" | "acc
 /** Someone the company trades with: a supplier, a client or both, by CUI (or by name when there is none). */
 export type Partner = {
   held?: { invoice: string; amount: string; currency: string }[];
-  report_formats?: { signature: string; source: string; mapping: Record<string, string>; courier?: string }[];
+  report_formats?: { signature: string; source: string; mapping: Record<string, string>; courier?: string; senders: string[] }[];
   id: string;
   company: Co;
   name: string;
@@ -298,11 +302,10 @@ export type FilePayment = {
   added_after_download: boolean;
 };
 
-/** A question about one file the engine can't answer alone: its download is gone from its folder (`missing`), it was
- * downloaded several times (`downloads`), or a file nobody made lies in its folder (`orphan`). */
+/** A question about one file the engine can't answer alone: its download is gone from its folder (`missing`), or a
+ * file nobody made lies in its folder (`orphan`). Downloading a file again is never a question. */
 export type PaymentFileQuestion =
   | { kind: "missing"; version: string; count: number }
-  | { kind: "downloads"; versions: { id: number; version: string; at: string; count: number; total: string }[] }
   | { kind: "orphan"; name: string };
 
 /** A file with its payments and downloads (GET payment-files/<id>), and what the person may do with it now: the engine
@@ -547,6 +550,8 @@ export type State = {
   unreadable: { id: string; listed: string | null }[];
   /** Statement debits that fit several invoices and settled none: the user picks the one each paid (resolve-debit). */
   ambiguous: Ambiguous[];
+  /** Payment mails the AI read as proof that settled nothing on their own: the user picks the invoice each paid, or none (mail-proof). */
+  mail_proofs: MailProof[];
   /** Tranzacții: the statement transactions of the last 13 months, newest first, and how many have no explanation. */
   transactions: { rows: Transaction[]; to_explain: number; reasons: Record<Transaction["direction"], { less: Reason[]; more: Reason[] }>;
     remembered: Remembered[] };
@@ -562,7 +567,7 @@ export type State = {
   /** Evidence-checked reminder text for a human to copy and send. */
   reminder_tasks: ReminderTask[];
   orders?: CommerceOrder[];
-  order_tasks?: {kind: "order_refused"; id: string; company: Co; order_id: string; sheet: "ord"; reason: {code: string; message: string}; label: string; action: "order-discard"}[];
+  order_tasks?: {kind: "order_refused" | "order_vat_review"; id: string; company: Co; order_id: string; draft_id: string | null; sheet: "ord"; reason: {code: string; message: string}; label: string; action: "order-discard" | null}[];
   sales_origins?: SalesOrigin[];
   cod_receivable?: {total: string; other: {currency: string; total: string}[]; count: number};
   /** Cache-only partner warnings: an inactive supplier with invoices to pay, an inactive or removed client with invoices
@@ -603,8 +608,9 @@ export type TxLink = {
   /** What the parts and the difference are counted in: the documents' currency (for a card, maybe its original one). */
   currency: string;
   note: string;
-  /** Made by no person: a saved rule, or the bank's own fee or interest line. Undoing it leaves the line to people. */
-  rule: "saved" | "bank" | null;
+  /** Made by no person: a saved rule, the bank's own fee or interest line, or both ends of a transfer between the
+   * firm's accounts. Undoing it leaves the line to people. */
+  rule: "saved" | "bank" | "transfer" | "ai" | null;
   by: string;
   at: string;
 };
@@ -613,7 +619,9 @@ export type Proposal =
   | { kind: "invoices"; invoices: string[] }
   | { kind: "receipt"; document: string }
   | { kind: "settlement"; settlement: string }
-  | { kind: "remembered"; memory: string; as: { kind: LinkKind; partner: string | null; reason: string | null; note: string | null } };
+  | { kind: "remembered"; memory: string; as: { kind: LinkKind; partner: string | null; reason: string | null; note: string | null } }
+  /** The AI integration's checked proposal (ai_explain): never applied by the app; `invoices` only when they add up. */
+  | { kind: "ai"; as: { kind: LinkKind; partner: string | null; reason: string | null; note: string | null }; invoices: string[] };
 /** What the user asked to be remembered (Ține minte): kept for an account, a card or a merchant. */
 export type Remembered = {
   id: string; by: MemoryKey; shown: string; kind: LinkKind; partner: string | null; reason: string | null; note: string;
@@ -651,6 +659,15 @@ export type Transaction = {
   remember: Partial<Record<MemoryKey, string>>;
 };
 
+export type MailProof = {
+  id: string;
+  from: string;
+  subject: string;
+  date: string;
+  candidates: { id: string; number: string; supplier: string; amount: string; currency: string; date: string }[];
+  /** All of them; a task page carries at most 50. */
+  candidate_count: number;
+};
 export type Ambiguous = {
   candidate_count?: number;
   tx: string;
@@ -938,6 +955,8 @@ export type InvoicingResult = ActionResult & { recurrences?: Recurrence[]; invoi
 export type CompanyAccount = {
   /** Opaque: names the account for a CSV upload without its IBAN. */
   id: string; iban_last4: string; currency: string; bank: string; bank_name: string; pays: boolean; retired: string | null;
+  /** The month (YYYY-MM) or exact day (YYYY-MM-DD) the account opened, when a person set it. */
+  opened: string | null;
   last_statement: string | null; statement_senders: string[];
 };
 
@@ -1007,10 +1026,8 @@ export type Settlement = {
   partner?: string;
   id: string; kind: "settlement"; company: Co; source: string; report_key: string; reference: string | null; candidate: (SettlementCredit & { payer: string }) | null;
   payer: { id: string; name: string }; date: string; currency: string; gross: string; fee: string; net: string;
-  credit: SettlementCredit | null; invoice_count: number; confirmed_count: number; can_confirm: boolean; human_confirmed: boolean;
+  credit: SettlementCredit | null; invoice_count: number; can_confirm: boolean; human_confirmed: boolean;
   status: "pending" | "collected" | "withdrawn"; error: string | null; failed_line: number | null; tx_key: string | null;
-  /** Confirmed settlements after which this payer's batches settle on their own; null: a payer without CUI or IBAN, always confirmed. */
-  auto_after: number | null;
   sheet: { co: Co; set: string }; links: { transaction: string | null; issued: string[] };
   lines: { position: number; reference: string | null; awb: string | null; order: string | null; gross: string; fee: string; invoice: string | null; proved: boolean }[];
 };

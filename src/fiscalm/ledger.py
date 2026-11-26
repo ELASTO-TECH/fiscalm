@@ -19,7 +19,8 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from fiscalm import companies
 
-from fiscalm import audit, backup, receipt_lines
+from fiscalm import audit, backup
+from fiscalm.efactura import credits
 from fiscalm.migrations import check_version, migrate
 from fiscalm.paths import finance_home
 
@@ -53,6 +54,15 @@ USER = "user:"
 # An e-Factura row the user marked paid ("Marchează ca plătită", `efactura mark-paid` without a mail): paid in
 # their word, but not confirmed until a statement debit or a payment mail proves it.
 USER_MARKED = f"status='paid' AND paid_tx IS NULL AND paid_note LIKE '{USER}%'"
+# Proved paid by a payment mail, as _PROOFS reads it: `ef-proof:<mail key>` reserved for this invoice, and that mail
+# read for it (judged); its payment-file row, if any, not paid by a debit already. Its bank debit, when the statement
+# brings it, takes the mail's place as the proof; the mail stays reserved for this invoice, so it never proves another.
+MAIL_PROVED = (
+    "status='paid' AND substr(paid_tx,1,9)='ef-proof:' AND length(paid_tx)>9 AND NOT EXISTS (SELECT 1 FROM payments "
+    "p WHERE p.item_id=efactura.item_id AND p.status='paid') AND EXISTS (SELECT 1 FROM settled_tx s WHERE "
+    "s.tx_key=efactura.paid_tx AND s.what='efactura ' || efactura.message_id) AND EXISTS (SELECT 1 FROM meta m "
+    "WHERE m.key='ef-judged:' || efactura.message_id || ':' || substr(efactura.paid_tx, 10))"
+)
 
 
 # The display name of the account recorded as having done something (`by_name`), never its id; "" for none or the CLI.
@@ -159,6 +169,10 @@ class LinkRefused(ValueError):
 
 class AuthorizationRefused(Exception):
     """A write guard refused authority; never treat it as a file/parser OSError."""
+
+
+class _SetChanged(Exception):
+    """An invoice of a set changed since it was read: the whole collection rolls back."""
 
 
 class Ledger:
@@ -1063,6 +1077,34 @@ class Ledger:
             )
         }
 
+    def ai_proposals(self, company: str) -> dict[str, dict]:
+        """What the AI integration proposed for lines still to explain (ai_explain): {tx_key: {kind, partner,
+        invoices, reason, note}}; kind 'none' marks a line asked with nothing to propose."""
+        return {
+            r["tx_key"]: {k: r[k] for k in ("kind", "partner", "reason", "note")}
+            | {"invoices": json.loads(r["invoices"])}
+            for r in self.db.execute("SELECT * FROM tx_ai WHERE company=?", (company,))
+        }
+
+    def keep_ai_proposals(self, company: str, proposals: dict[str, dict]) -> None:
+        """Keep the AI's checked proposals by line, replacing an older one for the same line."""
+        with self.tx() as db:
+            for key, p in proposals.items():
+                db.execute(
+                    "INSERT OR REPLACE INTO tx_ai(tx_key,company,kind,partner,invoices,reason,note,at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        key,
+                        company,
+                        p["kind"],
+                        p.get("partner"),
+                        json.dumps(p.get("invoices") or []),
+                        p.get("reason"),
+                        p.get("note"),
+                        now(),
+                    ),
+                )
+
     def card_allows(self, company: str, card: str) -> bool:
         return not card or self.card_owner(company, card) == company
 
@@ -1108,6 +1150,11 @@ class Ledger:
             )
         return True
 
+    def meta_values(self, prefix: str) -> list[str]:
+        """The values of every meta key starting with `prefix`, by key."""
+        rows = self.db.execute("SELECT value FROM meta WHERE substr(key, 1, ?)=? ORDER BY key", (len(prefix), prefix))
+        return [r[0] for r in rows]
+
     def get_meta(self, key: str, default: str | None = None) -> str | None:
         r = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return r["value"] if r else default
@@ -1115,6 +1162,20 @@ class Ledger:
     def set_meta(self, key: str, value: str) -> None:
         with self.tx() as db:
             db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, value))
+
+    def credit_picks(self) -> dict[str, str]:
+        """Credit note id -> the invoice a person said it cancels (or "-": none)."""
+        rows = self.db.execute("SELECT key,value FROM meta WHERE key >= 'credit_pick:' AND key < 'credit_pick;'")
+        return {key.removeprefix("credit_pick:"): value for key, value in rows}
+
+    def pick_credit_original(self, note_id: str, target: str, asked: Callable[[], bool]) -> bool:
+        """Which invoice a credit note without a reference cancels, as a person answered; the first answer stands.
+        `asked` re-checks the question under the write lock, so two answers can't take one invoice."""
+        with self.tx() as db:
+            if not asked():
+                return False
+            sql = "INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)"
+            return db.execute(sql, (f"credit_pick:{note_id}", target)).rowcount == 1
 
     def create_payment_file(self, company: str, name: str) -> int:
         name = name.strip()
@@ -1234,13 +1295,9 @@ class Ledger:
                 (file_id, company, revision),
             ).fetchone():
                 return None
-            existing = db.execute(
-                "SELECT id FROM payment_downloads WHERE file_id=? AND version=? AND revision=?",
-                (file_id, version, revision),
-            ).fetchone()
-            if existing:
-                db.execute("UPDATE payment_downloads SET created_at=? WHERE id=?", (now(), existing["id"]))
-                return existing["id"]
+            # Every download is its own row, the same bytes again included: the history shows each one. The latest is
+            # the newest created_at, then the highest id (a tie within one second); rows recorded before #51 reused
+            # an older id with a refreshed time, which the same order still reads right.
             return db.execute(
                 "INSERT INTO payment_downloads(file_id,version,revision,items,created_at,value_date) "
                 "VALUES(?,?,?,?,?,?)",
@@ -1271,22 +1328,20 @@ class Ledger:
             return True
 
     def answer_file_not_imported(self, file_id: int, company: str, revision: int, download_id: int) -> bool:
+        """The latest download was not imported: bump the revision so that download can no longer be imported."""
         with self.tx() as db:
             latest = db.execute(
                 "SELECT id FROM payment_downloads WHERE file_id=? ORDER BY created_at DESC,id DESC LIMIT 1", (file_id,)
             ).fetchone()
             if (latest["id"] if latest else 0) != download_id:
                 return False
-            if not db.execute(
-                "UPDATE payment_files SET revision=revision+1 WHERE id=? AND company=? AND revision=? AND imported_at IS NULL",
-                (file_id, company, revision),
-            ).rowcount:
-                return False
-            highest = db.execute(
-                "SELECT coalesce(max(id),0) FROM payment_downloads WHERE file_id=?", (file_id,)
-            ).fetchone()[0]
-            self.set_meta(f"payment_download_answer:{file_id}", str(highest))
-            return True
+            return bool(
+                db.execute(
+                    "UPDATE payment_files SET revision=revision+1 "
+                    "WHERE id=? AND company=? AND revision=? AND imported_at IS NULL",
+                    (file_id, company, revision),
+                ).rowcount
+            )
 
     def clear_inactive_file_path(self, file_id: int, company: str, revision: int) -> bool:
         with self.tx() as db:
@@ -1406,7 +1461,7 @@ class Ledger:
                 ).fetchone()
             ):
                 return False
-            if not self._reserve(db, tx, f"payment {item_id}"):
+            if self._net_changed(db, item_id) or not self._reserve(db, tx, f"payment {item_id}"):
                 return False
             cur = db.execute(
                 "UPDATE payments SET status='paid', paid_at=?, paid_note=? WHERE item_id=? AND status!='paid'",
@@ -1414,6 +1469,31 @@ class Ledger:
             )
             self._release_unless(db, tx, cur.rowcount)
         return cur.rowcount > 0
+
+    def _net_changed(self, db, item_id: str) -> bool:
+        """An invoice payment for a net (below its invoice's total, and a credit note of its supplier names the
+        invoice) that is no longer the total minus the invoice's linked credits: a debit settling it would hide the
+        difference, so no writer settles it. Rows no credit note names keep settling as they always did."""
+        row = db.execute(
+            "SELECT p.amount,p.company,e.message_id,e.total,e.number,coalesce(nullif(e.supplier_tax_id,''),"
+            "e.supplier_cui) AS supplier FROM payments p JOIN efactura e ON e.item_id=p.item_id WHERE p.item_id=?",
+            (item_id,),
+        ).fetchone()
+        if not row or not row["total"] or Decimal(row["amount"]) >= Decimal(row["total"]):
+            return False
+        named = credits.credit_number(row["number"] or "")
+        if not named or not any(
+            credits.credit_number(c["billing_ref"] or "") == named
+            for c in db.execute(
+                "SELECT billing_ref FROM efactura WHERE company=? AND doc_type='credit_note' "
+                "AND coalesce(nullif(supplier_tax_id,''),supplier_cui)=?",
+                (row["company"], row["supplier"]),
+            )
+        ):
+            return False
+        credited = credits.credited(self, row["company"])
+        net = Decimal(row["total"]) - credited.get(row["message_id"], Decimal(0))
+        return Decimal(row["amount"]) != net
 
     def sent_invoice_links(self, company: str, environment: str) -> dict[str, str]:
         return dict(
@@ -1470,10 +1550,16 @@ class Ledger:
 
             def owner(iban: str, month: str, claim: bool = True) -> str | None:
                 """The source that settles `month` of `iban`; `claim`: this source takes it if nobody has. The bank
-                takes a month only when it read it from its first day: a month it saw in part stays the
-                statement's (its lines there are evidence only)."""
+                takes a month only when it read it from its first day, in this read or since its first one (`covered`):
+                a month it saw in part stays the statement's (its lines there are evidence only)."""
                 start = getattr(st, "period_start", None)
-                if claim and source == "ob" and start and start > date.fromisoformat(month + "-01"):
+                if (
+                    claim
+                    and source == "ob"
+                    and start
+                    and start > date.fromisoformat(month + "-01")
+                    and not self._feed_read_from(db, st.company, iban, month + "-01")
+                ):
                     claim = None  # look, but don't take: and if nobody has it, it isn't the bank's
                 if (iban, month) not in owners:
                     row = db.execute(
@@ -1521,6 +1607,7 @@ class Ledger:
                             "INSERT OR IGNORE INTO settled_tx VALUES(?,?,?)", (key, "bank reference conflict", now())
                         )
                         self._reference_copy(db, st.company, t, key, iban, True, statement_keys)
+                    self._keep_reading(db, st.company, key, t)
                     # A row recorded before accounts were (iban NULL) learns its account from the same statement
                     # read again; a recorded account is never overwritten, and another company's row is never touched.
                     db.execute(
@@ -1644,6 +1731,62 @@ class Ledger:
                 used.add(copy)
                 hidden.add(tw)
         return [r for r in rows if r["tx_key"] not in hidden and r["day"] >= since]
+
+    def credit_lines(self, company: str, since: str) -> list:
+        """Every credit on record for the company from `since` (an ISO day) on, by any reading's date (a bank may
+        correct a booking date on a later read), each with its settled_tx reservation
+        (`what`, or null), twins and conflicts included: the raw evidence of who may have paid, which account_lines
+        narrows to one line per payment. Rows: tx_key, iban, day, amount, source, tx (statements.Tx as JSON, or null),
+        readings (a JSON array of the line's other readings, statements.Tx JSON each) and what."""
+        return self.db.execute(
+            "SELECT t.tx_key, t.iban, t.day, t.amount, t.source, t.tx, s.what, (SELECT json_group_array(r.tx) "
+            "FROM statement_tx_readings r WHERE r.tx_key=t.tx_key) AS readings FROM statement_txs t "
+            "LEFT JOIN settled_tx s ON s.tx_key=t.tx_key WHERE t.company=? AND t.direction='credit' AND (t.day>=? "
+            "OR EXISTS (SELECT 1 FROM statement_tx_readings r WHERE r.tx_key=t.tx_key AND json_extract(r.tx,'$.date')>=?)) "
+            "ORDER BY t.day, t.rowid",
+            (company, since, since),
+        ).fetchall()
+
+    @staticmethod
+    def _feed_read_from(db, company: str, iban: str, day: str) -> bool:
+        """The bank's feed has read the account every day since `day` or before (bank_connections.covered), over
+        all its reads: a month it read from its first day is the bank's, whatever day this read starts."""
+        rows = db.execute("SELECT covered FROM bank_connections WHERE company=?", (company,))
+        return any(json.loads(c).get(iban, "9999-12-31") <= day for (c,) in rows)
+
+    # What a reading of a credit says about who paid, what and when: another reading differing only elsewhere (a
+    # category worked out later) adds nothing.
+    READING_EVIDENCE = (
+        "date",
+        "title",
+        "description",
+        "amount",
+        "currency",
+        "iban",
+        "ref",
+        "counterparty",
+        "counterparty_iban",
+    )
+
+    @classmethod
+    def _keep_reading(cls, db, company: str, key: str, t) -> None:
+        """Keep another reading of a stored credit beside it (statement_tx_readings), the stored line unchanged: a
+        later read may name the payer, name it differently or correct its date, and who paid is what a client
+        reminder checks. Only a reading that differs in that evidence from the stored one and every kept one."""
+        if (
+            t.direction != "credit"
+            or not db.execute("SELECT 1 FROM statement_txs WHERE tx_key=? AND company=?", (key, company)).fetchone()
+        ):
+            return  # another firm's line under the same key never gets this firm's reading
+        known = db.execute(
+            "SELECT tx FROM statement_txs WHERE tx_key=:k AND tx IS NOT NULL "
+            "UNION ALL SELECT tx FROM statement_tx_readings WHERE tx_key=:k",
+            {"k": key},
+        ).fetchall()
+        new = t.to_dict()
+        evidence = lambda d: tuple(d.get(f) for f in cls.READING_EVIDENCE)  # noqa: E731
+        if all(evidence(json.loads(x)) != evidence(new) for (x,) in known):
+            db.execute("INSERT OR IGNORE INTO statement_tx_readings VALUES(?,?)", (key, json.dumps(new)))
 
     @staticmethod
     def _file_has(db, company: str, iban: str, month: str) -> bool:
@@ -1774,8 +1917,9 @@ class Ledger:
         how: tuple[str, str] | None = None,
     ) -> bool:
         """Open or skipped -> paid; a row the user marked paid (still unconfirmed) takes the proof (a debit or a mail),
-        never a second the user mark. `how`: the person's (paid_method, paid_detail), checked by efactura.paid_method;
-        a fact kept on the row, never proof. A proof closing a marked row keeps how the person said they paid."""
+        never a second the user mark; a row a mail proved (MAIL_PROVED) takes its statement debit. `how`: the person's
+        (paid_method, paid_detail), checked by efactura.paid_method; a fact kept on the row, never proof. A proof
+        closing a marked row keeps how the person said they paid."""
         note = audit.note(note)
         method, detail = how or (None, None)
         with self.tx() as db:
@@ -1786,9 +1930,11 @@ class Ledger:
             cur = db.execute(
                 "UPDATE efactura SET status='paid', paid_at=?, paid_note=?, paid_tx=?, "
                 "paid_method=COALESCE(?,paid_method), paid_detail=COALESCE(?,paid_detail) WHERE message_id=? "
-                f"AND (status IN ('open','skipped') OR ({USER_MARKED} AND ? NOT LIKE '{USER}%')) "
+                f"AND (status IN ('open','skipped') OR ({USER_MARKED} AND ? NOT LIKE '{USER}%') OR ({MAIL_PROVED} "
+                "AND EXISTS (SELECT 1 FROM statement_txs t WHERE t.tx_key=? AND t.company=efactura.company "
+                "AND t.direction='debit'))) "  # only this firm's recorded debit replaces a mail
                 f"AND (? IS NULL OR {unlinked('efactura')})",  # a proof never closes one paid in part
-                (now(), note, tx, method, detail, message_id, note, tx),
+                (now(), note, tx, method, detail, message_id, note, tx, tx),
             )
             if cur.rowcount and tx and not tx.startswith(("bon:", "ef-proof:")) and to_iban:
                 db.execute(
@@ -1812,49 +1958,6 @@ class Ledger:
                 (row["message_id"],),
             )
         return bool(removed)
-
-    def save_receipt_items(self, co: str, sha: str, payload: dict, revision: int, *, verified: bool = True) -> bool:
-        receipt_lines.validate(payload)
-        with self.tx() as db:
-            doc = db.execute(
-                "SELECT 1 FROM documents WHERE sha=? AND company=? AND kind='receipt' AND efactura_id IS NULL",
-                (sha, co),
-            ).fetchone()
-            row = db.execute("SELECT revision FROM receipt_items WHERE sha=? AND company=?", (sha, co)).fetchone()
-            if not doc or (row["revision"] if row else 0) != revision:
-                return False
-            data = json.dumps(payload, ensure_ascii=False)
-            origin = "user" if verified else "ai"
-            cur = db.execute(
-                "INSERT INTO receipt_items VALUES(?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(sha) DO UPDATE SET payload=excluded.payload, verified=excluded.verified, "
-                "revision=excluded.revision,at=excluded.at WHERE receipt_items.company=excluded.company",
-                (sha, co, data, data, origin, int(verified), revision + 1, now()),
-            )
-        return cur.rowcount == 1
-
-    def confirm_receipt_invoice(
-        self, co: str, sha: str, invoice: str, revision: int, eligible: Callable[[], bool]
-    ) -> bool:
-        """Associate documents only. Re-read both sides under the write lock; never reserve a payment."""
-        with self.tx() as db:
-            row = db.execute(
-                "SELECT revision FROM receipt_items WHERE sha=? AND company=? AND verified=1", (sha, co)
-            ).fetchone()
-            if not row or row["revision"] != revision or not eligible():
-                return False
-            if db.execute("SELECT 1 FROM receipt_invoice_links WHERE sha=? OR invoice=?", (sha, invoice)).fetchone():
-                return False
-            cur = db.execute(
-                "UPDATE documents SET efactura_id=? WHERE sha=? AND company=? AND efactura_id IS NULL "
-                "AND NOT EXISTS(SELECT 1 FROM documents WHERE efactura_id=?) "
-                "AND EXISTS(SELECT 1 FROM efactura WHERE message_id=? AND company=?)",
-                (invoice, sha, co, invoice, invoice, co),
-            )
-            if not cur.rowcount:
-                return False
-            db.execute("INSERT INTO receipt_invoice_links VALUES(?,?,?,?)", (sha, invoice, co, now()))
-        return True
 
     def link_bon(self, sha: str, message_id: str, note: str) -> bool:
         """The bon `sha` proves this invoice paid at the till: both sides are written in one transaction, or neither.
@@ -1919,16 +2022,19 @@ class Ledger:
 
             if origin == "auto" and self.get_meta(f"payment_file_removed:{message_id}"):
                 return None
-            row = db.execute("SELECT status FROM efactura WHERE message_id=?", (message_id,)).fetchone()
+            row = db.execute("SELECT status,total FROM efactura WHERE message_id=?", (message_id,)).fetchone()
+            if row and origin == "auto" and Decimal(item.amount) != Decimal(row["total"]):
+                return None  # autopay never queues a credited invoice's net (efactura.approve), re-checked here
             if (
                 not row
                 or row["status"] != "open"
                 or db.execute("SELECT 1 FROM tx_link_items WHERE item=?", ("efactura " + message_id,)).fetchone()
             ):
                 return None
-            payment_item(
-                self, message_id
-            )  # Re-check account trust while holding the write lock (including revocations).
+            # Re-check under the write lock (account trust, revocations, a credit note since): the row it would build
+            # now must be the item, its account and net amount included; otherwise nothing is written.
+            if payment_item(self, message_id, account=item.payee_iban).item_id != item.item_id:
+                return None
             if not db.execute(
                 "UPDATE efactura SET status='linked', item_id=?, paid_note=? WHERE message_id=? AND status='open'",
                 (item.item_id, f"added to the payment file by {AUTHORS[origin]}", message_id),
@@ -2084,7 +2190,7 @@ class Ledger:
         references = (
             "NOT EXISTS (SELECT 1 FROM settlement_lines WHERE invoice_id=?) AND NOT EXISTS (SELECT 1 FROM invoice_sent_links WHERE message_id=?)"
             if way == "issued"
-            else "NOT EXISTS (SELECT 1 FROM receipt_invoice_links WHERE invoice=?)"
+            else "NOT EXISTS (SELECT 1 FROM documents WHERE efactura_id=?)"
         )
         with self.tx() as db:
             return (
@@ -2170,10 +2276,6 @@ class Ledger:
                 raise settlements.SettlementError("credit_unavailable")
             data = json.loads(report["data"])
             payer_id = data["payer_id"]
-            count = db.execute(
-                "SELECT count(*) FROM settlement_confirmations WHERE company=? AND payer_id=?",
-                (report["company"], payer_id),
-            ).fetchone()[0]
             legacy = getattr(statement, "legacy_proofs", {}).get(key)
             if legacy and self.get_meta("statement_stored_sha:" + legacy[0]) not in (None, legacy[1]):
                 raise settlements.SettlementError("statement_changed")
@@ -2182,7 +2284,9 @@ class Ledger:
 
                 if _confirmation is not _HUMAN_CONFIRMATION or not confirmed_by.strip() or expected_tx != key:
                     raise settlements.SettlementError("confirmation_refused")
-            elif count < settlements.TRUSTED_AFTER or legacy or not settlements.payer_identified(data):
+            elif legacy or data.get("mailed_by"):
+                # A person confirms an unpinned legacy PDF copy, and a report that came by mail (a From header is no
+                # proof of who sent it); every other verified batch settles on its own.
                 preview = json.dumps(
                     {
                         "id": key,
@@ -2196,11 +2300,8 @@ class Ledger:
                     "credit=excluded.credit,invoice_count=excluded.invoice_count WHERE credit!=excluded.credit OR invoice_count!=excluded.invoice_count",
                     (report_id, preview, len(invoices)),
                 )
-                reason = (
-                    "statement_confirmation_required"
-                    if legacy and count >= settlements.TRUSTED_AFTER
-                    else "confirmation_required"
-                )
+                # Mail first: its sheet offers withdrawal beside the confirmation; a legacy copy is pinned on confirm.
+                reason = "mail_confirmation_required" if data.get("mailed_by") else "statement_confirmation_required"
                 db.execute(
                     "UPDATE settlement_reports SET error=? WHERE id=? AND status='pending' AND error IS NOT ?",
                     (reason, report_id, reason),
@@ -2262,28 +2363,42 @@ class Ledger:
             return invoices
 
     def mark_issued_collected(
-        self, message_id: str, note: str, tx: str, from_iban: str = "", into_iban: str = ""
+        self, message_id: str | tuple[str, ...], note: str, tx: str, from_iban: str = "", into_iban: str = ""
     ) -> bool:
-        """A statement credit collected this invoice. `tx` (statements.tx_key) can never settle anything else.
-        `into_iban`: the company account the credit landed in."""
+        """A statement credit collected this invoice, or (a tuple) exactly this set of one firm's invoices: all of
+        them or none. `tx` (statements.tx_key) can never settle anything else. `into_iban`: the company account the
+        credit landed in."""
+        mids = (message_id,) if isinstance(message_id, str) else tuple(message_id)
         note = audit.note(note)
-        with self.tx() as db:
-            if not self._card_proof("issued", message_id, tx):
-                return False
-            if not self._reserve(db, tx, f"issued {message_id}"):
-                return False
-            cur = db.execute(
-                "UPDATE issued SET status='collected', collected_at=?, collected_note=?, collected_tx=?, "
-                "collected_from_iban=?, collected_into_iban=? "
-                f"WHERE message_id=? AND status IN ('open','marked') AND parse_error IS NULL AND {unlinked('issued')}",
-                (now(), note, tx, from_iban or None, into_iban or None, message_id),
-            )
-            self._release_unless(db, tx, cur.rowcount)
-            if cur.rowcount:
+        try:
+            with self.tx() as db:
+                firms = db.execute(
+                    f"SELECT count(DISTINCT company) FROM issued WHERE message_id IN ({','.join('?' * len(mids))})",
+                    mids,
+                ).fetchone()[0]
+                if not mids or len(set(mids)) != len(mids) or firms != 1:
+                    return False
+                if not all(self._card_proof("issued", m, tx) for m in mids):
+                    return False
+                states = "('open','marked')" if len(mids) == 1 else "('open')"  # a set confirms no one's mark
+                if not self._reserve(db, tx, "issued " + " ".join(mids)):
+                    return False
+                for m in mids:
+                    if not db.execute(
+                        "UPDATE issued SET status='collected', collected_at=?, collected_note=?, collected_tx=?, "
+                        "collected_from_iban=?, collected_into_iban=? WHERE message_id=? "
+                        f"AND status IN {states} "
+                        f"AND parse_error IS NULL AND {unlinked('issued')}",
+                        (now(), note, tx, from_iban or None, into_iban or None, m),
+                    ).rowcount:
+                        raise _SetChanged  # rolls back the reservation and every invoice before it
                 from fiscalm.commerce.webhooks import capture
 
-                capture(self, message_id=message_id)
-        return cur.rowcount > 0
+                for m in mids:
+                    capture(self, message_id=m)
+        except _SetChanged:
+            return False
+        return True
 
     def mark_issued_manual(self, message_id: str, note: str, method: str) -> bool:
         """The user: collected by `method` (issued.COLLECTED_METHODS) with no statement credit to point to yet."""
@@ -2520,6 +2635,8 @@ class Ledger:
                 ),
             )
         else:
+            if self._net_changed(db, ident):
+                raise LinkRefused("item_changed")
             cur = db.execute(
                 "UPDATE payments SET status='paid', paid_at=?, paid_note=? WHERE item_id=? AND company=? "
                 "AND status IN ('pending','exported') AND (source_iban IS NULL OR source_iban="
@@ -2612,6 +2729,15 @@ class Ledger:
 
     def document(self, sha: str):
         return self.db.execute("SELECT * FROM documents WHERE sha=?", (sha,)).fetchone()
+
+    def statement_of_copy(self, digest: str) -> str | None:
+        """The statement document whose stored copy (a PDF's decrypted copy) has these bytes, when exactly one has."""
+        rows = self.db.execute(
+            "SELECT d.sha FROM meta m JOIN documents d ON m.key='statement_stored_sha:'||d.sha "
+            "WHERE m.value=? AND d.kind='statement'",
+            (digest,),
+        ).fetchall()
+        return rows[0]["sha"] if len(rows) == 1 else None
 
     def add_document(self, sha: str, company: str, month: str, kind: str, path: str, **kw) -> bool:
         issues = json.dumps(kw.pop("issues", []) or [])

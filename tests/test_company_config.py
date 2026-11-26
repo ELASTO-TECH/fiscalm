@@ -195,6 +195,7 @@ def test_company_settings_are_configuration_for_the_app_only():
         "company-statement-password",
         "company-alias-add",
         "company-alias-remove",
+        "company-account-dates",
     ):
         assert action in actions.LOCAL_ACTIONS and action not in actions.API_ACTIONS
 

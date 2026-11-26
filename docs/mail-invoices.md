@@ -41,7 +41,7 @@ expired delta token starts again from the last 30 days. No mailbox state changes
 **Which mails are invoices.** Only attachments are read, never the body, never a link. An attachment is a candidate
 when its bytes are a PDF (`%PDF-`) or a UBL Invoice (XML, parsed with DTDs refused). Mails from the install's
 own addresses are skipped; a current account's bank statement (a BT-style bank: its "allmerge" PDFs, imported
-together and refused unless they hold every account the firm had at that bank that month) and a firm's
+together; one that holds only some of the firm's accounts at that bank is imported and the rest are still to come) and a firm's
 accountant's OPs (PDFs named op…) go to statement and payment-order intake instead. Payment-confirmation mails are
 found by an IMAP search of the same folders; Microsoft payment-proof search is not yet supported (#637). No Sent-folder scan or draft write is performed. A PDF counts as an invoice when its text carries a fiscal document title (factură, invoice, receipt,
 Rechnung, facture, …) and a total. That list is a fixed rule of the document's content, like the proforma check,
@@ -61,9 +61,16 @@ that names another firm than its sender's is in doubt.
 
 **Fields.** UBL gives supplier, number, dates, total and currency directly. From a PDF: the total on a "total"
 line with its currency, the issue date on a dated line, the number after the document's title; the supplier is the
-sender's display name. When the administrator configures the AI integration, that consents to document text being sent to its provider
-in Sandbox and Live. It is asked only when the rules found several totals, and its answer is checked: its total must be one the document's text shows, its date a date on the
-document, and it never chooses the firm. Its answer alone files nothing.
+sender's display name. When the administrator configures the AI integration, that consents to document text (or, for a scanned PDF
+without text, a picture of its first page) being sent to its provider in Sandbox and Live. It is asked once per PDF
+the rules could not settle (no firm, an unclear buyer, two firms, no single total, no text) and proposes the fields
+(`fiscalm.ai_extract`). Fixed rules check each one: an ISO date, a positive two-decimal total printed positive in the text
+with its currency, a known currency, and buyer and seller matched to the firms by CUI or name and printed
+on the document. It never overrules the rules: a firm they found must include its buyer, a total they found must
+include its total. A confident reading may file the document; a low-confidence one, a disagreement, or a refusal only the AI sees
+(proforma, credit note, the firm as seller, a Romanian seller, a number the firm issued) leaves the question open. The
+number the AI reads is only shown in the question, never used to refuse or match a document. A scan without text is
+asked about once the AI has read it; without an answer from the AI it stays unreadable. Only the rules refuse.
 
 **In doubt, one question (Sarcini).** No firm on the document, a firm without a clear buyer's role, two firms, a sender tied to another firm, or a total
 that isn't clear: the document waits in Sarcini as one question with the answers to pick (each firm, each total

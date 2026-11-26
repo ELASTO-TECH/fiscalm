@@ -29,7 +29,6 @@ from fiscalm import (
     ledger,
     links,
     pack,
-    receipt_items,
     rules,
     secrets,
     telemetry,
@@ -40,7 +39,7 @@ from fiscalm.api.responses import Error as APIError
 from fiscalm.bank import connections as bank_connect, csv as cs, enablebanking
 from fiscalm.bank.statements import StatementError
 from fiscalm.commerce import emag_sync, orders as commerce
-from fiscalm.efactura import client as anaf, inbox as efactura
+from fiscalm.efactura import client as anaf, credits as received_credits, inbox as efactura
 from fiscalm.invoicing import issued
 from fiscalm.invoicing.errors import InvoiceError
 from fiscalm.ledger import USER, AuthorizationRefused, Ledger, finance_home
@@ -125,30 +124,6 @@ def _linked(L: Ledger, done: dict) -> str:
     return msg + f" Restul facturii {rest[0][0]} rămâne {owed}."
 
 
-def _receipt_items(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
-    try:
-        revision = int(args.get("revision", ""))
-        with L.tx():
-            ctx.authorize()
-            if ctx.action == "receipt-lines-save":
-                payload = json.loads(args.get("payload", ""))
-                ok = L.save_receipt_items(co, args.get("id", ""), payload, revision)
-            else:
-                ok = receipt_items.confirm(L, co, args.get("id", ""), args.get("invoice", ""), revision)
-        return _res(
-            ok,
-            (
-                "Articolele au fost salvate."
-                if ctx.action == "receipt-lines-save"
-                else "Asocierea a fost confirmată. Plata se verifică separat."
-            )
-            if ok
-            else "Documentul s-a schimbat între timp.",
-        )
-    except (ValueError, TypeError, RecursionError):
-        return _res(False, BAD)
-
-
 def _order_discard(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     try:
         done = commerce.command(L, co, ctx.get("id"), "orders_discard", {}, date.today().isoformat(), ctx.authorize)
@@ -187,6 +162,32 @@ def _statement_csv_format(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
             "Configurarea CSV nu este validă. Verifică în CSV coloanele de dată, detalii și sumă (sau debit și credit). Verifică și formatul datei și separatorul zecimal.",
         )
     return _res(True, "Coloanele au fost salvate.")
+
+
+def _account_dates(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    """Setări › Firme › Bănci și conturi, Date cont: when an account (current or closed) was open. Only the dates sent
+    change; one left out keeps what is recorded, so a form opened before another person's change never undoes it."""
+    given = set(args) - {"co"}
+    if not {"key", "account"} <= given <= {"key", "account", "opened", "retired"} or len(given) == 2:
+        return _res(False, BAD)
+    firm = companies.all(L).get(args["key"])
+    account = (
+        next((a for a in firm.accounts if cs.account_id(firm.key, a.iban) == args["account"]), None) if firm else None
+    )
+    if not account:
+        return _res(False, "Contul nu este al acestei firme.")
+    try:
+        done = cc.set_dates(
+            L=L,
+            key=firm.key,
+            iban=account.iban,
+            opened=args.get("opened"),
+            retired=args.get("retired"),
+            today=date.today(),
+        )
+    except cc.CompanyError as e:
+        return _res(False, str(e))
+    return _res(True, "Datele contului au fost salvate.", done=done)
 
 
 def _bank_setup(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
@@ -415,6 +416,21 @@ def _settlement_format_delete(L: Ledger, co: str, args: dict, ctx: Context) -> d
     return _res(ok, "Formatul a fost șters." if ok else "Formatul nu mai există.")
 
 
+def _settlement_format_senders(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    if set(args) != {"co", "partner", "signature", "senders"}:
+        return _res(False, BAD)  # a missing list never clears the senders by accident
+    try:
+        with L.tx():
+            ctx.authorize()
+            done = settlement_upload.set_senders(
+                L, co, str(args.get("partner", "")), str(args.get("signature", "")), str(args.get("senders", ""))
+            )
+    except ValueError as e:
+        return _res(False, str(e))
+    ctx.log(f"web: {audit.actor.get() or 'app'} settlement-format-senders company={co} senders={len(done)}")
+    return _res(True, "Adresele au fost salvate." if done else "Rapoartele nu se mai iau din mail.")
+
+
 def check(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     # Same tick as the schedule (safe in shadow too: the tick itself respects the mode).
     try:
@@ -544,6 +560,31 @@ def resolve_debit(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     return out
 
 
+def credit_pick(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    """A received credit note naming no invoice fits several: the user says which one it cancels, or none."""
+    ok = received_credits.pick(L, co, ctx.get("id"), ctx.get("target"))
+    if ok:  # only an id the engine accepted reaches the log
+        ctx.log(f"web: credit-pick {ctx.get('id')}")
+    return _res(ok, "Răspunsul a fost salvat." if ok else "Stornarea nu mai așteaptă un răspuns.")
+
+
+def mail_proof(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    """A payment mail waiting for review: the person picks the invoice it paid, or says it is no payment."""
+    if not isinstance(args.get("target"), str) or not re.fullmatch(r"[0-9a-f]{20}", ctx.get("id")):
+        return _res(False, BAD)  # "" says it is no payment: never assumed from a missing field
+    done = efactura.resolve_review(L, co, ctx.get("id"), ctx.get("target"))
+    number = (L.efactura(done) or {"number": ""})["number"] if done else ""
+    ctx.log(f"web: mail-proof {ctx.get('id')[:20]}: {'nothing' if done is None else done or 'dismissed'}")
+    if done is None:
+        return _res(False, "E-mailul nu mai așteaptă un răspuns.")
+    return _res(
+        True,
+        f"Factura {number} este confirmată ca plătită, cu e-mailul ca dovadă."
+        if done
+        else "E-mailul nu mai apare în sarcini.",
+    )
+
+
 def card_owner(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     ok = L.assign_card(co, ctx.get("tx"), ctx.get("owner"), ctx.created_by)
     return _res(
@@ -584,6 +625,18 @@ def memory_forget(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     Available in both modes."""
     ok = L.forget(co, ctx.get("id"))
     return _res(ok, "Asocierea a fost ștearsă." if ok else "Asocierea nu mai există.")
+
+
+def tx_receipt(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
+    """Bon / chitanță with a file already uploaded: the user names it as this debit's bon (links.receipt), the same answer
+    as uploading it from the debit's sheet. Only an upload of this firm with no data of its own is taken."""
+    try:
+        links.receipt(L, co, ctx.get("tx"), ctx.get("id"), ctx.created_by)
+        out = _res(True, "Bonul a fost asociat cu plata.")
+    except links.LinkRefused as e:
+        out = _res(False, links.REFUSED.get(e.code, BAD))
+    ctx.log(f"web: tx-receipt: {'ok' if out['ok'] else 'refused'}")  # the request's own text is never logged
+    return out
 
 
 def tx_await(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
@@ -1022,8 +1075,23 @@ def _product(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
 
 
 def _file_create(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
-    ident = pay.add_invoices(L, co, _file_invoice_ids(args), name=ctx.get("name"), approve_invoice=efactura.approve)
+    ids = _file_invoice_ids(args)
+    ident = pay.add_invoices(
+        L, co, ids, name=ctx.get("name"), approve_invoice=efactura.approve, **_file_picks(L, args, ids)
+    )
     return _res(True, "Fișierul a fost creat.", done={"file_id": ident})
+
+
+def _file_picks(L: Ledger, args: dict, ids: list[str]) -> dict:
+    """What the person confirmed, only for invoices in this request: `accounts` {invoice id: position of the picked IBAN
+    in that invoice}; `amounts` {invoice id: the amount shown to pay, two decimals} for credited invoices."""
+    picks, amounts = args.get("accounts") or {}, args.get("amounts") or {}
+    if not isinstance(picks, dict) or not isinstance(amounts, dict) or not (set(picks) | set(amounts)) <= set(ids):
+        raise ValueError(BAD)
+    if any(type(v) is not str or not re.fullmatch(r"\d{1,12}\.\d{2}", v) for v in amounts.values()):
+        raise ValueError(BAD)
+    accounts = {mid: efactura.account_at(L.efactura(mid) or {"ibans": "[]"}, n) for mid, n in picks.items()}
+    return {"accounts": accounts, "amounts": amounts}
 
 
 def _file_invoice_ids(args: dict) -> list[str]:
@@ -1037,7 +1105,8 @@ def _file_add(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     ids = _file_invoice_ids(args)
     if not ids:
         raise ValueError(BAD)
-    ident = pay.add_invoices(L, co, ids, file_id=int(args["file_id"]), approve_invoice=efactura.approve)
+    picks = _file_picks(L, args, ids)
+    ident = pay.add_invoices(L, co, ids, file_id=int(args["file_id"]), approve_invoice=efactura.approve, **picks)
     return _res(True, "Plățile au fost adăugate.", done={"file_id": ident})
 
 
@@ -1087,11 +1156,6 @@ def _file_restore(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
 def _file_missing_import(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
     ok = pay.resolve_missing_file(L, int(args["file_id"]), co, ctx.get("version"), ctx.at.date(), True)
     return _res(ok, "Ai confirmat importul în bancă." if ok else STALE_DOWNLOAD)
-
-
-def _file_not_imported(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
-    ok = pay.mark_not_imported(L, int(args["file_id"]), co, int(args["download_id"]))
-    return _res(ok, "Poți modifica fișierul. Descarcă-l din nou înainte să-l imporți." if ok else STALE_DOWNLOAD)
 
 
 def _file_import(L: Ledger, co: str, args: dict, ctx: Context) -> dict:
@@ -1177,6 +1241,11 @@ class Action:
         return size <= self.limit
 
 
+# An invoice listing several IBANs: {invoice id: position of the IBAN a person picked} (state's `accounts[].index`).
+ACCOUNT_PICKS = {"type": "object", "additionalProperties": {"type": "integer"}}
+# A credited invoice: {invoice id: the net amount the person saw}; a different amount now is refused.
+AMOUNTS_SHOWN = {"type": "object", "additionalProperties": {"type": "string"}}
+
 # One row per entry keeps the handler and policy together.
 # fmt: off
 ACTIONS = {
@@ -1194,8 +1263,6 @@ ACTIONS = {
     'user-reset': Action(_account_action, 'id', role='manage_users', firm=False, public=False, strings=True, actor=True, errors=(ValueError,), message='Autentificarea a fost resetată.', description='Account administration; fresh administrator session required. id.'),
     'session-close': Action(_account_action, 'id', role='manage_users', firm=False, public=False, strings=True, actor=True, errors=(ValueError,), message='Sesiunea a fost închisă.', description='Account administration; fresh administrator session required. id.'),
     'history-review': Action(history_review, 'sha target direction number issue_date total currency party_name party_tax_id', role='manage_firms', public=False, strings=True, errors=(history_pdf.ReviewError,), description='Review one pending history PDF by digest, correcting invoice fields or excluding it. Local only; never confirms payment.'),
-    'receipt-lines-save': Action(_receipt_items, 'id revision payload', public=False, description='id: receipt SHA; revision: displayed version; payload: JSON string with lines (name, unit, quantity, net after discounts excluding VAT, vat percentage), total, currency, payment (cash/card/empty). Empty lines skip. 4 KB.'),
-    'receipt-invoice-confirm': Action(_receipt_items, 'id revision invoice', public=False, description='id: receipt SHA; revision; invoice: displayed unique proposal ID. Rechecks under lock, never confirms payment. Local operation.'),
     'setup-card-dismiss': Action(_setup_card_dismiss, '', role='manage_firms', public=False, strings=True, description='Close the selected firm\'s Configurează card on Acasă; the items it listed stay in Setări, and `setup-card-show` reopens it. Administrator only; repeating it changes nothing.'),
     'setup-card-show': Action(_setup_card_show, '', role='manage_firms', public=False, strings=True, description='Show the selected firm\'s closed Configurează card on Acasă again, while something is left to set up. Administrator only; repeating it changes nothing.'),
     'telemetry-settings': Action(_telemetry_settings, 'on', effect='local', role='manage_firms', firm=False, public=False, strings=True, description='on ("1" or "0"). Administrator only. Daily anonymous Live install statistics, enabled by default; FISCALM_TELEMETRY=0 overrides this local preference.'),
@@ -1203,15 +1270,15 @@ ACTIONS = {
     'accountant-save': Action(_accountant_save, 'cui senders recipient', role='manage_firms', public=False, strings=True, description='cui (existing partner), senders (newline-separated addresses, at most ten), recipient, co. App admin configuration.'),
     'settlement-withdraw': Action(_settlement_withdraw, 'id', strings=True, description='Withdraw pending settlement evidence; never release a reserved credit.'),
     'settlement-format-delete': Action(_settlement_format_delete, 'partner signature', strings=True, public=False, description="partner, signature: one of the partner's report_formats. Forgets the saved columns; uploaded reports are unchanged."),
+    'settlement-format-senders': Action(_settlement_format_senders, 'partner signature senders', role='manage_firms', strings=True, public=False, description="partner, signature: one of the partner's report_formats; senders: newline-separated exact addresses (at most ten, empty to stop). Mailed CSV/XLSX reports in that format from those addresses are imported, read-only."),
     'settlement-confirm': Action(_settlement_confirm, 'id tx confirmed', actor=True, public_description='id: 32-hex report ID; tx: 20-hex exact displayed credit ID; confirmed: yes. Local operation; v1 requires a write key owned by an active person (else 403 person_owned_key_required). Rechecks all evidence under lock.'),
     'order-discard': Action(_order_discard, 'id', public=False, actor=True, description='co, id: company-scoped order sheet ID. App-only local configuration.'),
     'emag-refund': Action(_emag_resolve, 'id', public_description='id: company-scoped order sheet ID; prepares a refund draft, never sends money.'),
     'emag-resolve': Action(_emag_resolve, 'id', public_description='id: company-scoped order sheet ID; acknowledges the current review.'),
-    'payment_file_not_imported': Action(_file_not_imported, 'file_id download_id', public=False, errors=(PaymentFileError, ValueError), schema={'type':'object','properties':{'file_id':{'type':'integer'},'download_id':{'type':'integer'}},'required':['file_id','download_id']}),
     'payment_file_restore': Action(_file_restore, 'file_id version', effect='payment_file', public=False, errors=(PaymentFileError, ValueError), schema={'type':'object','properties':{'file_id':{'type':'integer'},'version':{'type':'string'}},'required':['file_id','version']}),
     'payment_file_missing_import': Action(_file_missing_import, 'file_id version', effect='payment_file', public=False, errors=(PaymentFileError, ValueError), schema={'type':'object','properties':{'file_id':{'type':'integer'},'version':{'type':'string'}},'required':['file_id','version']}),
-    'payment_file_create': Action(_file_create, 'name invoice_ids', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'name': {'type': 'string'}, 'invoice_ids': {'type': 'array', 'items': {'type': ['string', 'integer']}}}, 'required': ['name', 'invoice_ids']}),
-    'payment_file_add': Action(_file_add, 'file_id invoice_ids', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'file_id': {'type': 'integer'}, 'invoice_ids': {'type': 'array', 'items': {'type': ['string', 'integer']}}}, 'required': ['file_id', 'invoice_ids']}),
+    'payment_file_create': Action(_file_create, 'name invoice_ids accounts amounts', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'name': {'type': 'string'}, 'invoice_ids': {'type': 'array', 'items': {'type': ['string', 'integer']}}, 'accounts': ACCOUNT_PICKS, 'amounts': AMOUNTS_SHOWN}, 'required': ['name', 'invoice_ids']}),
+    'payment_file_add': Action(_file_add, 'file_id invoice_ids accounts amounts', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'file_id': {'type': 'integer'}, 'invoice_ids': {'type': 'array', 'items': {'type': ['string', 'integer']}}, 'accounts': ACCOUNT_PICKS, 'amounts': AMOUNTS_SHOWN}, 'required': ['file_id', 'invoice_ids']}),
     'payment_file_rename': Action(_file_rename, 'file_id name', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'file_id': {'type': 'integer'}, 'name': {'type': 'string'}}, 'required': ['file_id', 'name']}),
     'payment_file_remove': Action(_file_remove, 'file_id payment_id', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'file_id': {'type': 'integer'}, 'payment_id': {'type': 'string'}}, 'required': ['file_id', 'payment_id']}),
     'payment_file_delete': Action(_file_delete, 'file_id', effect='local', public=False, errors=(PaymentFileError, efactura.ApproveError, ValueError), schema={'type': 'object', 'properties': {'file_id': {'type': 'integer'}}, 'required': ['file_id']}),
@@ -1236,8 +1303,11 @@ ACTIONS = {
     'issued-mark': Action(issued_mark, 'id method detail', strings=True, public_description='id, method (bank: payment order, cash, card, other), detail: for other, how it was collected (1 to 200 characters); else empty. Never proof: the invoice awaits a statement credit.'),
     'issued-unmark': Action(issued_unmark, 'id', public_description='id'),
     'resolve-debit': Action(resolve_debit, 'tx target', public_description='tx, target (one of its candidates[].id)'),
+    'credit-pick': Action(credit_pick, 'id target', public_description='id: a received credit note with credit_question; target: one of its credit_question[].id, or "-" when it cancels none of them. The first answer stands; local operation.'),
+    'mail-proof': Action(mail_proof, 'id target', public_description='id (a mail_proofs[].id), target (one of its candidates[].id: the mail proves that invoice paid; "": it is no payment, the mail leaves this company\'s tasks)'),
     'card-owner': Action(card_owner, 'tx owner', public=False, actor=True, description='tx (an observed card transaction), owner (a companies[].key or personal); first answer wins, never confirms payment'),
     'tx-link': Action(tx_link, 'tx kind invoices payment reason note who holder was remember', public=False, actor=True, description='kind (documents, the default; label: Fără document, reason one of bank_fee, interest, personal, other and an optional note for the accountant, required for other, at most 200 characters; transfer: Transfer între conturi; advance: Avans, who the administrator or associate, 1 to 100 characters), tx (a transactions.rows[].id; for an explanation already made, its link.tx), invoices (comma-separated ids: issued[].id for a credit, invoices[].id for a debit) or payment (one payments.*[].item_id, debits only), reason ("" or one of rest, courier_fee, bank_fee, fx, other), note (other only, 1 to 200 characters), was (the row\'s explanation.link.id, "" for none), remember ("", or one of the row\'s remember keys: iban, card for a label only, name; never for a transfer)'),
+    'tx-receipt': Action(tx_receipt, 'tx id', public=False, actor=True, description='tx (a card debit in transactions.rows[].id, not explained), id (documents[].id of an upload of this firm whose amount is still null): the upload is this debit\'s bon and takes its amount, day and card. Local bookkeeping; refused when the debit or the upload is already explained or the upload has data of its own.'),
     'tx-await': Action(tx_await, 'tx on note', public=False, actor=True, description='tx (a debit in transactions.rows[].id, not explained or settled), on ("1" waits, "0" stops waiting), note (on=1 only, optional, what is expected, at most 200 characters). Aștept factura: the debit stays to explain, listed last, and reserves nothing. Local operation.'),
     'tx-unlink': Action(tx_unlink, 'tx was', public=False, actor=True, description="tx, was (the explanation's id)"),
     'memory-forget': Action(memory_forget, 'id', public=False, description='id (a transactions.remembered[].id)'),
@@ -1261,6 +1331,7 @@ ACTIONS = {
     'company-bank': Action(company_action, 'key iban', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "iban": "<RON IBAN>" } (both required)'),
     'company-account': Action(company_action, 'key iban currency', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "iban": "<IBAN>", "currency": "EUR" } (all required)'),
     'company-statement-password': Action(company_action, 'key bank password', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "bank": "bt", "password": "<parola>" } (all required; bank: a catalogue bank with password-protected PDF statements). Write-only: never returned or logged.'),
+    'company-account-dates': Action(_account_dates, 'key account opened retired', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "account": "<account id>", "opened": "2024-03" or "2024-03-14" or "", "retired": "2026-10-31" or "" } (key, account and at least one date; "" forgets a date, one left out is kept; a closing day after today is refused). The account payment files debit is never closed here.'),
     'company-alias-add': Action(company_action, 'key alias', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "alias": "Exemplu Grup" } (both required)'),
     'company-alias-remove': Action(company_action, 'key alias', role='manage_firms', firm=False, public=False, strings=True, description='{ "key": "EXEMPLU", "alias": "Exemplu Grup" } (both required)'),
     'statement-csv-format': Action(_statement_csv_format, 'account date_format decimal date amount debit credit description counterparty counterparty_iban reference', public=False, strings=True, description='account, co; column names from fiscalm.bank.csv.FIELDS plus date_format and decimal, all strings. App admin configuration.'),

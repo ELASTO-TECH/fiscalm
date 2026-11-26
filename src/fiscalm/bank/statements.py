@@ -41,20 +41,6 @@ class PartialMonth(StatementError):
         self.month = month
 
 
-class MissingAccounts(StatementError):
-    """A statement that leaves out accounts the company held at its bank in that month; `accounts` names each
-    one by currency and last four characters, e.g. "EUR 0001"."""
-
-    def __init__(self, accounts: list[str]):
-        super().__init__(
-            "Statement missing configured accounts: "
-            + ", ".join(accounts)
-            + "; download a full company statement from the bank, or set the month an account opened"
-            + " (fiscalm company opened)"
-        )
-        self.accounts = accounts
-
-
 # ------------------------------------------------------------------- decrypt
 
 
@@ -697,18 +683,22 @@ OWNER_ADVANCE = "owner_advance"  # "Avans trezorerie" to the user
 DOMESTIC = "domestic"  # Romanian supplier -> invoice arrives via e-Factura/SPV
 NEEDS_INVOICE = "needs_invoice"  # foreign supplier -> must have a receipt in the pack
 INCOME = "income"
+CASH = "cash"  # a cash withdrawal, by the bank's code: money the firm still holds
 
 
 # ISO 20022 sub-family codes (CAMT's BkTxCd, the open banking feed's bank_transaction_code) a parser reads as a fee
 # or as interest. One list for every format that carries them.
 ISO_FEES = ("CHRG", "COMM", "COMI", "COMT", "FEES")
 ISO_INTEREST = ("INTR",)
+ISO_CASH = ("CWDL",)  # a cash withdrawal
 
 
 def iso_category(*codes: str) -> str:
-    """What ISO 20022 transaction codes say a line is: BANK_FEE, INTEREST, or "" when they don't say."""
+    """What ISO 20022 transaction codes say a line is: BANK_FEE, INTEREST, CASH, or "" when they don't say."""
     up = {c.strip().upper() for c in codes if c}
-    return BANK_FEE if up & set(ISO_FEES) else INTEREST if up & set(ISO_INTEREST) else ""
+    if up & set(ISO_FEES):
+        return BANK_FEE
+    return INTEREST if up & set(ISO_INTEREST) else CASH if up & set(ISO_CASH) else ""
 
 
 def apply_wording(tx: Tx, bank) -> None:
@@ -732,10 +722,18 @@ def pays_nothing(tx: Tx) -> bool:
     return classify_tx(tx) in (BANK_FEE, INTEREST)
 
 
+_CASH = re.compile(r"\bATM\b|RETRAGERE\s+(?:DE\s+)?NUMERAR|CASH\s+WITHDRAWAL")
+
+
+def cash_withdrawal(tx: Tx) -> bool:
+    """Cash taken out of the account (an ATM): money the firm still holds, never an invoice's payment."""
+    return tx.category == CASH or bool(_CASH.search(f"{tx.title} {tx.description}".upper()))
+
+
 def classify_tx(tx: Tx) -> str:
     """The line's category for the rules. Fees and interest come from its format (each parser sets them from its
     codes or its bank's wording); the rest is bank-neutral."""
-    if tx.category in (BANK_FEE, INTEREST):
+    if tx.category in (BANK_FEE, INTEREST, CASH):
         return tx.category
     d = tx.description.upper()
     if tx.direction == "credit":

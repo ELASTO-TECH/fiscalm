@@ -37,14 +37,12 @@ TOOLS = {
 }
 
 
-# Body fields mirror docs/openapi.json's action table.
+# Body fields mirror the public actions in api.actions.ACTIONS (docs/openapi.json x-action-fields). Not offered:
+# integration-* (bearer requests always get 403 app_required) and upload-link-* (their own typed routes).
 ACTION_FIELDS = {
-    "approve": (("id",), ()),
     "mark-paid": (("id", "method"), ("detail",)),
     "reopen": (("id",), ()),
     "withdraw": (("id", "method"), ("detail",)),
-    "imported": ((), ("v", "missing")),
-    "restore": (("missing",), ()),
     "pack-prepare": (("month",), ()),
     "pack-sent": (("month", "version"), ("mark",)),
     "check": ((), ()),
@@ -52,6 +50,12 @@ ACTION_FIELDS = {
     "issued-mark": (("id", "method"), ("detail",)),
     "issued-unmark": (("id",), ()),
     "resolve-debit": (("tx", "target"), ()),
+    "credit-pick": (("id", "target"), ()),
+    "mail-proof": (("id", "target"), ()),
+    "settlement-withdraw": (("id",), ()),
+    "settlement-confirm": (("id", "tx", "confirmed"), ()),
+    "emag-refund": (("id",), ()),
+    "emag-resolve": (("id",), ()),
 }
 
 
@@ -78,7 +82,7 @@ def definitions(scope: str) -> list[dict]:
         specs["get_invoicing_" + kind] = ("invoicing_" + kind, fields, tuple(fields))
     if scope == "write":
         for op, spec in invoicing_api.ACTIONS.items():
-            if not spec.public:
+            if not spec.public or spec.role != "member":  # a bearer holds no other role: always 403, not a tool
                 continue
             body = spec.public_schema
             fields = {"co": CO, "body": body}
@@ -88,12 +92,7 @@ def definitions(scope: str) -> list[dict]:
     return [
         {
             "name": name,
-            "description": (
-                ("App-admin configuration only; always refused with 403 admin_required for bearer tokens.")
-                if name == "invoicing_auto_upload"
-                else name.replace("_", " ") + "."
-            )
-            + UNTRUSTED,
+            "description": name.replace("_", " ") + "." + UNTRUSTED,
             "inputSchema": {
                 "type": "object",
                 "properties": fields,
@@ -103,7 +102,7 @@ def definitions(scope: str) -> list[dict]:
             "annotations": {
                 "readOnlyHint": not (resource == "action" or name.startswith("invoicing_")),
                 "openWorldHint": resource == "action" or name.startswith("invoicing_"),
-                "destructiveHint": (resource == "action" and name not in ("action_check", "action_compose"))
+                "destructiveHint": (resource == "action" and name != "action_check")
                 or resource
                 in (
                     "invoicing_issue",

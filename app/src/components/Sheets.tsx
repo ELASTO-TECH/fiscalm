@@ -13,7 +13,6 @@ import { expenseSource, maskedIban, bonOf, supplierInactive, findIssued, invoice
 import { InvoiceLines } from "./InvoiceLines";
 import { cardName, COLLECTED_METHODS, collectedOf, MarkPaid, MethodList, methodOf } from "./MarkPaid";
 import { DocumentFields } from "./DocumentFields";
-import { ReceiptItems } from "./ReceiptItems";
 import { RefusedAccount } from "./SupplierAccount";
 import { MailAnswer, questionLine } from "./Tabs";
 import { IssuedDownloads, IssuedFiles, IssuedSpv } from "./Issued";
@@ -365,7 +364,7 @@ function ReceivedSheet({ id, onClose }: { id: string; onClose: () => void }) {
         <dl className={`${detailListStyle} py-2`}><dt>Sursă</dt><dd>{expenseSource(s, "invoice", r.id)}</dd></dl>
       </Panel>
       <InvoiceLines />
-      {r.credits?.length && r.status === "linked" ? <p className={noteLeftStyle}>Factura are o factură de stornare. Verifică în bancă plata din fișier înainte să plătești din nou.</p> : null}
+      {r.amount_changed ? <p className={noteLeftStyle}>Factura are o factură de stornare. Verifică în bancă plata din fișier înainte să plătești din nou.</p> : null}
       {r.credits?.length ? <Panel className="my-4">
         {r.credits.map((credit) => <dl className={`${detailListStyle} py-2`} key={credit.id}><dt>Storno {credit.number}</dt><dd>{lei(credit.amount)} {cur}</dd></dl>)}
         {(!r.covered || r.covered === "0.00") ? <dl className={`${detailListStyle} py-2`}><dt>Rest de plată</dt><dd>{lei(r.left)} {cur}</dd></dl> : null}
@@ -468,10 +467,9 @@ function DocBody({ id, onClose }: { id: string; onClose: () => void }) {
         {invoice || d.document_type === "receipt" ? <dl className={`${detailListStyle} py-2`}><dt>Factură</dt><dd>{receiptState(invoice)}</dd></dl> : null}
         <dl className={`${detailListStyle} py-2`}><dt>Sursă</dt><dd>{expenseSource(s, "document", d.id)}</dd></dl>
         {d.number || d.mail?.number ? <dl className={`${detailListStyle} py-2`}><dt>Număr</dt><dd>{d.number || d.mail?.number}</dd></dl> : null}
-        {d.card || d.items?.payment ? <dl className={`${detailListStyle} py-2`}><dt>Plată</dt><dd>{d.items?.payment === "cash" ? "Numerar" : d.card ? `Card terminat în ${d.card}` : "Card"}</dd></dl> : null}
+        {d.card ? <dl className={`${detailListStyle} py-2`}><dt>Plată</dt><dd>Card terminat în {d.card}</dd></dl> : null}
         <dl className={`${detailListStyle} py-2`}><dt>Firma</dt><dd>{coName(s)}</dd></dl>
       </Panel>
-      {d.document_type === "receipt" ? <ReceiptItems key={`${d.id}:${d.items?.revision ?? 0}`} d={d} /> : null}
       {d.mail ? (
         <Panel className="my-4">
           <dl className={`${detailListStyle} py-2`}><dt>Din e-mail de la</dt><dd>{d.mail.sender}</dd></dl>

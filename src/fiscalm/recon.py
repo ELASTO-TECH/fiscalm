@@ -1,33 +1,37 @@
-"""Ingest documents into the ledger, reconcile statements vs receipts/payments, write reports."""
+"""Ingest documents into the ledger and reconcile statements against receipts and payments."""
 
 from __future__ import annotations
 
-import json
+import hashlib
+import os
 import re
 import secrets
 import shutil
+import stat
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 from functools import cache
 from pathlib import Path
 
 from fiscalm import companies
-from fiscalm.bank import statements
+from fiscalm.bank import coverage, statements
 from fiscalm.bank.intake import (
     StoredStatementUnavailable,
     combine,
     hold_csv_days,
     import_lock,
-    refuse_incomplete,
+    month_missing,
     refuse_overlap,
     refuse_unchained,
+    refuse_unsound_accounts,
     statement_ibans,
 )
 from fiscalm.efactura import inbox as efactura
 from fiscalm.ledger import Ledger, finance_home
 from fiscalm.payments.orders import parse_payment_pdf
 from fiscalm.pdftext import pdf_text, sha256
+from fiscalm.storage import read_file
 
 MATCH_DAYS = 12
 
@@ -216,6 +220,13 @@ def ingest_statements(
                     failed.append(o)
                 else:
                     opened.extend(o)
+            for o in list(opened):  # a stored copy read again is the document it was stored for: a duplicate
+                copy = _stored_copy(ledger, o, home)
+                if isinstance(copy, dict):
+                    opened.remove(o)
+                    failed.append(copy)
+                elif copy:
+                    o.digest = copy
             groups: dict[tuple[str, str], list[_Opened]] = {}
             for o in opened:
                 groups.setdefault((o.company, o.month), []).append(o)
@@ -234,9 +245,19 @@ def ingest_statements(
 
 def _open_statement(path: Path, out_dir: Path, kw: dict) -> list[_Opened] | dict:
     """The file's statement, or one per month for a statement of several months (split by month, each part its own
-    document); a dict says why the file is not read."""
+    document); a dict says why the file is not read. The file is read once, into a private snapshot: what is parsed is
+    what is identified."""
+    snapshot = out_dir / "source" / path.name
     try:
-        company, month, out = statements.decrypt_to(path, out_dir, **kw)
+        _snapshot(path, snapshot)
+    except OSError:
+        return {
+            "file": str(path),
+            "status": "error",
+            "errors": ["Cannot read source file; check the path and permissions"],
+        }
+    try:
+        company, month, out = statements.decrypt_to(snapshot, out_dir, **kw)
     except statements.SecretsUnavailable as e:
         return {"file": str(path), "status": "error", "errors": [str(e)]}
     except statements.StatementError as e:
@@ -258,7 +279,18 @@ def _open_statement(path: Path, out_dir: Path, kw: dict) -> list[_Opened] | dict
         return {"file": str(path), "status": "refused", "errors": ["Cannot read the statement"]}
     except statements.StatementError as e:
         return {"file": str(path), "status": "refused", "errors": [str(e)]}
-    return [_Opened(path, company, month, out, st, sha256(path))]
+    return [_Opened(path, company, month, out, st, sha256(snapshot))]
+
+
+def _snapshot(path: Path, dest: Path) -> None:
+    """Copy the regular file at `path` (never a symlink) into `dest`, from one opened descriptor."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise OSError("not a regular file")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("xb") as out:
+            shutil.copyfileobj(source, out)
 
 
 def _checked(groups: dict[tuple[str, str], list[_Opened]], check) -> list[statements.Statement]:
@@ -273,6 +305,19 @@ def _checked(groups: dict[tuple[str, str], list[_Opened]], check) -> list[statem
             continue
         out.append(st)
     return out
+
+
+def _stored_copy(ledger: Ledger, o: _Opened, home: Path) -> str | dict | None:
+    """The statement document `o`'s bytes are the stored copy of, when they name no document of their own and that
+    document's stored file, read inside its firm's storage, still has exactly these bytes; a dict when it doesn't."""
+    sha = None if ledger.document(o.digest) else ledger.statement_of_copy(o.digest)
+    if sha is None:
+        return None
+    doc = ledger.document(sha)
+    data = read_file(doc["path"], [home.resolve() / doc["company"]], 32 * 1024 * 1024)
+    if not data or hashlib.sha256(data[1]).hexdigest() != o.digest:
+        return _refused([o], "Cannot read a stored statement; restore the stored document and retry", "error")
+    return sha
 
 
 def _refused(parts: list[_Opened], error: str, status: str = "refused", **extra) -> dict:
@@ -299,6 +344,9 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
         return stored
     paid = auto_mark_paid(ledger, st)
     ef_paid = efactura.match_statement(ledger, st)
+    days = coverage.recorded(st)  # the set's: the month it proves, each file for its own accounts; last, once matched
+    for o in parts:
+        coverage.record(ledger, o.digest, {i: days[i] for i in statement_ibans(o.st) if i in days})
     return {
         "file": ", ".join(str(o.path) for o in parts),
         "status": "added" if any(new for _, new in stored) else "duplicate",
@@ -307,6 +355,7 @@ def _store_set(ledger: Ledger, parts: list[_Opened], home: Path, check, source: 
         "unprotected": ", ".join(str(dest) for dest, _ in stored),
         "transactions": len(st.txs),
         "balanced": all(a.balanced for a in st.accounts),
+        "missing": month_missing(ledger, parts[0].company, parts[0].month) or [],
         "payments_marked_paid": paid,
         "efactura_marked_paid": ef_paid,
     }
@@ -319,13 +368,11 @@ def _set_checks(st: statements.Statement, parts: list[_Opened], check) -> None:
         raise statements.StatementError("PDF account does not belong to the selected company")
     if check:
         check(st)
-    refuse_incomplete(st)  # every caller: a statement, in one file or several, holds every account at its bank
+    refuse_unsound_accounts(st)  # also before a month stands as its neighbour's evidence (_checked)
 
 
 def _refusal(parts: list[_Opened], exc: statements.StatementError) -> dict:
-    """A refused set, with the engine's own facts for the person: the missing accounts, or the month left partial."""
-    if isinstance(exc, statements.MissingAccounts):
-        return _refused(parts, str(exc), missing=exc.accounts)
+    """A refused set, with the engine's own facts for the person: the month left partial."""
     if isinstance(exc, statements.PartialMonth):
         return _refused(parts, str(exc), partial=exc.month.isoformat())
     return _refused(parts, str(exc))
@@ -453,7 +500,9 @@ def auto_mark_paid(ledger: Ledger, st: statements.Statement) -> list[str]:
             continue
         left = rivals(t) - {("payment", i) for i in done}
         if len(left) == 1 and (key := left.pop())[0] == "payment":
-            settle(next(p for p in open_items if p["item_id"] == key[1]), t)
+            p = next(p for p in open_items if p["item_id"] == key[1])
+            if efactura.payment_fits(p, t):  # its account and amount, not the amount alone (efactura._payment_rival)
+                settle(p, t)
     return done
 
 
@@ -522,124 +571,6 @@ def match_receipts(txs: list[statements.Tx], receipts) -> dict[int, tuple[str, d
                 used.add(r["sha"])
                 break
     return matches
-
-
-def _name(t: statements.Tx) -> str:
-    """A line's name for a person: its counterparty, else the bank's own words, with every IBAN and card number reduced
-    to its last four (as Tranzacții shows them): the free text can hold a full account number."""
-    return statements.masked(" ".join((t.counterparty or t.title or t.description).split()))
-
-
-def _fmt(amount, cur="RON") -> str:
-    return f"{Decimal(amount):,.2f} {cur}"
-
-
-def build_report(ledger: Ledger, company: str, month: str, home: Path | None = None) -> tuple[str, dict]:
-    home = home or finance_home()
-    co = companies.get(company)
-    lines = [f"# {co.legal_name} - {month}", "", f"_Generated {datetime.now():%Y-%m-%d %H:%M} by fiscalm_", ""]
-    summary: dict = {"company": company, "month": month}
-
-    # Payments
-    pays = [p for p in ledger.payments(company=company) if p["month"] == month]
-    lines.append("## Payments (OPs and the accountant's invoices)")
-    if not pays:
-        lines.append("- none recorded for this month")
-    for p in pays:
-        where = f" -> `{p['csv_path']}`" if p["csv_path"] else ""
-        lines.append(
-            f"- **{p['status'].upper()}** {p['kind']} {p['doc_ref']}: {_fmt(p['amount'])} to "
-            f"{p['payee_name']} ({p['payee_iban']}){where}"
-            + (f" - {p['paid_note']}" if p["status"] in ("paid", "skipped") and p["paid_note"] else "")
-        )
-    summary["payments_open"] = sum(1 for p in pays if p["status"] not in ("paid", "skipped"))
-    lines.append("")
-
-    # Statement
-    st_docs = ledger.documents(company=company, month=month, kind="statement")
-    lines.append("## Bank statement")
-    if not st_docs:
-        lines.append("- No statement for this month yet")
-        summary["statement"] = False
-        text = "\n".join(lines) + "\n"
-        return text, summary
-    summary["statement"] = True
-    st = month_statement(st_docs, company)
-    for a in st.accounts:
-        ok = "totals match bank" if a.balanced else "**TOTALS DO NOT MATCH BANK - check manually**"
-        lines.append(f"- {a.currency} {a.iban}: {len(a.txs)} transactions, {ok}")
-    classify(ledger, company, st.txs)
-    lines.append("")
-
-    need = [t for t in st.txs if t.category == statements.NEEDS_INVOICE]
-    matches = match_receipts(need, _receipts(ledger, company))
-    missing = [t for i, t in enumerate(need) if i not in matches]
-    summary.update(needs_invoice=len(need), matched=len(matches), missing=len(missing), transactions=len(st.txs))
-
-    lines.append(
-        f"## Foreign card/transfer outflows: {len(need)} need an invoice, {len(matches)} matched, "
-        f"{len(missing)} WITHOUT invoice"
-    )
-    if matches:
-        lines.append("")
-        lines.append("### Matched")
-        for i, t in enumerate(need):
-            if i in matches:
-                conf, r = matches[i]
-                tag = "" if conf == "exact" else " (matched by vendor/date; amounts differ by FX)"
-                lines.append(f"- {t.date} {_name(t)}: {_fmt(t.amount)} -> {Path(r['path']).name}{tag}")
-    if missing:
-        lines.append("")
-        lines.append("### WITHOUT invoice (flagged; do not guess, find the receipt or ask the user)")
-        for t in missing:
-            orig = f" ({t.orig_amount} {t.orig_currency})" if t.orig_currency and t.orig_currency != "RON" else ""
-            lines.append(f"- {t.date} {_name(t)}: {_fmt(t.amount)}{orig}, card ...{t.card_last4}")
-    lines.append("")
-
-    dom = [t for t in st.txs if t.category == statements.DOMESTIC]
-    lines.append(f"## Romanian suppliers ({len(dom)}): invoices arrive via e-Factura/SPV, not checked here")
-    for t in dom:
-        lines.append(f"- {t.date} {_name(t)}: {_fmt(t.amount)}")
-    lines.append("")
-    adv = [t for t in st.txs if t.category == statements.OWNER_ADVANCE]
-    if adv:
-        lines.append("## Transfers to the user (avans trezorerie): need a settlement (decont), not an invoice")
-        for t in adv:
-            lines.append(f"- {t.date} {_fmt(t.amount)}")
-        lines.append("")
-
-    # Issues
-    issues = []
-    for d in ledger.documents(company=company, month=month):
-        for iss in json.loads(d["issues"] or "[]"):
-            issues.append(f"- {Path(d['path']).name}: {iss}")
-    lines.append("## Invoices with issues")
-    lines.extend(issues or ["- none"])
-    summary["issues"] = len(issues)
-    lines.append("")
-
-    # Pack
-    pk = ledger.pack(company, month)
-    from fiscalm.pack import pending_docs
-
-    unsent = pending_docs(ledger, company, month)
-    lines.append("## Accountant pack")
-    if pk and pk["status"] == "sent":
-        lines.append(f"- sent ({pk['note'] or pk['updated_at']})")
-    else:
-        lines.append(
-            f"- {len(unsent)} document(s) not yet sent to the accountant: `fiscalm pack build --company {company} --month {month}`"
-        )
-    summary["unsent_docs"] = len(unsent)
-    return "\n".join(lines) + "\n", summary
-
-
-def write_report(ledger: Ledger, company: str, month: str, home: Path | None = None) -> tuple[Path, dict]:
-    text, summary = build_report(ledger, company, month, home)
-    out = month_dir(company, month, home) / "report.md"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text)
-    return out, summary
 
 
 def month_statement(docs, company: str, parse=None) -> statements.Statement:

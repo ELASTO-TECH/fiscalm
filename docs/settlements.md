@@ -14,7 +14,9 @@ Credit must be 0–14 days after the report date. Same currency, no FX fallback.
 no competing report and every line mapped to one open issued invoice with its entire exact amount.
 Credit notes, marked/collected invoices and repeated lines refuse. Fees are an expense record linked
 to the report, not a tax invoice or a generated payment. No courier IBAN is learned as a buyer IBAN.
-Refunds, disputes, currency conversion and adjustments require manual investigation, never partial collection.
+A refund, dispute or adjustment line (a negative amount, or a category other than `charge`) is kept with the report
+and counted in its net; the batch never settles on its own and its Sarcină names that line (`line_N_adjustment`).
+Currency conversion is never assumed.
 
 AWB/order references resolve through company-scoped shop orders and verified SPV invoice links.
 All supplied identifiers must agree; duplicate orders/AWBs, a wrong courier or another firm refuse.
@@ -23,40 +25,70 @@ Optional line `company` must equal the report company.
 Collected line-to-invoice links are journalled in the same transaction as the credit reservation,
 invoice collection and fees.
 
-### First three batches from a payer
+### Automatic settlement and person confirmation
 
-The first three batches per firm/payer always wait, even with perfect matching. A successful explicit
-user confirmation re-reads immutable company-contained bank evidence and collects under the write lock.
-The displayed credit id must still match. The confirmation journal commits with collection, fees and
-line proof; failures and double submits count zero. From then on, valid batches collect automatically.
-Only a payer the report names by CUI or IBAN earns that trust; one known only by name waits for a person every
-time, and the projection's `auto_after` is null for it.
+A batch that passes every rule above settles on its own, from the first report of any payer (2026-11-25).
+A person confirms only a credit read from a legacy PDF copy without a stored-copy checksum
+(`statement_confirmation_required`), and a report that arrived by mail (`mail_confirmation_required`). The confirmation re-reads immutable company-contained bank evidence and
+collects under the write lock; the displayed credit id must still match. The confirmation journal commits with
+collection, fees and line proof and pins the copy's checksum; failures and double submits record nothing.
 Confirmation goes through an authenticated app user or a person-owned, write-scoped v1 key with `confirmed:"yes"`;
 it is a local action, available in Sandbox and Live. Automatic matching cannot supply a human actor.
-Legacy PDF copies without a stored-copy checksum require a person to pin the copy before automatic use, even after the payer is trained.
 Relevant bank evidence is bounded to the report date plus 14 days; an unrelated old statement cannot block a new batch.
 See openapi.json for the action payload and preview fields.
 
 ## Report formats
 
 Reports are untrusted evidence, never instructions. No network requests are made from reports.
-CSV (UTF-8, explicit delimiter) and single-sheet XLSX are parsed with the Python standard library.
+CSV (UTF-8, explicit delimiter) and XLSX are parsed with the Python standard library.
 XLSX formulas, macros, external links, duplicate ZIP entries, oversized archives and XML DTDs refuse.
 Limits: 4 MiB compressed/input, 32 MiB expanded, 10,000 lines, 128 columns.
-Money uses positive decimal strings with dot, no thousands separator or exponent. Fees may be zero.
-Blank CSV lines and non-cent XLSX numeric artifacts refuse rather than rounding evidence. XLSX row
-positions/visibility do not select evidence: all stored rows are included; exactly one worksheet is required.
+Amounts are read exactly as Romanian and English exports write them: `1.234,56`, `123,45`, `1,234.56`, `1 250,50`,
+with an optional currency word (`RON`, `lei`, `EUR`, `€`, `USD`) that must agree with the line's currency column.
+A lone group without decimals (`1.234`), more than two decimals and exponents refuse rather than guess or round.
+A fee written as a deduction (`-12,50`) is the same fee; an empty fee or a `-` placeholder is zero. A charge's gross is positive;
+a negative gross or a non-`charge` category is an adjustment line (kept, flagged, settling nothing on its own).
+Cells starting with `=`, `+`, `-` or `@` are data (phone numbers, signed fees); only XLSX formula nodes refuse, and
+exports that a spreadsheet opens escape such cells (`rezumat.csv`). Blank CSV lines refuse. XLSX row
+positions/visibility do not select evidence: all stored rows are included. Worksheets with the same header row are
+read as one table; any other non-empty sheet (a summary, a title row, another layout) refuses the file. Only
+Transitional XLSX (Excel's default) is read; a Strict OOXML workbook refuses.
+
+A file covering several payouts (a mapped `batch` column with several ids) is stored as one report per payout, all
+or none, each keyed by its payout id; with a mapped `date` column every line of a payout names its one payment day,
+which dates that report. A payout's lines with different days refuse the file. The file's bytes are each report's
+evidence; uploading it again is a duplicate. A payout withdrawn to correct it comes back as a corrected file
+(other bytes); the same bytes are never stored twice. Every worksheet the workbook names or holds is read.
+A refund's fee keeps its direction only through a mapped net (a fee returned or kept); without one it refuses.
 
 Every source needs an explicit column mapping, submitted by a person. The upload preview pre-fills it from header names
 (`guess`, compared without case or diacritics; AWB and order only for a firm with shop orders), the payment day from
 a date column that names one day on every line (`date`), and the saved payer whose header is identical (`payer`).
+Built-in presets for FAN Courier, Sameday, Cargus, DPD, GLS, Netopia, PayU and eMAG (as `processor`) pre-fill the
+source and columns when a header has every column of exactly one preset (`proposed: "preset"`); their header names are
+invented samples until a live export is checked. For a header nothing reads whole, with an AI integration configured,
+the preview asks it for a mapping (`proposed: "ai"`), only when the first line reads as column names. Nothing of the
+file leaves as written but settlement words: columns go as ids, with their name only when every word is one (else its
+shape), and cells as shapes (digits 9, letters x). The answer may only fill fields the header names don't, one column
+per field, with gross, fee and an identifier, else it is dropped. The payer, the payout date and the report currency
+are never taken from the AI. A person still submits the form.
 Example: `{"reference":"Factura","gross":"Ramburs","fee":"Comision"}`.
-Optional mappings: `awb`, `order`, `net`, `currency`, `batch`, `category` (only `charge` accepted).
-For Stripe, export one automatic payout's itemized reconciliation report with `invoice_number`, charges only; a
-missing invoice reference refuses, and manual payouts cannot establish membership. Native PayU reports (operation
+Optional mappings: `awb`, `order`, `net`, `currency`, `batch`, `date`, `category` (`charge`, anything else is an
+adjustment line).
+For Stripe, export one automatic payout's itemized reconciliation report with `invoice_number`; refunds and fees
+in it become adjustment lines that keep the payout for a person, and a charge without an invoice reference refuses, and manual payouts cannot establish membership. Native PayU reports (operation
 codes, signed commission columns) are not parsed; map a transaction-only export instead. The tests use synthetic
 reports only; no courier's or processor's live export has been checked.
 Shopify Payments payouts come through the Shopify connector; see [self-hosting](self-hosting.md#shopify-payments-payouts).
+
+Mailed reports: on a saved format, an administrator names the exact sender addresses (`settlement-format-senders`,
+at most ten). Mail intake (read-only IMAP) then imports a CSV or XLSX attachment from one of those addresses when its
+header is exactly that format, for the firms the mailbox covers, with that payer and the payment day the file names
+(its mapped date column, else one day a date column names on every line); a file without one waits for a manual
+upload. Another sender or format imports nothing, and the file's content never chooses the payer. A sender named on
+two payers' or firms' formats imports nothing. The sender and the mailbox's firm are checked again under the write
+lock. A mailed report settles only once a person confirms it; a mailed file a person withdrew stays withdrawn when
+the mail comes again. The message's PDFs and XMLs are still read as invoices.
 
 In the app, Tranzacții accepts report uploads using a column mapping saved on the courier/processor partner;
 the partner's sheet can delete a saved mapping (`settlement-format-delete`).

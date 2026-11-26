@@ -261,7 +261,7 @@ def test_competing_reports_and_reused_credit(ledger):
     "identity,right",
     [
         ({"payer_iban": "synthetic-payer-account"}, {"counterparty_iban": "synthetic-payer-account"}),
-        ({"payer_cui": "12345678"}, {"counterparty": "Renamed Payout SRL", "description": "Payout CUI 12345678"}),
+        ({"payer_cui": "12345678"}, {"counterparty": "Renamed Payout SRL CUI 12345678"}),
     ],
     ids=["iban", "cui"],
 )
@@ -272,6 +272,134 @@ def test_payer_iban_never_falls_back_to_name(ledger, identity, right):
     with pytest.raises(settlements.SettlementError, match="^credit_missing_or_ambiguous$"):
         collect(ledger, rid, statement())
     assert collect(ledger, rid, statement(**right))
+
+
+@pytest.mark.parametrize(
+    "identity,wrong,right",
+    [  # same words, another legal form or another alphabet's letters: another firm
+        ({}, {"counterparty": "Synthetic Courier SA"}, "Synthetic Courier S.R.L."),
+        ({"payer_name": "Synthetic 北京 SRL"}, {"counterparty": "Synthetic 上海 SRL"}, "SYNTHETIC 北京"),
+        ({"payer_name": "Atelier Sa Maison SRL"}, {"counterparty": "Atelier Maison"}, "Atelier Sa Maison"),
+        ({"payer_name": "Atelier Sa SRL"}, {"counterparty": "Atelier"}, "Atelier Sa"),
+        ({"payer_cui": "12345678"}, {"counterparty": "Other SRL", "description": "CUI 12345678"}, "Other 12345678"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE123456789"}, "Other RO123456789"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH VAT DE\xa0123456789"}, "Other SA 123456789"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE-123456789"}, "Other, RO 123456789"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH VAT DE: 123456789"}, "Other CUI: 123456789"),
+        ({"payer_cui": "123456789"}, {"counterparty": "Other GmbH DE - 123456789"}, "Other - 123456789"),
+        ({"payer_cui": "12345678"}, {"counterparty": "Other Kft 12345678-2-41"}, "Other (12345678)"),
+        ({"payer_cui": "123456"}, {"counterparty": "Other SRL J40/123456/2026"}, "Other SRL 123456"),
+        ({"payer_cui": "12345678"}, {"counterparty": "Other Firm 12345678ă"}, "Other Firm 12345678"),
+        ({"payer_cui": "12345678"}, {"counterparty": "Other Firm ID 12345678X"}, "Other Firm CUI:12345678"),
+    ],
+    ids=[
+        "legal_form",
+        "alphabet",
+        "inner_word",
+        "form_word",
+        "memo",
+        "foreign_vat",
+        "spaced_vat",
+        "dashed_vat",
+        "colon_vat",
+        "spaced_dash_vat",
+        "compound_id",
+        "register_no",
+        "letter_after",
+        "longer_id",
+    ],
+)
+def test_first_report_needs_its_own_payer(ledger, identity, wrong, right):
+    """With no confirmation gate, only the payer itself can bring a batch's credit."""
+    rid = setup(ledger)
+    edit_report(ledger, **identity)
+    with pytest.raises(settlements.SettlementError, match="^credit_missing_or_ambiguous$"):
+        collect(ledger, rid, statement(**wrong))
+    assert collect(ledger, rid, statement(counterparty=right))
+
+
+def test_report_that_may_be_the_payers_competes(ledger):
+    """A CUI report the credit names only in its memo still competes with a name report for that credit."""
+    rid = setup(ledger)
+    spec = SPEC | {"report_key": "by-cui", "payer_cui": "12345678"}
+    other = settlements.import_report(ledger, "NORD", b"\xef\xbb\xbf" + REPORT, spec)
+    st = statement(description="CUI 12345678")
+    for report in (rid, other):
+        with pytest.raises(settlements.SettlementError):
+            collect(ledger, report, st)
+    assert not ledger.used_txs() and {r["status"] for r in ledger.issued_rows()} == {"open"}
+
+
+def test_a_second_plausible_credit_makes_the_batch_wait(ledger):
+    """Two equal credits that may both be the payout: the one naming the CUI on the party doesn't win."""
+    rid = setup(ledger)
+    edit_report(ledger, payer_cui="12345678")
+    named = statement(counterparty="Synthetic Courier SRL CUI 12345678")
+    named.accounts[0].txs.append(
+        statements.Tx(
+            **(
+                vars(named.txs[0])
+                | {"counterparty": "Synthetic Courier SRL", "description": "CUI 12345678", "ref": "b"}
+            )
+        )
+    )
+    with pytest.raises(settlements.SettlementError, match="^credit_missing_or_ambiguous$"):
+        collect(ledger, rid, named)
+    assert not ledger.used_txs() and {r["status"] for r in ledger.issued_rows()} == {"open"}
+
+
+@pytest.mark.parametrize("memo", ["CUI 12345678", "Payout"], ids=["cui_in_memo", "name_only"])
+def test_refused_batch_credit_stays_out_of_single_invoice_matching(ledger, memo):
+    """A credit the batch refuses (its CUI only in the memo, or the payer's name alone) is still its payer's: no
+    single invoice takes it."""
+    setup(ledger)
+    edit_report(ledger, payer_cui="12345678")
+    ledger.add_issued(
+        dict(
+            message_id="courier-bill",
+            company="NORD",
+            number="TEST-9",
+            issue_date="2026-10-01",
+            currency="RON",
+            total="196.00",
+            doc_type="invoice",
+            status="open",
+            raw_path="",
+            client_name="Synthetic Courier SRL",
+            client_cui="12345678",
+        )
+    )
+    assert issued.match_statement(ledger, statement(description=memo)) == []
+    assert {r["status"] for r in ledger.issued_rows()} == {"open"} and not ledger.used_txs()
+
+
+def test_retired_gate_reason_is_replaced(ledger):
+    """A report waiting under the retired payer gate stays confirmable until a recheck, which gives it today's reason
+    when its credit becomes ambiguous."""
+    rid = setup(ledger)
+    credit = '{"id": "aaaaaaaaaaaaaaaaaaaa", "date": "2026-10-12", "amount": "196.00", "currency": "RON"}'
+    with ledger.tx() as db:
+        db.execute("UPDATE settlement_reports SET error='confirmation_required'")
+        db.execute("INSERT INTO settlement_credits VALUES(?,?,?)", (rid, credit, 2))
+    assert settlements.state(ledger, "NORD")[0]["can_confirm"]
+    store_bank(ledger, statement())
+    store_bank(ledger, statement(ref="second"))
+    settlements.match_statement(ledger, statement())
+    assert settlements.state(ledger, "NORD")[0]["error"] == "credit_missing_or_ambiguous"
+
+
+def test_refund_line_is_kept_and_flagged_alone(ledger):
+    """A refund line no longer refuses the file: the report is stored, its net counts the refund, and the Sarcină names
+    that line; nothing settles."""
+    setup(ledger)
+    data = REPORT + b"Retur client,-4.00,0\n"
+    rid = settlements.import_report(ledger, "NORD", data, SPEC | {"report_key": "with-refund"})
+    for credit in ("192.00", "1.00"):  # the refund line is the reason, with or without the payout's credit
+        with pytest.raises(settlements.SettlementError, match="^line_3_adjustment$"):
+            collect(ledger, rid, statement(amount=Decimal(credit)))
+    row = next(r for r in settlements.state(ledger, "NORD") if r["id"] == rid)
+    assert (row["net"], row["lines"][2]["gross"]) == ("192.00", "-4.00") and not ledger.used_txs()
+    assert row["lines"][2]["invoice"] is None  # an adjustment names no invoice a partner could hold
 
 
 def test_single_writer_cannot_take_batch_credit(ledger):
@@ -373,6 +501,23 @@ def test_mail_import_and_duplicate(home, ledger):
     args = ["settlement", "import", str(mail), "--mail", "--company", "NORD", "--spec", str(cfg)]
     assert main(args) == 0
     assert settlements.state(ledger, "NORD")[0]["report_key"] == "mail1"
+    ledger.add_issued(
+        dict(
+            message_id="mail-1",
+            company="NORD",
+            number="TEST-1",
+            issue_date="2026-10-01",
+            currency="RON",
+            total="100.00",
+            doc_type="invoice",
+            status="open",
+            raw_path="",
+        )
+    )
+    credit = statement(amount=Decimal("98.00"))
+    store_bank(ledger, credit)  # verified against the credit, a mailed report still waits for a person
+    settlements.match_statement(ledger, credit)
+    assert settlements.state(ledger, "NORD")[0]["error"] == "mail_confirmation_required" and not ledger.used_txs()
     assert not (home.parent / "report.csv").exists()
     assert main(args) == 1
     assert main(["settlement", "list", "--company", "NORD"]) == 0
@@ -411,9 +556,7 @@ def test_stored_mt940_exact_credit_and_missing_next_month(ledger, amount):
         assert not ledger.used_txs()
         assert all(r["status"] == "open" for r in ledger.issued_rows())
     else:
-        settlements.match_statement(ledger, proof)
-        assert settlements.state(ledger, "NORD")[0]["error"] == "confirmation_required"
-        assert collect(ledger, rid, proof) == ["settlement-1", "settlement-2"]
+        assert settlements.match_statement(ledger, proof) == ["settlement-1", "settlement-2"]
         with pytest.raises(settlements.SettlementError, match="report_unavailable"):
             collect(ledger, rid, proof)
         assert len(ledger.used_txs()) == 1
@@ -511,32 +654,19 @@ def test_withdraw_report_action_preserves_reserved_credit(ledger, status):
 
 
 @pytest.mark.parametrize(
-    "identified,prior,problem,expected",
+    "identified,problem,expected",
     [
-        (False, 3, "", "confirmation_required"),
-        (True, 2, "", "confirmation_required"),
-        (True, 3, "", None),
-        (True, 3, "amount", "line_2_invoice_not_open_or_amount_differs"),
-        (True, 3, "missing_credit", "credit_missing_or_ambiguous"),
+        (False, "", None),  # a first report from a payer known only by name settles once every check passes
+        (True, "", None),
+        (True, "amount", "line_2_invoice_not_open_or_amount_differs"),
+        (True, "missing_credit", "credit_missing_or_ambiguous"),
     ],
 )
-def test_withdraw_rechecks_survivor(ledger, identified, prior, problem, expected):
+def test_withdraw_rechecks_survivor(ledger, identified, problem, expected):
     survivor = setup(ledger)
     payer = "Synthetic Courier SRL CUI 12345678" if identified else SPEC["payer_name"]
     if identified:
         edit_report(ledger, payer_cui="12345678")
-    data = json.loads(ledger.db.execute("SELECT data FROM settlement_reports").fetchone()[0])
-    # Synthetic prior human confirmations isolate the trust boundary from the matching checks below.
-    with ledger.tx() as db:
-        for n in range(prior):
-            history = settlements.import_report(
-                ledger, "NORD", REPORT.replace(b"TEST", f"HISTORY-{n}".encode()), SPEC | {"report_key": f"history-{n}"}
-            )
-            db.execute("UPDATE settlement_reports SET status='collected' WHERE id=?", (history,))
-            db.execute(
-                "INSERT INTO settlement_confirmations VALUES(?,?,?,?,?)",
-                (history, "NORD", data["payer_id"], "synthetic-person", "2026-10-01"),
-            )
     competitor = settlements.import_report(
         ledger,
         "NORD",
@@ -555,7 +685,7 @@ def test_withdraw_rechecks_survivor(ledger, identified, prior, problem, expected
     assert actions.act("settlement-withdraw", "NORD", {"id": competitor})["ok"]
     row = next(r for r in settlements.state(ledger, "NORD") if r["id"] == survivor)
     assert row["error"] == expected
-    assert row["can_confirm"] == (expected == "confirmation_required")
+    assert not row["can_confirm"] and confirmations(ledger) == 0
     assert row["status"] == ("collected" if expected is None else "pending")
     assert len(ledger.used_txs()) == (1 if expected is None else 0)
     assert not actions.act("settlement-withdraw", "NORD", {"id": competitor})["ok"]

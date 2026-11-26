@@ -68,7 +68,7 @@ export function ReceivedRow({ r, today, tag, byNumber, both, still, source }: {
 /** A document and its payment details. Only a receipt expecting an invoice may say "Fără factură". */
 export function CardRow({ d, today, tag, alone, source }: { d: CardInvoice; today: string; tag?: boolean; alone?: boolean; source?: string }) {
   return (
-    <Row icon="credit-card" title={docName(d, today)} sub={phrase(alone && d.document_type === "receipt" && receiptState(null), d.document_type === "receipt" && d.items?.payment === "cash" ? "Numerar pe bon" : d.document_type === "receipt" && d.items?.payment === "card" ? "Card pe bon" : d.card ? `Card terminat în ${d.card}` : "", dm(d.date, today), source)}
+    <Row icon="credit-card" title={docName(d, today)} sub={phrase(alone && d.document_type === "receipt" && receiptState(null), d.card ? `Card terminat în ${d.card}` : "", dm(d.date, today), source)}
       val={docAmount(d)} vsub={tag ? d.company : ""} to={{ doc: d.id }} />
   );
 }

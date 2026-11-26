@@ -99,6 +99,7 @@ def project(L: Ledger, co: str, issued: list[dict]) -> dict:
             id=o["sheet_id"],
             company=co,
             order_id=o["id"],
+            draft_id=None,
             sheet="ord",
             reason=o["reason"],
             label="Comandă refuzată",
@@ -106,6 +107,21 @@ def project(L: Ledger, co: str, issued: list[dict]) -> dict:
         )
         for o in orders
         if o["status"] == "refused"
+    ]
+    tasks += [
+        dict(
+            kind="order_vat_review",
+            id=o["sheet_id"],
+            company=co,
+            order_id=o["id"],
+            draft_id=o["draft_id"],
+            sheet="ord",
+            reason=o["reason"],
+            label="TVA de ales pe comandă",
+            action=None,
+        )
+        for o in orders
+        if o["status"] == "draft" and (o["reason"] or {}).get("code") == commerce.VAT_REVIEW["code"]
     ]
     origins = [dict(id="manual", company=None, label="Manual")]
     origins += [
