@@ -177,7 +177,7 @@ def _amount(s: str | None) -> Decimal | None:
 # A storno reference invoicing software writes in a note when it leaves BillingReference empty, alone in one of the
 # note's parts (SmartBill joins its notes with "#"): "Storno factura seria AB nr. 0012 din data 23/10/2026".
 STORNO_NOTE = re.compile(
-    r"storn(?:o|are|area) factur(?:a|ă|ii) (?:seria )?(?P<ref>[A-Z0-9][A-Z0-9 ./-]{0,39}?)"
+    r"storn(?:o|are|area) factur(?:a|ă|ii) (?:seria )?(?P<ref>[^#]{1,100}?)"
     r" din(?: data)? (?P<day>\d{2}([/.])\d{2}\3\d{4})[.]?",
     re.IGNORECASE,
 )
@@ -188,13 +188,13 @@ def storno_reference(notes: Iterable[str]) -> tuple[str, str]:
     only feeds the exact matching in efactura.credits.links. Several invoices named link to none; nothing named, or
     anything else in that part, stays unreferenced; a date that is no day links to none."""
     found = {}
-    for part in (p for note in notes for p in re.split(r"[#\n]", note)):
-        if (match := STORNO_NOTE.fullmatch(" ".join(part.split()))) and credit_number(match["ref"]):
+    for part in (p for note in notes for p in note.split("#")):
+        if match := STORNO_NOTE.fullmatch(" ".join(part.split())):
             try:
                 day = datetime.strptime(match["day"].replace(".", "/"), "%d/%m/%Y").date().isoformat()
             except ValueError:
                 day = "invalid"
-            found.setdefault((credit_number(match["ref"]), day), (match["ref"], day))
+            found.setdefault((credit_number(match["ref"]) or match["ref"], day), (match["ref"], day))
     if len(found) > 1:
         return "", UNCLEAR_REFERENCE
     return found.popitem()[1] if found else ("", "")

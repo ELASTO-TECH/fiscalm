@@ -2018,7 +2018,7 @@ STORNO_1 = "Storno factura seria SUP nr. 0001 din data 20/10/2026"
         (STORNO_1.replace("20/10", "21/10"), "", set(), ["3009"]),  # the right number on another day
         (STORNO_1.replace("20/10", "31/02"), "", set(), ["3009"]),  # no such day
         (STORNO_1 + "#" + STORNO_1.replace("0001 din data 20", "0003 din data 21"), "", set(), ["3009"]),  # two
-        ("Storno factura SUP-0001 din data 20/10/2026", "", {"3001"}, ["3009"]),  # the form read before #-joined notes
+        ("Storno factura SUP_0001\n din data 20/10/2026", "", {"3001"}, ["3009"]),  # the form read before #-joined
         (STORNO_1 + "#Storno factura SUP-0003 din data 21/10/2026", "", set(), ["3009"]),  # two, in two forms
         (STORNO_1 + " si 0003", "", set(), ["3008", "3009"]),  # garbled: a person decides
     ],
@@ -2041,7 +2041,8 @@ def _notes(ledger, monkeypatch, first, second):
     efactura.sync(ledger)
 
 
-def test_an_upgrade_reads_every_credit_note_again_except_one_a_person_answered(ledger, home, monkeypatch):
+@pytest.mark.parametrize("meanwhile", [False, True])
+def test_an_upgrade_reads_every_credit_note_again_except_one_a_person_answered(ledger, home, monkeypatch, meanwhile):
     two = STORNO_1 + "</cbc:Note><cbc:Note>" + STORNO_1.replace("0001 din data 20", "0003 din data 21")
     _notes(ledger, monkeypatch, "TVA LA INCASARE#" + STORNO_1, two)
     stored = {"3008": ("", ""), "3009": ("SUP 0001", "2026-10-20")}  # what the parser read before
@@ -2050,10 +2051,20 @@ def test_an_upgrade_reads_every_credit_note_again_except_one_a_person_answered(l
     ledger.db.commit()
     assert credits.pick(ledger, "NORD", "3008", credits.NO_INVOICE)  # a person said 3008 cancels none
     ledger.set_meta(efactura.CREDIT_REREAD, "1")
+    read = efactura.invoice_from_zip
+
+    def answered_meanwhile(data):  # a person answers 3009 on another connection while its archive is read
+        if meanwhile:
+            with closing(Ledger()) as other:
+                other.set_meta("credit_pick:3009", credits.NO_INVOICE)
+        return read(data)
+
+    monkeypatch.setattr(efactura, "invoice_from_zip", answered_meanwhile)
     efactura.fill_credit_references(ledger)
     refs = {r["message_id"]: (r["billing_ref"], r["billing_date"]) for r in ledger.efactura_rows(status="credit")}
-    assert refs == {"3008": ("", ""), "3009": ("", credits.UNCLEAR_REFERENCE)}
-    assert efactura.credited(ledger, "NORD") == {} and ledger.get_meta(efactura.CREDIT_REREAD) is None
+    two_named = ("SUP 0001", "2026-10-20") if meanwhile else ("", credits.UNCLEAR_REFERENCE)  # first note only, before
+    assert refs == {"3008": ("", ""), "3009": two_named}  # an answered note is never read again
+    assert ledger.get_meta(efactura.CREDIT_REREAD) is None
 
 
 def test_a_picked_invoice_taken_since_leaves_the_note_unapplied(ledger, home, monkeypatch):
