@@ -18,6 +18,7 @@ at the till never reaches a payment file.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -30,19 +31,30 @@ WINDOW = 7  # days an invoice may follow its till receipt
 RECENT = 90  # days back a receipt still looks for its invoice
 
 
-def _fits(found: dict, supplier: str, invoice) -> bool:
+def _fits(found: dict, supplier: str, invoice, *, rival: bool = False) -> bool:
+    """The invoice is this receipt's purchase: its verified supplier, the exact total and currency, in the window.
+    As a `rival` it only may be: a row kept with its tax id's digits alone, or nothing left to pay (an invoice whose
+    payable the payment at the till brought to zero)."""
     try:
         day, issued = date.fromisoformat(found["doc_date"]), date.fromisoformat(invoice["issue_date"] or "")
-        same_total = Decimal(invoice["total"] or "") == Decimal(found["amount"])
+        payable, paid = Decimal(invoice["total"] or ""), Decimal(found["amount"])
     except (ValueError, InvalidOperation):
         return False
-    return (
-        same_total
-        and invoice["currency"] == found["currency"]
-        and day <= issued <= day + timedelta(days=WINDOW)
-        and bool(supplier)
-        and supplier == tax_token(invoice["supplier_tax_id"] or invoice["supplier_cui"])
-    )
+    if not (supplier and day <= issued <= day + timedelta(days=WINDOW)):
+        return False
+    same_currency = invoice["currency"] == found["currency"]
+    if not rival:
+        return bool(invoice["supplier_tax_id"]) and _supplier(invoice) == supplier and same_currency and payable == paid
+    digits = re.sub(r"\D", "", supplier)
+    maybe = _supplier(invoice) == supplier or not invoice["supplier_tax_id"] and _supplier(invoice) == digits
+    return maybe and (payable == 0 or same_currency and payable == paid)
+
+
+def _supplier(invoice) -> str:
+    """The invoice's supplier as identity.tax_token reads it; a row kept before its full tax id has its digits only."""
+    if invoice["supplier_tax_id"]:
+        return tax_token(invoice["supplier_tax_id"])
+    return re.sub(r"\D", "", invoice["supplier_cui"] or "")
 
 
 def _open(invoice) -> bool:
@@ -100,15 +112,19 @@ def pairs(L: Ledger, company: str, today: date) -> list[tuple[str, str, bool]]:
         if h["doc_type"] == "invoice"
     ]
     readings = _readings(L, company)
-    fits = {row["sha"]: [i for i in invoices if _fits(found, supplier, i)] for row, found, supplier, _ in readings}
+    fits = {
+        row["sha"]: [i for i in invoices if _fits(found, supplier, i, rival=True)]
+        for row, found, supplier, _ in readings
+    }
     claims = Counter(i["message_id"] for found in fits.values() for i in found)
     since = (today - timedelta(days=RECENT)).isoformat()
     out = []
-    for row, found, _, pays in readings:
+    for row, found, supplier, pays in readings:
         mine = fits[row["sha"]]
         filled = all(row[k] == v for k, v in found.items() if k != "vendor")  # still the reading's own data
         free = row["efactura_id"] is None and not row["named"] and found["doc_date"] >= since
-        if len(mine) == 1 and claims[mine[0]["message_id"]] == 1 and _open(mine[0]) and filled and free:
+        sure = len(mine) == 1 and _fits(found, supplier, mine[0])
+        if sure and claims[mine[0]["message_id"]] == 1 and _open(mine[0]) and filled and free:
             out.append((row["sha"], mine[0]["message_id"], pays))
     return out
 

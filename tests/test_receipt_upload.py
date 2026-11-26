@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import io
 import json
+import re
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -1369,10 +1370,14 @@ def read_receipt(ledger, monkeypatch, data=JPEG, day="2026-10-07", **fields):
     return sha
 
 
-def shop_invoice(ledger, mid="701", co="NORD", issue="2026-10-08", total="86.40", cui="RO7001", **kw):
+def shop_invoice(ledger, mid="701", co="NORD", issue="2026-10-08", total="86.40", cui="RO7001", legacy=False, **kw):
+    """An invoice stored as sync stores it: the tax id's digits and the full id; `legacy`: the digits only."""
     issues = kw.pop("issues", "[]")
     _ef(ledger, mid, co, "Benzinaria Exemplu SRL", cui, f"BE {mid}", date.fromisoformat(issue), None, total, **kw)
-    ledger.db.execute("UPDATE efactura SET issues=? WHERE message_id=?", (issues, mid))
+    ledger.db.execute(
+        "UPDATE efactura SET issues=?, supplier_cui=?, supplier_tax_id=? WHERE message_id=?",
+        (issues, re.sub(r"\D", "", cui), None if legacy else cui, mid),
+    )
     ledger.db.commit()
 
 
@@ -1412,6 +1417,9 @@ def test_a_read_receipt_finds_the_one_invoice_of_its_purchase(ledger, monkeypatc
         [{"issues": '["buyer CUI 99 is not NORD"]'}],  # an invoice with recorded issues
         [{}, {"mid": "702"}],  # two invoices fit: neither is chosen
         [{"status": "paid", "paid_note": "user: paid"}, {"mid": "702"}],  # a rival marked paid still counts
+        [{"legacy": True}],  # a row kept with its tax id's digits only never proves the supplier
+        [{"legacy": True, "cui": "DE7001"}, {"mid": "702"}],  # and it may be this purchase: a rival
+        [{"total": "0.00"}, {"mid": "702"}],  # the purchase's own invoice, its payable zeroed by the till payment
     ],
 )
 def test_a_receipt_that_fits_no_single_invoice_decides_nothing(ledger, monkeypatch, invoices):
@@ -1516,3 +1524,17 @@ def test_a_reading_not_yet_applied_stops_nothing(ledger, monkeypatch):
     receipt_header.extract_pending(ledger)
     shop_invoice(ledger)
     assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 0 and ledger.document(sha)["doc_date"] is None
+
+
+def test_a_bon_s_card_debit_is_its_own_when_the_invoice_comes_a_week_later(ledger, monkeypatch):
+    read_receipt(ledger, monkeypatch)  # a card purchase on 6 Oct
+    shop_invoice(ledger, issue="2026-10-13")  # its invoice, seven days later
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 1
+    shop_invoice(ledger, mid="702", cui="RO7002", issue="2026-10-06")  # another shop's open invoice, same amount
+    t = statements.Tx(
+        date(2026, 10, 6), "POS", "Plata 1", "debit", Decimal("86.40"), "RON", "", ref="P1", card_last4="1234"
+    )
+    assert card_debit(ledger) == statements.tx_key(t)  # the purchase's card debit, recorded, its card the firm's
+    # the bon's purchase or 702's: it settles neither
+    efactura.match_statement(ledger, statements.Statement("NORD", None, None, [statements.Account("x", "RON", [t])]))
+    assert ledger.efactura("702")["status"] == "open"

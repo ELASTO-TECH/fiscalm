@@ -103,7 +103,8 @@ def bon_paid(L: Ledger, company: str) -> list:
     """Invoices paid at the till (a bon linked through Ledger.link_bon) whose card debit, if there was one, hasn't been seen yet."""
     return L.db.execute(
         f"SELECT *, (SELECT d.card_last4 FROM documents d WHERE d.efactura_id=efactura.message_id "
-        "AND efactura.paid_tx='bon:'||d.sha) AS bon_card FROM efactura WHERE "
+        "AND efactura.paid_tx='bon:'||d.sha) AS bon_card, (SELECT d.doc_date FROM documents d "
+        "WHERE d.efactura_id=efactura.message_id AND efactura.paid_tx='bon:'||d.sha) AS bon_day FROM efactura WHERE "
         f"{BON_PAID} AND company=? AND NOT EXISTS (SELECT 1 FROM receipt_headers h "
         "WHERE 'bon:'||h.sha=efactura.paid_tx AND json_extract(h.header, '$.payment')='cash') "
         "AND NOT EXISTS (SELECT 1 FROM settled_tx "
@@ -781,8 +782,11 @@ def payment_fits(p, t: statements.Tx) -> bool:
 
 
 def _bon_card_fits(r, t: statements.Tx) -> bool:
-    """A bon paid at the till may have been paid in cash: only a card debit near the purchase is its payment."""
-    days = abs((t.date - date.fromisoformat(r["issue_date"])).days)
+    """A bon paid at the till may have been paid in cash: only a card debit near the purchase is its payment. The
+    purchase is the bon's own day when the bon has one (an invoice may follow it by a week), else the invoice's."""
+    day = min(r["issue_date"], r["bon_day"] or r["issue_date"])
+    r = dict(r) | {"issue_date": day}
+    days = abs((t.date - date.fromisoformat(day)).days)
     card = t.card_last4 or re.search(r"\bE?POS\b", f"{t.title} {t.description}".upper())
     other_card = r["bon_card"] and t.card_last4 and r["bon_card"] != t.card_last4  # the bon names another card
     return bool(card) and not other_card and not t.counterparty_iban and days <= CARD_DAYS and bool(_fits(r, t))
