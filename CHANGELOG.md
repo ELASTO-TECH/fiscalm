@@ -3,6 +3,24 @@
 Product versions describe fiscalm releases. The API and the ledger schema have their own
 version numbers. Back up before upgrading; see [self-hosting](docs/self-hosting.md).
 
+## 0.1.7 (2026-11-26)
+
+- Ledger schema 47, upgraded automatically at startup. Back up first.
+- Invoice PDF redesigned: the total due and the due date at the top, seller, client and
+  dates in cards, the IBAN and bank in a panel at the end. Issued invoices download in the
+  new layout. A typed bank name is limited to 100 characters.
+- Receipts and invoices uploaded to Bondrop or Cheltuieli are read with AI: date, amount,
+  shop and card fill in when the reading is sure, the upload goes to the firm it names as
+  buyer, and it joins the accountant's pack once its date and amount are known.
+- A read till receipt finds the one e-Factura invoice of its purchase (same supplier tax
+  id, exact total, invoice within a week); one showing card or cash marks it paid.
+- A received credit note naming its invoice in one part of a note links it; stored credit
+  notes are read again once.
+- Invoice form: a VAT change keeps a line's price with VAT, and saving keeps the delivery
+  date.
+- Older BT PDFs (2019-2020 daily, 2022 monthly) read debits and credits by the account's
+  own totals.
+
 ## 0.1.6 (2026-11-26)
 
 - Ledger schema 45, upgraded automatically at startup. Back up first.
