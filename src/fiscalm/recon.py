@@ -510,12 +510,18 @@ def auto_mark_paid(ledger: Ledger, st: statements.Statement) -> list[str]:
 
 
 def _receipts(ledger: Ledger, company: str):
-    """Receipts a matcher may still give to a debit: dated and priced, and not an upload the user named for one."""
+    """Receipts a matcher may still give to a debit: dated and priced, not an upload the user named for one, not one
+    read as paid in cash, and not a bon that paid its invoice at the till (Ledger.receipts_off_debits)."""
     out = [
         d for d in ledger.documents(company=company, kind="receipt") if d["amount"] and d["currency"] and d["doc_date"]
     ]
-    named = ledger.linked_receipts(company, out)
-    return [d for d in out if d["sha"] not in named]
+    skip = ledger.linked_receipts(company, out) | ledger.receipts_off_debits(company)
+    return [d for d in out if d["sha"] not in skip]
+
+
+def other_card(t: statements.Tx, receipt) -> bool:
+    """The debit and the receipt each name a card, and not the same one: the receipt is another purchase."""
+    return bool(t.card_last4 and receipt["card_last4"] and t.card_last4 != receipt["card_last4"])
 
 
 def match_receipts(txs: list[statements.Tx], receipts) -> dict[int, tuple[str, dict]]:
@@ -548,7 +554,7 @@ def match_receipts(txs: list[statements.Tx], receipts) -> dict[int, tuple[str, d
         amt = t.orig_amount if t.orig_amount is not None else t.amount
         cur = t.orig_currency or t.currency
         for _, r in nearby(t.date):
-            if r["sha"] in used or r["currency"] != cur:
+            if r["sha"] in used or r["currency"] != cur or other_card(t, r):
                 continue
             if r["sha"] not in amounts:
                 amounts[r["sha"]] = Decimal(r["amount"])
@@ -561,7 +567,7 @@ def match_receipts(txs: list[statements.Tx], receipts) -> dict[int, tuple[str, d
             continue
         cp = t.counterparty.lower()
         for _, r in nearby(t.date):
-            if r["sha"] in used:
+            if r["sha"] in used or other_card(t, r):
                 continue
             if r["sha"] not in words:
                 words[r["sha"]] = re.split(r"[^a-z0-9]+", (r["vendor"] or "").lower())[0]

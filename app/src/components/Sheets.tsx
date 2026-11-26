@@ -478,7 +478,7 @@ function DocBody({ id, onClose }: { id: string; onClose: () => void }) {
         </Panel>
       ) : null}
       <Panel className="my-4">
-        <dl className={`${detailListStyle} py-2`}><dt>Contabil</dt><dd className={`st ${d.sent ? "ok" : ""} whitespace-normal wrap-anywhere ${statusTextStyle} ${statusStyle[d.sent ? "ok" : ""]}`}>{d.sent ? "Trimisă" : d.held ? "Nu intră în dosarul contabilului până nu este asociat cu plata din Tranzacții" : `Intră în raportul pe ${lunaName(d.month)}`}</dd></dl>
+        <dl className={`${detailListStyle} py-2`}><dt>Contabil</dt><dd className={`st ${d.sent ? "ok" : ""} whitespace-normal wrap-anywhere ${statusTextStyle} ${statusStyle[d.sent ? "ok" : ""]}`}>{d.sent ? "Trimisă" : d.held ? "Nu intră în dosarul contabilului până nu are data și suma" : `Intră în raportul pe ${lunaName(d.month)}`}</dd></dl>
         {d.note ? <dl className={`${detailListStyle} py-2`}><dt>Notă</dt><dd>{d.note}</dd></dl> : null}
       </Panel>
     </Sheet>

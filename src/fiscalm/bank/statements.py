@@ -389,6 +389,8 @@ def parse_text(text: str, company: str) -> Statement:
     debit_end = credit_end = 0
     opening: dict[int, Decimal] = {}  # by id(account): SOLD ANTERIOR, the first one of its section
     final: dict[int, Decimal] = {}  # SOLD FINAL CONT
+    ends: dict[int, tuple[int, str | None]] = {}  # by id(tx): its amount's end column, the side it sits exactly under
+    days: dict[tuple[int, date], tuple[Decimal, Decimal]] = {}  # by (id(account), day): RULAJ ZI debits, credits
 
     def close():
         nonlocal cur, cur_lines
@@ -445,7 +447,7 @@ def parse_text(text: str, company: str) -> Statement:
                 cur_date = parse_dmy(row.group("date"))
             if title.startswith(_SKIP_TITLES):
                 close()
-                _pdf_balance(acct, row, title, opening, final)
+                _pdf_balance(acct, row, title, opening, final, (days, cur_date))
                 if title.startswith("SOLD FINAL CONT"):
                     in_table = False
                 continue
@@ -463,7 +465,7 @@ def parse_text(text: str, company: str) -> Statement:
                 currency=acct.currency,
                 iban=acct.iban,
             )
-            cur_lines = [title]
+            ends[id(cur)], cur_lines = (a1_end, _under(a1_end, debit_end, credit_end)), [title]
             continue
         if s.startswith(_SKIP_TITLES):
             close()
@@ -473,7 +475,7 @@ def parse_text(text: str, company: str) -> Statement:
         if cur is not None:
             cur_lines.append(s)
     close()
-    _pdf_trust(accounts, opening, final)
+    _pdf_trust(_directions_by_totals(accounts, ends, days), opening, final)
     if periods := [a.period for a in accounts if a.period]:  # the sections' days, not a period printed elsewhere
         period_start, period_end = min(p[0] for p in periods), max(p[1] for p in periods)
     return Statement(
@@ -557,8 +559,11 @@ def _pdf_account(line: str) -> Account:
 
 
 def _pdf_balance(
-    acct: Account, row: re.Match[str], title: str, opening: dict[int, Decimal], final: dict[int, Decimal]
+    acct: Account, row: re.Match[str], title: str, opening: dict[int, Decimal], final: dict[int, Decimal], daily=None
 ) -> None:
+    if daily and title.startswith("RULAJ ZI") and row.group("a2") and daily[1]:
+        key, totals = (id(acct), daily[1]), (parse_amount(row.group("a1")), parse_amount(row.group("a2")))
+        daily[0][key] = totals if daily[0].get(key, totals) == totals else None  # None: two that disagree
     if title.startswith("SOLD ANTERIOR") and acct.txs == [] and id(acct) not in opening:
         opening[id(acct)] = parse_amount(row.group("a1"))
     if title.startswith("SOLD FINAL CONT") and final.get(id(acct), 0) is not None:  # None: contradicted totals
@@ -566,6 +571,87 @@ def _pdf_balance(
     if title.startswith("RULAJ TOTAL CONT") and row.group("a2"):
         acct.total_debit = parse_amount(row.group("a1"))
         acct.total_credit = parse_amount(row.group("a2"))
+
+
+def _under(end: int, debit_end: int, credit_end: int) -> str | None:
+    """The column an amount sits exactly under (its end within 2 of the header's), else None."""
+    return "debit" if abs(end - debit_end) <= 2 else "credit" if abs(end - credit_end) <= 2 else None
+
+
+def _directions_by_totals(accounts: list[Account], ends: dict, days: dict) -> list[Account]:
+    """Older BT PDFs print lines of different widths, so an amount's column measured against the header's can land
+    nearer the wrong one. When the lines read so don't add up to the account's own totals (RULAJ TOTAL CONT: debits,
+    credits), the amounts' columns are split where they leave the widest gap, the left ones debits: that reading is
+    kept only if it is the one reading (that split, or all one side) giving both totals to the cent, it moves no line
+    that sits exactly under a header column, and no other assignment of the lines gives the same totals (checked day
+    by day against RULAJ ZI when the statement prints it): otherwise which line is which isn't proven, and the section
+    stays as read, and unproven. A moved line is read for BT's words again (a fee is a debit)."""
+    for acct in accounts:
+        if not (acct.balanced or acct.total_debit is None or not acct.txs):
+            _redirect(acct, ends, {d: v for (a, d), v in days.items() if a == id(acct)})
+    return accounts
+
+
+MAX_LINES = 20  # lines of one day (or section) whose assignment is checked to be the only one; more: unproven
+
+
+def _only_assignment(amounts: list[Decimal], debit: Decimal) -> bool:
+    """Exactly one choice of these lines sums to `debit` (the rest being the credits). Only positive amounts are
+    counted so; any other leaves it unproven."""
+    if len(amounts) > MAX_LINES or any(a <= 0 for a in amounts):
+        return False
+    ways: dict[Decimal, int] = {Decimal(0): 1}
+    for a in amounts:
+        for total, n in list(ways.items()):
+            if total + a <= debit:
+                ways[total + a] = ways.get(total + a, 0) + n
+    return ways.get(debit, 0) == 1
+
+
+def _proven(acct: Account, reading: dict[int, str], days: dict) -> bool:
+    """No other assignment of the lines gives the bank's totals. The reading gives every day's RULAJ ZI it prints (two
+    that disagree prove nothing); it is the only one per day when every line's day has one, else over the section."""
+    if None in days.values():
+        return False
+    for d in days:  # a day the section prints totals for but holds no line of must total nothing
+        lines = [t for t in acct.txs if t.date == d]
+        debit = sum((t.amount for t in lines if reading[id(t)] == "debit"), Decimal(0))
+        credit = sum((t.amount for t in lines if reading[id(t)] == "credit"), Decimal(0))
+        if (debit, credit) != days[d]:
+            return False
+    if days and all(t.date in days for t in acct.txs):
+        return all(
+            _only_assignment([t.amount for t in acct.txs if t.date == d], days[d][0])
+            for d in {t.date for t in acct.txs}
+        )
+    return _only_assignment([t.amount for t in acct.txs], acct.total_debit)
+
+
+def _redirect(acct: Account, ends: dict, days: dict) -> None:
+    cols = sorted({ends[id(t)][0] for t in acct.txs})
+    gap = max(range(1, len(cols)), key=lambda i: cols[i] - cols[i - 1], default=None)
+    readings = [{id(t): side for t in acct.txs} for side in ("debit", "credit")]
+    if gap is not None:
+        readings.append({id(t): "debit" if ends[id(t)][0] < cols[gap] else "credit" for t in acct.txs})
+
+    def adds_up(reading: dict[int, str]) -> bool:
+        total = {"debit": Decimal(0), "credit": Decimal(0)}
+        for t in acct.txs:
+            total[reading[id(t)]] += t.amount
+        return (total["debit"], total["credit"]) == (acct.total_debit, acct.total_credit)
+
+    fitting = [r for r in readings if adds_up(r)]
+    if len(fitting) != 1:
+        return
+    reading = fitting[0]
+    if any((under := ends[id(t)][1]) and under != reading[id(t)] for t in acct.txs):
+        return  # it would move a line the header's own column places
+    if not _proven(acct, reading, days):
+        return  # another assignment of the lines gives the same totals: which line is which isn't proven
+    for t in acct.txs:
+        if t.direction != reading[id(t)]:
+            t.direction, t.category = reading[id(t)], ""
+            apply_wording(t, banks.BY_ID["bt"])
 
 
 def _pdf_trust(accounts: list[Account], opening: dict[int, Decimal], final: dict[int, Decimal]) -> None:

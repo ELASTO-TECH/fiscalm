@@ -35,7 +35,7 @@ from xml.etree import ElementTree as ET
 from fiscalm import ai, audit, companies, history_invoices, integrations
 from fiscalm.bank import catalogue as banks, statements
 from fiscalm.efactura import client as anaf, partners as partner_anaf
-from fiscalm.efactura.credits import UNCLEAR_REFERENCE, blocking_issues, credited, net_invoices
+from fiscalm.efactura.credits import UNCLEAR_REFERENCE, blocking_issues, credit_number, credited, net_invoices
 from fiscalm.identity import partner_id, tax_token
 from fiscalm.ledger import BON_PAID, MAIL_PROVED, USER_MARKED, Ledger, covered, finance_home, now, unlinked, user_note
 from fiscalm.mail import imap as imapread
@@ -102,7 +102,12 @@ def mail_proved(L: Ledger, company: str) -> list:
 def bon_paid(L: Ledger, company: str) -> list:
     """Invoices paid at the till (a bon linked through Ledger.link_bon) whose card debit, if there was one, hasn't been seen yet."""
     return L.db.execute(
-        f"SELECT * FROM efactura WHERE {BON_PAID} AND company=? AND NOT EXISTS (SELECT 1 FROM settled_tx "
+        f"SELECT *, (SELECT d.card_last4 FROM documents d WHERE d.efactura_id=efactura.message_id "
+        "AND efactura.paid_tx='bon:'||d.sha) AS bon_card, (SELECT d.doc_date FROM documents d "
+        "WHERE d.efactura_id=efactura.message_id AND efactura.paid_tx='bon:'||d.sha) AS bon_day FROM efactura WHERE "
+        f"{BON_PAID} AND company=? AND NOT EXISTS (SELECT 1 FROM receipt_headers h "
+        "WHERE 'bon:'||h.sha=efactura.paid_tx AND json_extract(h.header, '$.payment')='cash') "
+        "AND NOT EXISTS (SELECT 1 FROM settled_tx "
         "WHERE what='card of bon, efactura ' || message_id) ORDER BY message_id",
         (company,),
     ).fetchall()
@@ -169,19 +174,30 @@ def _amount(s: str | None) -> Decimal | None:
     return Decimal(value)
 
 
-def storno_reference(note: str) -> tuple[str, str]:
-    match = re.fullmatch(
-        r"\s*storno factura(?: seria)?\s+(.+?)\s+din data\s+(\d{2}/\d{2}/\d{4})\s*[.]?\s*",
-        note,
-        re.IGNORECASE,
-    )
-    if not match:
-        return "", ""
-    try:
-        day = datetime.strptime(match[2], "%d/%m/%Y").date().isoformat()
-    except ValueError:
-        day = "invalid"
-    return match[1], day
+# A storno reference invoicing software writes in a note when it leaves BillingReference empty, alone in one of the
+# note's parts (SmartBill joins its notes with "#"): "Storno factura seria AB nr. 0012 din data 23/10/2026".
+STORNO_NOTE = re.compile(
+    r"storn(?:o|are|area) factur(?:a|ă|ii) (?:seria )?(?P<ref>[^#]{1,100}?)"
+    r" din(?: data)? (?P<day>\d{2}([/.])\d{2}\3\d{4})[.]?",
+    re.IGNORECASE,
+)
+
+
+def storno_reference(notes: Iterable[str]) -> tuple[str, str]:
+    """(invoice number, issue day) named by the notes of a credit note without BillingReference. Untrusted text: it
+    only feeds the exact matching in efactura.credits.links. Several invoices named link to none; nothing named, or
+    anything else in that part, stays unreferenced; a date that is no day links to none."""
+    found = {}
+    for part in (p for note in notes for p in note.split("#")):
+        if match := STORNO_NOTE.fullmatch(" ".join(part.split())):
+            try:
+                day = datetime.strptime(match["day"].replace(".", "/"), "%d/%m/%Y").date().isoformat()
+            except ValueError:
+                day = "invalid"
+            found.setdefault((credit_number(match["ref"]) or match["ref"], day), (match["ref"], day))
+    if len(found) > 1:
+        return "", UNCLEAR_REFERENCE
+    return found.popitem()[1] if found else ("", "")
 
 
 def parse_ubl(data: bytes) -> Invoice:
@@ -260,7 +276,7 @@ def parse_ubl(data: bytes) -> Invoice:
     reference = (references[0].text or "").strip() if len(references) == 1 else ""
     reference_day = t("cac:BillingReference/cac:InvoiceDocumentReference/cbc:IssueDate")
     if not root.findall("cac:BillingReference", NS):
-        reference, reference_day = storno_reference(t("cbc:Note"))
+        reference, reference_day = storno_reference(n.text or "" for n in root.findall("cbc:Note", NS))
     elif not reference:  # several invoices, or none identified: it links to none, and never reads as naming none
         reference_day = UNCLEAR_REFERENCE
     return Invoice(
@@ -481,10 +497,16 @@ def _initial_status(L: Ledger, company: str, inv: Invoice, sha: str) -> tuple[st
 # ------------------------------------------------------------------ sync
 
 
+CREDIT_REREAD = "efactura_credit_reread"  # set by a migration: every stored credit note is read once more
+
+
 def fill_credit_references(L: Ledger) -> None:
-    """Read retained product archives once after the additive reference migration, never first-install rows."""
+    """Read retained archives once: notes stored before references were kept (NULL), and every note once after a
+    migration changes how references are read. A note a person answered keeps that answer; an unreadable archive
+    keeps what was stored."""
+    reread, picks = L.get_meta(CREDIT_REREAD) is not None, L.credit_picks()
     for row in L.efactura_rows(status="credit"):
-        if row["billing_ref"] is not None:
+        if (row["billing_ref"] is not None and not reread) or row["message_id"] in picks:
             continue
         root = (finance_home() / "efactura" / row["company"]).resolve()
         data = read_file(row["raw_path"], [root], MAX_XML)
@@ -495,11 +517,16 @@ def fill_credit_references(L: Ledger) -> None:
         except UblError:
             continue
         with pay.pay_lock():
-            L.set_credit_reference(row["message_id"], row["raw_path"], inv.billing_ref, inv.billing_date)
+            L.set_credit_reference(row, inv.billing_ref, inv.billing_date)
+    if reread:
+        with L.tx() as db:
+            db.execute("DELETE FROM meta WHERE key=?", (CREDIT_REREAD,))
 
 
-def sync(L: Ledger, now_dt: datetime | None = None) -> dict:
-    """Fetch new received invoices for every company. Read-only toward ANAF; one download per message."""
+def sync(L: Ledger, now_dt: datetime | None = None, first: Callable[[Ledger, date], object] | None = None) -> dict:
+    """Fetch new received invoices for every company. Read-only toward ANAF; one download per message. `first` runs
+    after the downloads and before any statement or autopay settles them (cli: receipt_invoice.associate, so a purchase
+    a read receipt proves paid at the till is decided first)."""
     if anaf.inbox_env() == "test":
         return {"env": "test", "new": [], "errors": [], "warnings": [], "skipped_test": True}
     now_dt = now_dt or datetime.now()
@@ -551,6 +578,8 @@ def sync(L: Ledger, now_dt: datetime | None = None) -> dict:
                 out["errors"].append(f"{key}: {e}")
                 continue
             out["new"].append(store(L, key, m, raw))
+    if first:
+        first(L, now_dt.date())
     out["paid"] = match_recent_statements(L)
     out["autopay"] = autopay_new(L)
     if denied and len(denied) == len(configured):
@@ -773,10 +802,14 @@ def payment_fits(p, t: statements.Tx) -> bool:
 
 
 def _bon_card_fits(r, t: statements.Tx) -> bool:
-    """A bon paid at the till may have been paid in cash: only a card debit near the purchase is its payment."""
-    days = abs((t.date - date.fromisoformat(r["issue_date"])).days)
+    """A bon paid at the till may have been paid in cash: only a card debit near the purchase is its payment. The
+    purchase is the bon's own day when the bon has one (an invoice may follow it by a week), else the invoice's."""
+    day = min(r["issue_date"], r["bon_day"] or r["issue_date"])
+    r = dict(r) | {"issue_date": day}
+    days = abs((t.date - date.fromisoformat(day)).days)
     card = t.card_last4 or re.search(r"\bE?POS\b", f"{t.title} {t.description}".upper())
-    return bool(card) and not t.counterparty_iban and days <= CARD_DAYS and bool(_fits(r, t))
+    other_card = r["bon_card"] and t.card_last4 and r["bon_card"] != t.card_last4  # the bon names another card
+    return bool(card) and not other_card and not t.counterparty_iban and days <= CARD_DAYS and bool(_fits(r, t))
 
 
 def _payment_rival(p, t: statements.Tx) -> bool:
