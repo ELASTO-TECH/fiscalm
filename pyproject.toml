@@ -1,6 +1,6 @@
 [project]
 name = "fiscalm"
-version = "0.1.5"
+version = "0.1.6"
 description = "fiscalm's engine: e-Factura, invoices, bank reconciliation and the accountant's pack for Romanian companies"
 readme = "README.md"
 license = "AGPL-3.0-only"

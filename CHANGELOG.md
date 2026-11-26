@@ -3,6 +3,25 @@
 Product versions describe fiscalm releases. The API and the ledger schema have their own
 version numbers. Back up before upgrading; see [self-hosting](docs/self-hosting.md).
 
+## 0.1.6 (2026-11-26)
+
+- Ledger schema 45, upgraded automatically at startup. Back up first.
+- A debit with the exact amount of exactly one candidate settles on its own, even when the
+  bank text names no supplier; a name match no longer waits for a first confirmation. Only
+  real ambiguity goes to a person.
+- A stored statement copy ingested again is recorded and matched as a duplicate.
+- Settlement reports: real amounts, one report per payout, refund lines flagged, multi-sheet
+  XLSX, presets for Romanian couriers and processors, reports by mail from named senders.
+  A batch that passes every check settles from the first report.
+- Credit notes naming no invoice cancel the one invoice they exactly reverse; a partly
+  credited invoice pays its net remaining amount.
+- AI proposes transaction explanations and applies only sure labels; a payment mail it reads
+  as sure proof settles its invoice, anything less waits in Sarcini for one tap.
+- Receipts: no more line-by-line transcription; an uploaded receipt can be named as a card
+  payment's bon.
+- Bank: single-account and partial statement uploads, account opening and closing dates in
+  Setări › Bănci și conturi, reminders that warn when statements are behind.
+
 ## 0.1.5 (2026-11-25)
 
 - A BT statement whose final balance falls alone on the next page is read correctly and
