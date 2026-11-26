@@ -1538,6 +1538,22 @@ it("preserves gross-price evidence when saving an existing commerce draft", asyn
   expect((saved.body as {lines: {gross_unit_price?: string}[]}).lines[0].gross_unit_price).toBe("121");
 });
 
+it("changing a draft's VAT keeps the gross prices the customer paid and the delivery date", async () => {
+  const inv = invoicingData();
+  const gross = { ...inv.drafts[0].lines[0], quantity: "1", unit_price: "100.000000000000", gross_unit_price: "121.00" };
+  inv.drafts[0] = { ...inv.drafts[0], delivery_date: "2026-10-05", lines: [gross, { ...gross, description: "Livrare" }] };
+  const { api, f } = await openInvoice("d1", { invoicing: () => json(inv), onPost: () => answer(inv, "Am salvat ciorna.", "d1") });
+  const [first, second] = f.getAllByRole("group", { name: /^Linia / });
+  expect(within(first).getByLabelText("Preț unitar cu TVA")).toHaveValue("121.00");
+  await choose(within(first).getByLabelText("TVA"), "S11");
+  await userEvent.clear(within(second).getByLabelText("Preț unitar cu TVA"));
+  await userEvent.type(within(second).getByLabelText("Preț unitar cu TVA"), "50");
+  await userEvent.click(f.getByRole("button", { name: "Salvează ciorna" }));
+  await waitFor(() => expect(api.posts()).toHaveLength(1));
+  expect(api.posts()[0].body).toMatchObject({ delivery_date: "2026-10-05", lines: [
+    { vat_category: "S", vat_rate: "11", gross_unit_price: "121.00" }, { vat_rate: "21", gross_unit_price: "50" }] });
+});
+
 describe("Serii de facturi", () => {
   /** Two series: DEMO, the default, with issued invoices; FREE, used by nothing. */
   const twoSeries = (): Invoicing => ({ ...invoicingData(), series: [

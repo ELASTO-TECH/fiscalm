@@ -641,11 +641,13 @@ function InvoiceForm({ inv, set, draftId, unsavedRef, onEditSeller, partner, any
     setProposing((p) => ({ ...p, due: false }));
     change(setDueDate)(day);
   };
-  const setLine = (i: number, patch: Partial<InvoiceLine>) => editLines(lines.map((l, j) => {
-    const next = j === i ? { ...l, ...patch } : { ...l };
-    if (patch.unit_price !== undefined || patch.vat_rate !== undefined) delete next.gross_unit_price;
-    return next;
-  }));
+  // A line priced with VAT (a shop order's) keeps the amount the customer paid: its price field edits that amount and
+  // a new VAT rate only changes how the engine splits it, so no edit turns a gross price into a net one.
+  const setLine = (i: number, patch: Partial<InvoiceLine>) => editLines(lines.map((l, j) => (j === i ? { ...l, ...patch } : l)));
+  const linePrice = (l: InvoiceLine) => l.gross_unit_price ?? l.unit_price;
+  const setPrice = (i: number, price: string) => setLine(i, lines[i].gross_unit_price !== undefined ? { gross_unit_price: price } : { unit_price: price });
+  // A draft's delivery date stays on it, shown and editable, even once no line needs one (a K line changed to another VAT).
+  const showsDelivery = needsDelivery || !!init.delivery || !!delivery;
   // What a draft needs before it is sent, in the form's order: the field's id and what it says under it once pressed.
   const missing: [string, string][] = [
     ...(clientId || adding ? [] : [["inv-client", "Lipsește clientul."] as [string, string]]),
@@ -655,7 +657,7 @@ function InvoiceForm({ inv, set, draftId, unsavedRef, onEditSeller, partner, any
     ...(needsBank && !bank.trim() ? [["inv-bank", FILL] as [string, string]] : []),
     ...(dueDate ? [] : [["inv-due", PICK_DATE] as [string, string]]),
     ...lines.flatMap((l, i) => [[`l${i}-d`, l.description.trim() ? "" : FILL], [`l${i}-q`, l.quantity.trim() ? "" : FILL],
-      [`l${i}-p`, l.unit_price.trim() ? "" : FILL], [`l${i}-v`, choiceOf(inv, l) ? "" : "Lipsește TVA-ul."]] as [string, string][])
+      [`l${i}-p`, linePrice(l).trim() ? "" : FILL], [`l${i}-v`, choiceOf(inv, l) ? "" : "Lipsește TVA-ul."]] as [string, string][])
       .filter(([, m]) => m),
     ...(needsDelivery && !delivery ? [["inv-delivery", PICK_DATE] as [string, string]] : []),
   ];
@@ -663,7 +665,7 @@ function InvoiceForm({ inv, set, draftId, unsavedRef, onEditSeller, partner, any
   const lacking: Lacking = new Map(tried ? missing : []);
   const req = (id: string, also?: string) => ({ "aria-required": true, ...marked(lacking, id, also) });
   const body = (client: string) => ({ ...(id ? { id, version } : {}), series, client_id: client, issue_date: issueDate, due_date: dueDate, currency,
-    lines: lines.map(lineOut), notes, ...(needsDelivery ? { delivery_date: delivery } : {}),
+    lines: lines.map(lineOut), notes, ...(showsDelivery ? { delivery_date: delivery } : {}),
     advance_invoice: advance, advance_payment_date: advance && advanceDate ? advanceDate : null,
     ...(saved?.supply_country ? { supply_country: saved.supply_country } : {}), ...(account ? { iban: account } : {}) });
   /** Save; `clean` says nothing changed while the save was on its way (only then is what's saved what's on screen). */
@@ -868,8 +870,8 @@ function InvoiceForm({ inv, set, draftId, unsavedRef, onEditSeller, partner, any
                 </Select>
               </div>
               <div>
-                <Label htmlFor={`l${i}-p`}>Preț unitar</Label>
-                <Input id={`l${i}-p`} {...req(`l${i}-p`)} inputMode="decimal" value={l.unit_price} onChange={(e) => setLine(i, { unit_price: e.target.value })} />
+                <Label htmlFor={`l${i}-p`}>{l.gross_unit_price !== undefined ? "Preț unitar cu TVA" : "Preț unitar"}</Label>
+                <Input id={`l${i}-p`} {...req(`l${i}-p`)} inputMode="decimal" value={linePrice(l)} onChange={(e) => setPrice(i, e.target.value)} />
                 <Err lacking={lacking} id={`l${i}-p`} />
               </div>
             </div>
@@ -902,9 +904,9 @@ function InvoiceForm({ inv, set, draftId, unsavedRef, onEditSeller, partner, any
           editLines(latest.current.values.lines.map((x, j) => (j === newProduct ? lineFrom(p, x, latest.current.values.currency) : x)));
           closeNewProduct(newProduct);
         }} />, document.body) : null}
-      {needsDelivery ? (
+      {showsDelivery ? (
         <>
-          <Label htmlFor="inv-delivery">Data livrării</Label>
+          <Label htmlFor="inv-delivery">{needsDelivery ? "Data livrării" : "Data livrării (opțional)"}</Label>
           <Input id="inv-delivery" type="date" {...req("inv-delivery")} value={delivery} onChange={(e) => change(setDelivery)(e.target.value)} />
           <Err lacking={lacking} id="inv-delivery" />
         </>
