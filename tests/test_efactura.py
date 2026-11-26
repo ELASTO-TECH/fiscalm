@@ -2018,10 +2018,19 @@ STORNO_1 = "Storno factura seria SUP nr. 0001 din data 20/10/2026"
         (STORNO_1.replace("20/10", "21/10"), "", set(), ["3009"]),  # the right number on another day
         (STORNO_1.replace("20/10", "31/02"), "", set(), ["3009"]),  # no such day
         (STORNO_1 + "#" + STORNO_1.replace("0001 din data 20", "0003 din data 21"), "", set(), ["3009"]),  # two
+        ("Storno factura SUP-0001 din data 20/10/2026", "", {"3001"}, ["3009"]),  # the form read before #-joined notes
+        (STORNO_1 + "#Storno factura SUP-0003 din data 21/10/2026", "", set(), ["3009"]),  # two, in two forms
         (STORNO_1 + " si 0003", "", set(), ["3008", "3009"]),  # garbled: a person decides
     ],
 )
 def test_a_note_naming_the_cancelled_invoice_links_it(ledger, home, monkeypatch, first, second, credited, asked):
+    _notes(ledger, monkeypatch, first, second)
+    assert set(efactura.credited(ledger, "NORD")) == credited
+    assert sorted(credits.credit_questions(ledger, "NORD")) == asked
+
+
+def _notes(ledger, monkeypatch, first, second):
+    """Two invoices of one total (3001, 3002), then two notes (3008, 3009) of the opposite total with these notes."""
     docs = {"3001": ubl(number="SUP 0001"), "3002": ubl(number="SUP 0003", issue="2026-10-21")}
     for mid, note in (("3008", first), ("3009", second)):
         docs[mid] = ubl(number=f"SUP {mid}", total="-250.00", issue="2026-10-23").replace(
@@ -2030,8 +2039,21 @@ def test_a_note_naming_the_cancelled_invoice_links_it(ledger, home, monkeypatch,
     blobs = {mid: anaf_zip(x) for mid, x in docs.items()}
     _fake_anaf(monkeypatch, {NORD_CUI: [msg(mid, "202610231200") for mid in blobs]}, blobs)
     efactura.sync(ledger)
-    assert set(efactura.credited(ledger, "NORD")) == credited
-    assert sorted(credits.credit_questions(ledger, "NORD")) == asked
+
+
+def test_an_upgrade_reads_every_credit_note_again_except_one_a_person_answered(ledger, home, monkeypatch):
+    two = STORNO_1 + "</cbc:Note><cbc:Note>" + STORNO_1.replace("0001 din data 20", "0003 din data 21")
+    _notes(ledger, monkeypatch, "TVA LA INCASARE#" + STORNO_1, two)
+    stored = {"3008": ("", ""), "3009": ("SUP 0001", "2026-10-20")}  # what the parser read before
+    for mid, (ref, day) in stored.items():
+        ledger.db.execute("UPDATE efactura SET billing_ref=?,billing_date=? WHERE message_id=?", (ref, day, mid))
+    ledger.db.commit()
+    assert credits.pick(ledger, "NORD", "3008", credits.NO_INVOICE)  # a person said 3008 cancels none
+    ledger.set_meta(efactura.CREDIT_REREAD, "1")
+    efactura.fill_credit_references(ledger)
+    refs = {r["message_id"]: (r["billing_ref"], r["billing_date"]) for r in ledger.efactura_rows(status="credit")}
+    assert refs == {"3008": ("", ""), "3009": ("", credits.UNCLEAR_REFERENCE)}
+    assert efactura.credited(ledger, "NORD") == {} and ledger.get_meta(efactura.CREDIT_REREAD) is None
 
 
 def test_a_picked_invoice_taken_since_leaves_the_note_unapplied(ledger, home, monkeypatch):

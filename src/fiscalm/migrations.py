@@ -665,9 +665,10 @@ def receipt_headers(db: sqlite3.Connection) -> None:
 
 
 def credit_note_references_reread(db: sqlite3.Connection) -> None:
-    # A received credit note naming its invoice only in one part of a note ("...#Storno factura ...") was stored
-    # without a reference. The next e-Factura sync reads it again from its archive (efactura.fill_credit_references).
-    db.execute("UPDATE efactura SET billing_ref=NULL,billing_date='' WHERE status='credit' AND billing_ref=''")
+    # Credit notes naming their invoice only in one part of a note ("...#Storno factura ..."), or in several notes,
+    # were read as naming none or the first. The next e-Factura sync reads every credit note again from its archive
+    # (efactura.fill_credit_references; a note a person answered keeps that answer).
+    db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('efactura_credit_reread','1')")
 
 
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (

@@ -802,12 +802,11 @@ def test_reading_off_and_no_ai_become_a_stopped_integration(tmp_path, monkeypatc
         ]
 
 
-@pytest.mark.parametrize("migration", [m.credit_references_reread, m.credit_note_references_reread])
-def test_credit_notes_stored_without_a_reference_are_read_again_on_upgrade(tmp_path, monkeypatch, migration):
-    """A reference read as none (several references, a note part): the next sync reads such notes again."""
+def test_credit_notes_stored_without_a_reference_are_read_again_on_upgrade(tmp_path, monkeypatch):
+    """Several references were stored as none: the next sync reads every such note again (fill_credit_references)."""
     path = tmp_path / "previous.db"
     with monkeypatch.context() as patch:
-        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(migration))
+        patch.setattr(m, "SCHEMA_VERSION", m.MIGRATIONS.index(m.credit_references_reread))
         Ledger(path).close()
     with sqlite3.connect(path) as db:
         for mid, status, ref in (("none", "credit", ""), ("named", "credit", "SUP 1"), ("invoice", "open", "")):
