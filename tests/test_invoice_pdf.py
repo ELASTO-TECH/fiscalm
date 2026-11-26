@@ -566,18 +566,20 @@ def test_pdf_extraction_refuses_unbounded_output_and_time(tmp_path, monkeypatch,
         pdftext.pdf_text(b"%PDF-synthetic")
 
 
-def test_the_longest_bank_name_keeps_the_payment_panel_on_the_page(setup_invoice):
+@pytest.mark.parametrize("words", [10, 170])
+def test_a_long_bank_name_never_pushes_the_iban_off_the_page(setup_invoice, words):
     L, _ = setup_invoice
-    # A bank outside the catalogue prints the name the seller typed: at most 100 characters.
+    # A bank outside the catalogue prints the name the seller typed: at most 100 characters from now on.
     with L.tx() as db:
         db.execute("UPDATE firm_accounts SET bank='zz' WHERE company='NORD'")
     with pytest.raises(i.InvoiceError, match="Banca poate avea cel mult 100"):
         i.save_seller(L, "NORD", PARTY | dict(bank="W" * 101))
-    bank = " ".join(["WWWWWWWWW"] * 10)  # 99 of the widest letters
-    i.save_seller(L, "NORD", PARTY | dict(bank=bank))
-    text, raw = render(setup_invoice)
-    assert "RO24 BTRL RONC RT00 0000 0001" in text and text.count("WWWWWWWWW") == 10
-    with pikepdf.open(io.BytesIO(raw)) as pdf:
-        assert len(pdf.pages) == 1
-    # Everything above the footer stays on the page, the panel's rows above its bottom edge.
-    assert all(54 < y < 842 for _, _, y, v in cells(raw) if y != 27)
+    bank = " ".join(["WWWWWWWWW"] * words)  # 99 of the widest letters, or a 1,700-character name saved before the cap
+    i.save_seller(L, "NORD", PARTY | dict(bank=bank[:99]))
+    with L.tx() as db:
+        db.execute("UPDATE invoice_sellers SET data=json_set(data, '$.bank', ?) WHERE company='NORD'", (bank,))
+    for preview in [True, False]:  # a draft's current seller, then the issued invoice's frozen one
+        text, raw = render(setup_invoice, preview=preview)
+        assert text.count("RO24 BTRL RONC RT00 0000 0001") == 1 and text.count("WWWWWWWWW") == words
+        # Every run but the footer stays on its page, above the panel's bottom edge.
+        assert all(54 < y < 842 for _, _, y, v in cells(raw) if y != 27)

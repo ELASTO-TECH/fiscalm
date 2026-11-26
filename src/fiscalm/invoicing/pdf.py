@@ -486,29 +486,40 @@ class _InvoicePDF:
         mentions = list(dict.fromkeys(mentions))
         return mentions
 
-    def payment(self) -> None:
-        """Mențiuni in their own block, then the IBAN and bank in a grey panel just above the last page's footer."""
-        mentions = [row for v in self.mentions() for row in self.c.wrap(v, WIDTH)]
-        if mentions:
+    def block(self, name: str, values: list[str]) -> None:
+        """A labelled run of full-width text rows that continues on the next page when it must."""
+        rows = [row for v in values for row in self.c.wrap(v, WIDTH)]
+        if rows:
             self.ensure(30)
-            self.label("Mențiuni", LEFT, self.y)
+            self.label(name, LEFT, self.y)
             self.y -= 17
-            for row in mentions:
+            for row in rows:
                 self.ensure(12)
                 self.c.text(row, LEFT, self.y, 8.25)
                 self.y -= 12
+            self.y -= 12
+
+    def payment(self) -> None:
+        """Mențiuni in their own block, then the IBAN and bank in a grey panel just above the last page's footer."""
+        self.block("Mențiuni", self.mentions())
         iban = self.seller["iban"]
         iban = " ".join(iban[n : n + 4] for n in range(0, len(iban), 4))
         iban_width = min(330, self.c.measure(iban, 12.75, "SemiBold", 0.77))
         bank = self.c.wrap(self.seller["bank"], WIDTH - 33 - iban_width - 24, 9.75, "SemiBold")
-        height = 48 + 13 * (len(bank) - 1)
+        if len(bank) > 5:
+            # A bank name longer than today's 100-character cap (saved before it) prints in full above the panel,
+            # which then holds the IBAN alone and always fits.
+            self.block("Bancă", [self.seller["bank"]])
+            bank = []
+        height = 48 + 13 * max(0, len(bank) - 1)
         if self.y - 12 < PANEL_BOTTOM + height:
             self.new_page()
         top = PANEL_BOTTOM + height
         self.c.round_rect(LEFT, PANEL_BOTTOM, WIDTH, height, 9, fill=PANEL)
         self.label("IBAN", LEFT + 16.5, top - 18)
         self.c.text(iban, LEFT + 16.5, top - 35, 12.75, "SemiBold", INK, width=330, tracking=0.77)
-        self.label("Bancă", 0, top - 18, right=RIGHT - 16.5)
+        if bank:
+            self.label("Bancă", 0, top - 18, right=RIGHT - 16.5)
         for n, row in enumerate(bank):
             self.c.text(row, 0, top - 35 - 13 * n, 9.75, "SemiBold", INK, right=RIGHT - 16.5)
 
