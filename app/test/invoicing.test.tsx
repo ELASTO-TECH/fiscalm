@@ -1538,6 +1538,37 @@ it("preserves gross-price evidence when saving an existing commerce draft", asyn
   expect((saved.body as {lines: {gross_unit_price?: string}[]}).lines[0].gross_unit_price).toBe("121");
 });
 
+it("changing a draft's VAT keeps the gross prices the customer paid and the delivery date", async () => {
+  const inv = invoicingData();
+  const gross = { ...inv.drafts[0].lines[0], quantity: "1", unit_price: "100.000000000000", gross_unit_price: "121.00" };
+  inv.drafts[0] = { ...inv.drafts[0], delivery_date: "2026-10-05", lines: [gross, { ...gross, description: "Livrare" }] };
+  inv.products = [{ id: "7", company: "NORD", kind: "produs", name: "Cană", code: "", unit: "H87", unit_price: "9.00", currency: "EUR",
+    vat_category: "S", vat_rate: "21", exemption: "", description: "", archived: false, version: 1, can_delete: false }];
+  const { api, f } = await openInvoice("d1", { invoicing: () => json(inv), onPost: () => answer(inv, "Am salvat ciorna.", "d1") });
+  const [first, second] = f.getAllByRole("group", { name: /^Linia / });
+  expect(within(first).getByLabelText("Preț cu TVA")).toHaveValue("121.00");
+  await choose(within(first).getByLabelText("TVA"), "S11");
+  await userEvent.clear(within(second).getByLabelText("Preț cu TVA"));
+  await userEvent.type(within(second).getByLabelText("Preț cu TVA"), "50");
+  await userEvent.clear(within(second).getByLabelText("Produs sau serviciu"));
+  await userEvent.type(within(second).getByLabelText("Produs sau serviciu"), "can");
+  await userEvent.click(screen.getByRole("option", { name: /Cană/ })); // priced in EUR: the line keeps its own price
+  await userEvent.click(f.getByRole("button", { name: "Adaugă o linie" }));
+  const third = f.getAllByRole("group", { name: /^Linia / })[2];
+  await userEvent.type(within(third).getByLabelText("Produs sau serviciu"), "Ambalaj");
+  await userEvent.type(within(third).getByLabelText("Preț cu TVA"), "30");
+  await userEvent.click(f.getByRole("button", { name: "Salvează ciorna" }));
+  await waitFor(() => expect(api.posts()).toHaveLength(1));
+  expect(api.posts()[0].body).toMatchObject({ delivery_date: "2026-10-05", lines: [
+    { vat_category: "S", vat_rate: "11", unit_price: "121.00", gross_unit_price: "121.00" },
+    { description: "Cană", unit_price: "50", gross_unit_price: "50", product_id: "7" },
+    { description: "Ambalaj", vat_rate: "21", unit_price: "30", gross_unit_price: "30" }] });
+  await userEvent.click(within(first).getByRole("button", { name: "Produse" }));
+  await userEvent.click(screen.getByRole("option", { name: "Produs nou" }));
+  // A product's price is net: one started from a line priced with VAT asks for it instead of reading the line's.
+  expect(within(await screen.findByRole("dialog", { name: "Produs nou" })).getByLabelText("Preț unitar")).toHaveValue("");
+});
+
 describe("Serii de facturi", () => {
   /** Two series: DEMO, the default, with issued invoices; FREE, used by nothing. */
   const twoSeries = (): Invoicing => ({ ...invoicingData(), series: [

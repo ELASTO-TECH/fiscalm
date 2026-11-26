@@ -25,19 +25,20 @@ export const vatLabel = (inv: Pick<Invoicing, "vat">, p: Pick<Product, "vat_cate
 export const priceOf = (inv: Pick<Invoicing, "units">, p: Product) => `${lei(p.unit_price)} ${curOf(p.currency)} / ${unitOf(inv, p.unit)}`;
 
 /** A line filled from a product: its name, unit and VAT, and its price only in the invoice's own currency (never
- * converted); `product_id` links the line, whose values stay its own to edit. */
+ * converted), which replaces a price with VAT; `product_id` links the line, whose values stay its own to edit. */
 export function lineFrom(p: Product, line: InvoiceLine, currency: string): InvoiceLine {
   const next: InvoiceLine = { ...line, description: p.name, unit: p.unit, vat_category: p.vat_category, vat_rate: p.vat_rate,
     exemption: p.exemption, product_id: p.id, ...(p.currency === currency ? { unit_price: p.unit_price } : {}) };
-  delete next.gross_unit_price;
+  if (p.currency === currency) delete next.gross_unit_price;
   return next;
 }
 
-/** A blank product, or one started from an invoice line (its name, unit, price and VAT) in the invoice's currency. */
+/** A blank product, or one started from an invoice line (its name, unit, price and VAT) in the invoice's currency. A line
+ * priced with VAT leaves the price blank: a product's price is net, and the person types it. */
 export function productFrom(inv: Invoicing, line?: InvoiceLine, currency = "RON"): ProductFields {
   const c = inv.vat.choices.find((x) => x.key === inv.vat.default) ?? inv.vat.choices[0];
   return { kind: "produs", name: line?.description.trim() ?? "", code: "", unit: line?.unit || inv.units[0]?.code || "H87",
-    unit_price: line?.unit_price.trim() ?? "", currency, vat_category: line?.vat_category ?? c.category, vat_rate: line?.vat_rate ?? c.rate,
+    unit_price: line?.gross_unit_price === undefined ? line?.unit_price.trim() ?? "" : "", currency, vat_category: line?.vat_category ?? c.category, vat_rate: line?.vat_rate ?? c.rate,
     exemption: line?.exemption ?? c.exemption, description: "" };
 }
 
