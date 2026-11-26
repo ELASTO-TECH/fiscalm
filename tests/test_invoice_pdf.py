@@ -367,8 +367,8 @@ def test_all_runs_within_columns(setup_invoice, monkeypatch):
         if value and (set(value) == {"1"} or value.startswith("Societatea")):
             # Description and party/header names have distinct left anchors.
             # The seller's name at the top, the two party cards (seller, client) and the footer's name.
-            edges = {(45, 12.75): 315, (45, 10): 305, (58.5, 9.75): 213.5, (58.5, 7.5): 213.5, (251, 9.75): 406}
-            edge = 225 if x == 73 else 425 if y == 27 else edges.get((x, size), 406 if x == 251 else 550)
+            edges = {(45, 12.75): 315, (45, 10): 305, (58.5, 9.75): 206, (58.5, 7.5): 206, (243.5, 9.75): 391}
+            edge = 225 if x == 73 else 425 if y == 27 else edges.get((x, size), 391 if x == 243.5 else 550)
             assert end <= edge + 0.001, (value, x, end, edge)
         drawn.append(value)
         return original(self, value, x, y, size, weight, fill, right, width, tracking)

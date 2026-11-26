@@ -215,7 +215,7 @@ class _InvoicePDF:
 
     def parties(self) -> None:
         """Furnizor, Client and the dates in three bordered cards; a card too tall for the page continues on the next."""
-        pad, gap, dates = 13.5, 10.5, 120
+        pad, gap, dates = 13.5, 10.5, 135  # dates: room for "Data încasării avansului" on one row
         party = (WIDTH - dates - 2 * gap) / 2
         lefts = [LEFT, LEFT + party + gap, RIGHT - dates]
         widths = [party, party, dates]
