@@ -135,6 +135,12 @@ _WIDE = "Data".ljust(13) + "Descriere".ljust(94) + "Debit" + "Credit".rjust(18) 
             "1,000.00",
             None,
         ),
+        (  # 10.00 + 20.00 against 30.00: either side gives the totals, so neither reading is proven
+            [("13/01/2020", "Incasare", "10.00", 124), ("", "Incasare", "20.00", 124), ("", "Plata", "30.00", 147)],
+            ("30.00", "30.00"),
+            "1,000.00",
+            None,
+        ),
     ],
 )
 def test_older_bt_lines_of_another_width_are_read_by_the_accounts_own_totals(moves, totals, final, directions):
@@ -150,6 +156,8 @@ def test_older_bt_lines_of_another_width_are_read_by_the_accounts_own_totals(mov
     ]
     for day, title, amount, end in moves:
         lines.append(_at(f" {day or ' ' * 10}       {title}", amount, end))
+    if len(moves) == 2:  # the day's own totals too, as daily statements print them
+        lines.append(_at(_at(" 13/01/2020       RULAJ ZI", totals[0], 124), totals[1], 147))
     lines.append(_at(_at(" 13/01/2020       RULAJ TOTAL CONT", totals[0], 124), totals[1], 147))
     lines.append(_at("                  SOLD FINAL CONT", final, 147))
     (account,) = statements.parse_text("\n".join(lines) + "\n", "NORD").accounts
