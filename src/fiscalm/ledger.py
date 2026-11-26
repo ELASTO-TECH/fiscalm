@@ -1418,11 +1418,15 @@ class Ledger:
             args.append(company)
         return self.db.execute(q + " ORDER BY company, issue_date, item_id", args).fetchall()
 
-    def set_credit_reference(self, message_id: str, path: str, reference: str, day: str) -> None:
+    def set_credit_reference(self, row, reference: str, day: str) -> None:
+        """The reference read again from a credit note's archive, only while the row is still what was read and no
+        person has answered which invoice the note cancels."""
         with self.tx() as db:
             db.execute(
-                "UPDATE efactura SET billing_ref=?,billing_date=? WHERE message_id=? AND raw_path=? AND billing_ref IS NULL AND status='credit'",
-                (reference, day, message_id, path),
+                "UPDATE efactura SET billing_ref=?,billing_date=? WHERE message_id=? AND raw_path=? "
+                "AND billing_ref IS ? AND billing_date=? AND status='credit' "
+                "AND NOT EXISTS (SELECT 1 FROM meta WHERE key='credit_pick:'||efactura.message_id)",
+                (reference, day, row["message_id"], row["raw_path"], row["billing_ref"], row["billing_date"]),
             )
 
     def withdraw_credited_payment(self, message_id: str, item_id: str) -> bool:
