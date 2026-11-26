@@ -74,8 +74,8 @@ def set_not_mailed(ledger: Ledger, company: str, partner: str, on: bool) -> str:
 
 
 def pending_docs(ledger: Ledger, company: str, month: str, *, left_out: bool = False):
-    """Unsent docs for company up to `month` (late receipts from earlier months ride along). An upload waits until a
-    person names the card payment it is the bon of (`held_upload`); a partner's documents ticked "Nu trimite
+    """Unsent docs for company up to `month` (late receipts from earlier months ride along). An upload waits until it is
+    read or a person names the card payment it is the bon of (`held_upload`); a partner's documents ticked "Nu trimite
     contabilului" stay out (`left_out=True` lists those instead)."""
     held, docs = not_mailed(ledger, company), ledger.documents(company=company, up_to_month=month, unsent_only=True)
     named = ledger.linked_receipts(company, docs)
@@ -92,9 +92,11 @@ def pending_docs(ledger: Ledger, company: str, month: str, *, left_out: bool = F
 
 
 def held_upload(d, named: set[str]) -> bool:
-    """An uploaded file stays out of the accountant's pack until a person links it to its card payment
-    (links.receipt): anyone with an upload link can send one, so the bytes alone prove nothing."""
-    return (d["source"] or "").startswith("upload:") and d["sha"] not in named
+    """An uploaded file stays out of the accountant's pack until its date, amount and currency are known: read from
+    it for its own firm (receipt_header) or taken from the card payment a person linked it to (links.receipt). The
+    bytes alone, a photo nobody could read, prove nothing (maintainer decision, #44, 2026-11-25)."""
+    unread = not (d["doc_date"] and d["amount"] and d["currency"])
+    return (d["source"] or "").startswith("upload:") and d["sha"] not in named and unread
 
 
 def ready(ledger: Ledger, company: str, month: str) -> bool:

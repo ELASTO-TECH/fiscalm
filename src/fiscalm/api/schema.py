@@ -192,8 +192,9 @@ def schemas() -> dict:
         "sent": BOOL,
         "held": {
             **BOOL,
-            "description": "An uploaded file no card payment names yet: it stays out of the accountant's pack until a "
-            "person uploads it from that payment's sheet (pack.held_upload).",
+            "description": "An uploaded file whose date, amount and currency are not known yet: it stays out of the "
+            "accountant's pack until they are read from it or a person uploads it from its card payment's sheet "
+            "(pack.held_upload).",
         },
         "files": array(obj(strings("id", "type"))),
         "mail": {"anyOf": [obj({**strings("sender", "subject"), **nullable("date", "number")}), {"type": "null"}]},

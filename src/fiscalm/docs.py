@@ -169,8 +169,8 @@ def add_receipt(
     if amount and currency and doc_date:
         dup = ledger.db.execute(
             "SELECT path, sent_at FROM documents WHERE company=? AND amount=? AND currency=? AND doc_date=? "
-            "AND kind='receipt'",
-            (co.key, amount, currency, doc_date),
+            "AND kind='receipt' AND sha!=?",  # an upload of these same bytes is taken over below, not a duplicate
+            (co.key, amount, currency, doc_date, digest),
         ).fetchone()
         if dup:
             return {"status": "duplicate", "sha": digest, "same_as": dup["path"], "sent_at": dup["sent_at"]}

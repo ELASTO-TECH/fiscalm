@@ -85,6 +85,7 @@ def reading(*, fail=False, **fields):
         "total": "12.10",
         "currency": "EUR",
         "card_last4": "",
+        "payment": "",
         "confidence": "high",
     } | fields
 

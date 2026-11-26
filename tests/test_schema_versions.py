@@ -38,7 +38,7 @@ def test_fresh_schema_matches_dev_before_migrations(ledger):
         map(
             list,
             ledger.db.execute(
-                "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name NOT IN ('passkeys','bank_account_offers','auth_failure_window','auth_limits','setup_links','recovery_codes','auth_events','bank_auth_owners','sessions','auth_tickets','history_documents','archive','partner_settlement_formats','firms','firm_accounts','firm_cards','card_owners','firm_aliases','receipt_uploads') ORDER BY type,name"
+                "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name NOT IN ('passkeys','bank_account_offers','auth_failure_window','auth_limits','setup_links','recovery_codes','auth_events','bank_auth_owners','sessions','auth_tickets','history_documents','receipt_headers','archive','partner_settlement_formats','firms','firm_accounts','firm_cards','card_owners','firm_aliases','receipt_uploads') ORDER BY type,name"
             ),
         )
     )

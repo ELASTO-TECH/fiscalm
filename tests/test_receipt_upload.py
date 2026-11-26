@@ -10,7 +10,19 @@ from decimal import Decimal
 import pytest
 from test_api import _req, quiet, server as server, world as world  # noqa: F401
 
-from fiscalm import ai, backup, companies, docs, links, pack, recon, transactions
+from fiscalm import (
+    ai,
+    ai_extract,
+    backup,
+    companies,
+    docs,
+    integrations,
+    links,
+    pack,
+    receipt_header,
+    recon,
+    transactions,
+)
 from fiscalm.api import (
     actions,
     lists,
@@ -995,22 +1007,22 @@ def test_two_connections_naming_one_bon_for_two_debits_have_one_winner(ledger):
     ],
 )
 def test_all_firms_assignment(ledger, home, monkeypatch, text, expected):
-
     token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
-    sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
-    monkeypatch.setattr(upload_assignment, "document_text", lambda *args: text)
+    pdf = b"%PDF-example"
+    sha = intake.accept(ledger, token, [("pdf", pdf)])[0]["sha"]
+    monkeypatch.setattr(invoices, "pdf_text", lambda data: text)
     upload_assignment.process_pending(ledger)
     doc = ledger.document(sha)
     assert doc["company"] == (expected or "ALL")
     if expected:
         assert "/NORD/documents/inbox/" in doc["path"]
         assert not upload_assignment.questions(ledger)
-        assert api.read_doc(ledger, "NORD", sha)[1] == JPEG
+        assert api.read_doc(ledger, "NORD", sha)[1] == pdf
     else:
         question = upload_assignment.questions(ledger)[0]
         assert question["key"] == sha
         assert set(question["companies"]) == {"NORD", "STUDIO9"}
-        assert upload_assignment.pending_file(ledger, sha)[1] == JPEG
+        assert upload_assignment.pending_file(ledger, sha)[1] == pdf
         opened = lists.detail(ledger, "ALL", {"kind": "mail", "id": sha})["state"]
         assert opened["co"] == "NORD" and opened["to_check"][0]["key"] == sha
         result = actions.act("upload-assign", "NORD", {"key": sha, "who": "STUDIO9"})
@@ -1019,7 +1031,7 @@ def test_all_firms_assignment(ledger, home, monkeypatch, text, expected):
             lists.detail(ledger, "ALL", {"kind": "mail", "id": sha})
         assert gone.value.status == 404
         assert ledger.document(sha)["company"] == "STUDIO9"
-        assert api.read_doc(ledger, "STUDIO9", sha)[1] == JPEG
+        assert api.read_doc(ledger, "STUDIO9", sha)[1] == pdf
         assert not upload_assignment.assign(ledger, sha, "NORD")
         assert not upload_assignment.pending_file(ledger, sha)
 
@@ -1069,34 +1081,272 @@ def test_staged_upload_in_backup(ledger, home):
         assert stored.read(matches[0]) == JPEG
 
 
-@pytest.mark.parametrize("ext", ["pdf", "jpg"])
-def test_shared_upload_reading(ledger, monkeypatch, ext):
-
-    token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
-    data = b"%PDF-example" if ext == "pdf" else JPEG
-    sha = intake.accept(ledger, token, [(ext, data)])[0]["sha"]
-    text = "Buyer: Atelier Nord SRL"
-    monkeypatch.setattr(invoices, "pdf_text", lambda data: text)
-    monkeypatch.setattr(ai, "available", lambda L: True)
-
-    def ask(*args, **kwargs):
-        assert kwargs["image"] == ("image/jpeg", JPEG)
-        return {"text": text}
-
-    monkeypatch.setattr(ai, "ask_json", ask)
-    upload_assignment.process_pending(ledger)
-    assert ledger.document(sha)["company"] == "NORD"
-
-
 def test_shared_upload_disk_refusal_waits(ledger, monkeypatch):
     token = upload_links.create(ledger, "ALL", "Phone")["path"][3:]
     sha = intake.accept(ledger, token, [("jpg", JPEG)])[0]["sha"]
-    monkeypatch.setattr(upload_assignment, "document_text", lambda *args: "Buyer: Atelier Nord SRL")
+    monkeypatch.setattr(upload_assignment, "owner", lambda *args: "NORD")
 
     def refuse(*args):
         raise intake.Refused(507)
 
     monkeypatch.setattr(upload_assignment, "assign", refuse)
     upload_assignment.process_pending(ledger)
-    assert ledger.document(sha)["company"] == "ALL"
-    assert upload_assignment.questions(ledger)[0]["key"] == sha
+    assert (ledger.document(sha)["company"], ledger.document(sha)["issues"]) == ("ALL", '["to-check"]')  # retried
+
+
+def reading(ledger, monkeypatch, fail=False, **fields):
+    """The install's AI reads every upload as this receipt (ai_extract.SCHEMA); returns the pictures it was sent."""
+    integrations.add(ledger, "ai", "Local", {"provider": "openai", "base_url": "http://127.0.0.1:1/v1", "model": "t"})
+    answer = {
+        "doc_type": "receipt",
+        "buyer_name": "",
+        "buyer_tax_id": "",
+        "seller_name": "Benzinaria  Exemplu",
+        "seller_tax_id": "RO22222222",
+        "number": "0042",
+        "issue_date": "2026-10-06",
+        "total": "86.40",
+        "currency": "RON",
+        "card_last4": "1234",
+        "payment": "card",
+        "confidence": "high",
+    } | fields
+    sent = []
+
+    def ask(L, system, prompt, schema, **kw):
+        sent.append(kw["image"])
+        if fail:
+            raise ai.AIError("no answer")
+        return answer
+
+    monkeypatch.setattr(ai, "ask_json", ask)
+    return sent
+
+
+def uploaded(ledger, company="NORD", data=JPEG):
+    token = upload_links.create(ledger, company, "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("jpg", data)])[0]["sha"]
+    with ledger.tx() as db:  # uploaded the next day: the receipt's own date is what the pack and matchers use
+        db.execute("UPDATE receipt_uploads SET uploaded_at='2026-10-07T09:00:00' WHERE sha=?", (sha,))
+    return sha
+
+
+@pytest.mark.parametrize("paid", ["card", "cash"])
+def test_a_read_upload_is_filled_matched_and_packed(ledger, monkeypatch, paid):
+    sent = reading(ledger, monkeypatch, **({} if paid == "card" else {"card_last4": "", "payment": "cash"}))
+    sha = uploaded(ledger)
+    assert pack.held_upload(ledger.document(sha), set())
+    receipt_header.extract_pending(ledger)
+    receipt_header.extract_pending(ledger)  # read once: a second tick asks nothing
+    assert sent == [("image/jpeg", JPEG)]
+    doc = ledger.document(sha)
+    assert (doc["vendor"], doc["doc_date"], doc["month"]) == (
+        "Benzinaria Exemplu",
+        "2026-10-06",
+        "2026-10",
+    )
+    assert (doc["amount"], doc["currency"], doc["card_last4"]) == (
+        ("86.40", "RON", "1234") if paid == "card" else ("86.40", "RON", None)
+    )
+    assert [d["sha"] for d in pack.pending_docs(ledger, "NORD", "2026-10")] == [sha]
+    said = explanation(ledger, card_debit(ledger)) or {}  # a debit of the same day and amount
+    assert (said.get("kind") == "receipt" and said.get("document") == sha) is (paid == "card")  # cash explains no debit
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"confidence": "low"},
+        {"buyer_tax_id": "RO33333333"},  # billed to the other firm
+        {"buyer_tax_id": "RO44444444"},  # billed to a company that is none of the firms
+        {"issue_date": "2026-10-08"},  # after its upload
+        {"issue_date": "2025-09-30"},  # more than a year before it
+        {"total": ""},
+        {"currency": "XYZ"},
+        {"doc_type": "proforma"},
+        {"buyer_name": "Alt Client SRL"},  # a named buyer that is none of the firms
+        {"seller_tax_id": "RO11111111"},  # the firm's own sale
+        {"fail": True},  # no answer: asked again, TRIES times in all
+    ],
+)
+def test_a_doubtful_reading_fills_nothing_and_is_not_asked_again(ledger, monkeypatch, fields):
+    sent = reading(ledger, monkeypatch, **fields)
+    sha = uploaded(ledger)
+    for _ in range(receipt_header.TRIES + 1):
+        receipt_header.extract_pending(ledger)
+    doc = ledger.document(sha)
+    assert len(sent) == (receipt_header.TRIES if "fail" in fields else 1)
+    assert doc["amount"] is None and doc["doc_date"] is None
+    assert pack.pending_docs(ledger, "NORD", "2026-11") == [] and recon._receipts(ledger, "NORD") == []
+
+
+def test_no_ai_integration_reads_nothing(ledger, monkeypatch):
+    monkeypatch.setattr(ai, "ask_json", lambda *a, **kw: pytest.fail("unconfigured AI called"))
+    uploaded(ledger)
+    receipt_header.extract_pending(ledger)
+    assert not ledger.db.execute("SELECT 1 FROM receipt_headers").fetchone()
+
+
+@pytest.mark.parametrize(
+    "fields, expected",
+    [
+        ({"buyer_tax_id": "RO11111111"}, "NORD"),
+        ({"buyer_tax_id": "RO33333333"}, "STUDIO9"),
+        ({"buyer_tax_id": ""}, "ALL"),
+        ({"buyer_tax_id": "RO11111111", "confidence": "low"}, "ALL"),
+    ],
+)
+def test_an_install_wide_upload_goes_to_the_firm_its_reading_names(ledger, monkeypatch, fields, expected):
+    reading(ledger, monkeypatch, **fields)
+    sha = uploaded(ledger, "ALL")
+    upload_assignment.process_pending(ledger)  # an upload waits for its reading before a person is asked
+    assert ledger.document(sha)["issues"] == '["to-check"]' and upload_assignment.questions(ledger) == []
+    receipt_header.extract_pending(ledger)
+    upload_assignment.process_pending(ledger)
+    doc = ledger.document(sha)
+    assert doc["company"] == expected
+    assert doc["amount"] == ("86.40" if expected != "ALL" else None)
+    assert [q["key"] for q in upload_assignment.questions(ledger)] == ([sha] if expected == "ALL" else [])
+
+
+def test_two_connections_reading_one_upload_fill_it_once(ledger, monkeypatch):
+    sha = uploaded(ledger)
+    found = {"vendor": "Shop", "doc_date": "2026-10-06", "amount": "86.40", "currency": "RON", "card_last4": None}
+
+    def attempt(_):
+        L = Ledger(ledger.path)
+        try:
+            return L.save_receipt_header(sha, "{}", 0), L.fill_upload(sha, "NORD", found)
+        finally:
+            L.close()
+
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(attempt, range(2)))
+    assert sorted(r[0] for r in results) == [False, True] and sorted(r[1] for r in results) == [False, True]
+    assert not ledger.fill_upload(sha, "STUDIO9", found)
+
+
+@pytest.mark.parametrize("company", ["ALL", "STUDIO9"])
+@pytest.mark.parametrize(
+    "printed",
+    [
+        "Buyer: Atelier Nord SRL\nCUI: 11111111",  # another firm is the buyer
+        "Seller: Studio 9 SRL\nCUI: 33333333",  # the read buyer is the seller
+        "Ship to: Studio 9 SRL\nCUI: 33333333",  # the read buyer is only a delivery address
+    ],
+)
+def test_a_reading_the_pdf_contradicts_fills_and_assigns_nothing(ledger, monkeypatch, printed, company):
+    reading(ledger, monkeypatch)
+    monkeypatch.setattr(invoices, "pdf_text", lambda data: printed)
+    said = ai_extract.Extraction(
+        "receipt", "STUDIO9", "", "", "RO33333333", "", "", "", "2026-10-06", "86.40", "RON", "", True
+    )
+    monkeypatch.setattr(ai_extract, "extract", lambda *a, **kw: said)  # the AI swapped the parties
+    token = upload_links.create(ledger, company, "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("pdf", b"%PDF-example")])[0]["sha"]
+    with ledger.tx() as db:
+        db.execute("UPDATE receipt_uploads SET uploaded_at='2026-10-07T09:00:00' WHERE sha=?", (sha,))
+    receipt_header.extract_pending(ledger)
+    upload_assignment.process_pending(ledger)
+    doc = ledger.document(sha)
+    assert (doc["company"], doc["amount"]) == (company, None)
+    assert doc["issues"] == ('["buyer-unclear"]' if company == "ALL" else '["to-check"]')
+
+
+def test_an_upload_a_person_was_asked_about_is_assigned_once_read(ledger, monkeypatch):
+    sha = uploaded(ledger, "ALL")
+    upload_assignment.process_pending(ledger)  # no AI yet: a photo names no buyer, a person is asked
+    assert ledger.document(sha)["issues"] == '["buyer-unclear"]'
+    reading(ledger, monkeypatch, buyer_tax_id="RO11111111")
+    receipt_header.extract_pending(ledger)
+    upload_assignment.process_pending(ledger)
+    assert (ledger.document(sha)["company"], ledger.document(sha)["amount"]) == ("NORD", "86.40")
+
+
+def test_a_stored_reading_fills_its_upload_after_a_stopped_tick_without_asking_again(ledger, monkeypatch):
+    sent = reading(ledger, monkeypatch)
+    sha = uploaded(ledger)
+    monkeypatch.setattr(receipt_header, "apply", lambda L, sha: False)  # the tick stops after saving the reading
+    receipt_header.extract_pending(ledger)
+    monkeypatch.undo()
+    monkeypatch.setattr(ai, "ask_json", lambda *a, **kw: pytest.fail("asked again"))
+    receipt_header.extract_pending(ledger)
+    assert len(sent) == 1 and ledger.document(sha)["amount"] == "86.40"
+
+
+def test_a_scanned_pdf_is_read_from_its_first_page(ledger, monkeypatch):
+    sent = reading(ledger, monkeypatch)
+    monkeypatch.setattr(invoices, "pdf_text", lambda data: "")
+    monkeypatch.setattr(receipt_header, "first_page_png", lambda data, dpi: b"page")
+    token = upload_links.create(ledger, "NORD", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("pdf", b"%PDF-scan")])[0]["sha"]
+    receipt_header.extract_pending(ledger)
+    assert sent == [("image/png", b"page")] and ledger.document(sha)["amount"] == "86.40"
+
+
+@pytest.mark.parametrize(
+    "said, text, kept",
+    [
+        ("card", "TOTAL 86.40\nNUMERAR 86.40", "cash"),  # the text decides
+        ("", "CARD ****1234", "card"),
+        ("card", "CARD 50.00\nNUMERAR 36.40", "mixed"),  # both printed: part card, part cash
+        ("card", "TOTAL 86.40", ""),  # printed nowhere
+        ("cash", "", "cash"),  # a photo: no text to check against
+        ("mixed", "", "mixed"),
+    ],
+)
+def test_how_a_receipt_was_paid_stands_in_its_text(said, text, kept):
+    raw = {k: "" for k in ai_extract.SCHEMA["properties"]} | {"doc_type": "receipt", "payment": said}
+    assert ai_extract.check(raw, {}, text).payment == kept
+
+
+def test_a_receipt_of_another_card_explains_no_debit(ledger, monkeypatch):
+    reading(ledger, monkeypatch, card_last4="9876")
+    sha = uploaded(ledger)
+    receipt_header.extract_pending(ledger)
+    assert ledger.document(sha)["card_last4"] == "9876"
+    assert (explanation(ledger, card_debit(ledger)) or {}).get("document") != sha
+
+
+@pytest.mark.parametrize("confidence", ["high", "low"])
+def test_a_trusted_import_of_an_upload_read_as_cash_is_matched_again(ledger, monkeypatch, home, confidence):
+    reading(ledger, monkeypatch, payment="cash", card_last4="", confidence=confidence)
+    sha = uploaded(ledger)
+    receipt_header.extract_pending(ledger)
+    (home / "mailed.jpg").write_bytes(JPEG)
+    monkeypatch.setattr(docs, "inspect", lambda path: docs.Evidence(str(path), mentions=["NORD"]))
+    took = docs.add_receipt(
+        ledger, "NORD", home / "mailed.jpg", source="mail", doc_date="2026-10-06", amount="86.40", currency="RON"
+    )
+    assert took["status"] != "duplicate" and [d["sha"] for d in recon._receipts(ledger, "NORD")] == [sha]
+
+
+@pytest.mark.parametrize(
+    "text, total, currency, filled",
+    [
+        ("Bon fiscal\nTOTAL 86.40 RON", "86.40", "RON", True),
+        ("Bon fiscal\nSUBTOTAL 80.00 RON\nTOTAL 95.20 RON", "80.00", "EUR", False),  # a subtotal, another currency
+        ("FACTURA PROFORMA\nTOTAL 86.40 RON", "86.40", "RON", False),
+        ("FACTURA\nCumpărător: Alt Client SRL\nCUI: 44444444\nTOTAL 86.40 RON", "86.40", "RON", False),
+        ("FACTURA\nBuyer: Outside Example Ltd\nTOTAL 86.40 RON", "86.40", "RON", False),  # a buyer without a tax id
+        ("FACTURA\nBuyer:\nOutside Example Ltd\nTOTAL 86.40 RON", "86.40", "RON", False),  # its name a line below
+        ("RETURN\nTOTAL -86.40 RON", "86.40", "RON", False),  # a refund, whatever its title
+        ("RETURN\nTOTAL\n-86.40 RON", "86.40", "RON", False),  # its amount a line below
+        ("Bon fiscal\nCIF CLIENT: 44444444\nTOTAL 86.40 RON", "86.40", "RON", False),  # an outside buyer's tax id
+        ("CREDIT NOTE\nTOTAL 86.40 RON", "86.40", "RON", False),  # no invoice title, still a credit note
+        ("FACTURA\nIssue date: 2026-09-30\nDue date: 2026-10-06\nTOTAL 86.40 RON", "86.40", "RON", False),
+        ("Bon fiscal\nCARD ****9876\nTOTAL 86.40 RON", "86.40", "RON", True),  # the printed card is kept
+    ],
+)
+def test_a_pdf_fills_only_what_its_own_text_agrees_with(ledger, monkeypatch, text, total, currency, filled):
+    reading(ledger, monkeypatch)
+    monkeypatch.setattr(invoices, "pdf_text", lambda data: text)
+    said = ai_extract.Extraction("receipt", "", "", "", "", "", "", "", "2026-10-06", total, currency, "", True)
+    monkeypatch.setattr(ai_extract, "extract", lambda *a, **kw: said)
+    token = upload_links.create(ledger, "NORD", "Phone")["path"][3:]
+    sha = intake.accept(ledger, token, [("pdf", b"%PDF-example")])[0]["sha"]
+    with ledger.tx() as db:
+        db.execute("UPDATE receipt_uploads SET uploaded_at='2026-10-07T09:00:00' WHERE sha=?", (sha,))
+    receipt_header.extract_pending(ledger)
+    assert ledger.document(sha)["amount"] == (total if filled else None)
+    assert ledger.document(sha)["card_last4"] == ("9876" if filled and "9876" in text else None)

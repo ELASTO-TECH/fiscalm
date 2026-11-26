@@ -655,7 +655,7 @@ describe("Bonuri", () => {
     const img = within(sheet).getByRole("img", { name: "Document, Hetzner" });
     expect(img).toHaveAttribute("src", `/web/docfile?co=NORD&sha=${d.id}&png=1`);
     expect(img.closest("a")).toHaveAttribute("href", `/web/docfile?co=NORD&sha=${d.id}`);
-    expect(sheet).toHaveTextContent("PlatăCard terminat în 4242");
+    expect(sheet).toHaveTextContent("PlatăCard terminat în 0001");
   });
 
   it("says so when the file is not on the server", async () => {
@@ -674,7 +674,7 @@ describe("Bonuri", () => {
     renderApp({ state: () => json(s) });
     const sheet = await screen.findByRole("dialog", { busy: false });
     expect(sheet).toHaveAccessibleName("Bon din 6 oct, 300,08 lei");
-    expect(sheet).toHaveTextContent("ContabilNu intră în dosarul contabilului până nu este asociat cu plata din Tranzacții");
+    expect(sheet).toHaveTextContent("ContabilNu intră în dosarul contabilului până nu are data și suma");
   });
 
   it("shows an amount not read yet as unknown, never 0,00: in the list and on its sheet", async () => {
