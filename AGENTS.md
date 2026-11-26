@@ -42,8 +42,11 @@ fallbacks and workflows when replacing them; do not preserve installation-specif
    A payment mail settles a received invoice on its own only when the AI reads it as sure proof, the engine finds
    that invoice alone fits it (supplier, exact total and currency, date window) and the mailbox's own provider
    authenticated a payment processor's domain; anything less waits as a Sarcină, and the invoice's later bank debit
-   replaces the mail as proof (maintainer decision, 2026-11-25). A wrong "paid" hides a debt, so any rule that could
-   settle the wrong item must refuse instead.
+   replaces the mail as proof (maintainer decision, 2026-11-25). An uploaded till receipt proves an e-Factura invoice
+   paid at the till (`Ledger.link_bon`) on its own, without a confirmation, when its AI reading passed the engine's
+   checks, shows card or cash, and the two fit only each other: same supplier, exact total and currency, invoice dated
+   within a week after the receipt (maintainer decision, #44, 2026-11-25). A wrong "paid" hides a debt, so any rule
+   that could settle the wrong item must refuse instead.
 3. **One statement transaction settles one item, or exactly the items of one verified settlement report.**
    A debit pays one invoice or payment; a credit collects one issued invoice, or one complete batch.
    A credit collects the one open issued invoice it fits by exact amount: from its client, or, from a bank account

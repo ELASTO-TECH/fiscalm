@@ -1,6 +1,8 @@
+import argparse
 import hashlib
 import io
 import json
+import re
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -8,18 +10,22 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from synthetic_world import _ef
 from test_api import _req, quiet, server as server, world as world  # noqa: F401
+from test_efactura import NORD_CUI, SUPPLIER_IBAN, _fake_anaf, _stored, anaf_zip, msg, ubl
 
 from fiscalm import (
     ai,
     ai_extract,
     backup,
+    cli,
     companies,
     docs,
     integrations,
     links,
     pack,
     receipt_header,
+    receipt_invoice,
     recon,
     transactions,
 )
@@ -34,7 +40,8 @@ from fiscalm.api import (
     v1 as api_v1,
 )
 from fiscalm.bank import statements
-from fiscalm.ledger import Ledger, LinkRefused
+from fiscalm.efactura import inbox as efactura
+from fiscalm.ledger import Ledger, LinkRefused, finance_home
 from fiscalm.mail import invoices
 
 JPEG = b"\xff\xd8\xffexample"
@@ -1096,7 +1103,10 @@ def test_shared_upload_disk_refusal_waits(ledger, monkeypatch):
 
 def reading(ledger, monkeypatch, fail=False, **fields):
     """The install's AI reads every upload as this receipt (ai_extract.SCHEMA); returns the pictures it was sent."""
-    integrations.add(ledger, "ai", "Local", {"provider": "openai", "base_url": "http://127.0.0.1:1/v1", "model": "t"})
+    if not integrations.default(ledger, "ai"):
+        integrations.add(
+            ledger, "ai", "Local", {"provider": "openai", "base_url": "http://127.0.0.1:1/v1", "model": "t"}
+        )
     answer = {
         "doc_type": "receipt",
         "buyer_name": "",
@@ -1123,11 +1133,11 @@ def reading(ledger, monkeypatch, fail=False, **fields):
     return sent
 
 
-def uploaded(ledger, company="NORD", data=JPEG):
+def uploaded(ledger, company="NORD", data=JPEG, day="2026-10-07"):
     token = upload_links.create(ledger, company, "Phone")["path"][3:]
     sha = intake.accept(ledger, token, [("jpg", data)])[0]["sha"]
     with ledger.tx() as db:  # uploaded the next day: the receipt's own date is what the pack and matchers use
-        db.execute("UPDATE receipt_uploads SET uploaded_at='2026-10-07T09:00:00' WHERE sha=?", (sha,))
+        db.execute("UPDATE receipt_uploads SET uploaded_at=? WHERE sha=?", (day + "T09:00:00", sha))
     return sha
 
 
@@ -1291,6 +1301,7 @@ def test_a_scanned_pdf_is_read_from_its_first_page(ledger, monkeypatch):
         ("", "CARD ****1234", "card"),
         ("card", "CARD 50.00\nNUMERAR 36.40", "mixed"),  # both printed: part card, part cash
         ("card", "TOTAL 86.40", ""),  # printed nowhere
+        ("card", "CARD ****1234 DECLINED", ""),  # a refused payment proves nothing
         ("cash", "", "cash"),  # a photo: no text to check against
         ("mixed", "", "mixed"),
     ],
@@ -1350,3 +1361,211 @@ def test_a_pdf_fills_only_what_its_own_text_agrees_with(ledger, monkeypatch, tex
     receipt_header.extract_pending(ledger)
     assert ledger.document(sha)["amount"] == (total if filled else None)
     assert ledger.document(sha)["card_last4"] == ("9876" if filled and "9876" in text else None)
+
+
+def read_receipt(ledger, monkeypatch, data=JPEG, day="2026-10-07", **fields):
+    reading(ledger, monkeypatch, **({"seller_tax_id": "RO7001"} | fields))
+    sha = uploaded(ledger, data=data, day=day)
+    receipt_header.extract_pending(ledger)
+    return sha
+
+
+def shop_invoice(
+    ledger, mid="701", co="NORD", issue="2026-10-08", total="86.40", cui="RO7001", legacy=False, prepaid="", **kw
+):
+    """An invoice stored as sync stores it: its ZIP, the tax id's digits and the full id; `legacy`: the digits only.
+    `prepaid`: paid before the invoice, its total then `total` + `prepaid`."""
+    issues = kw.pop("issues", "[]")
+    _ef(ledger, mid, co, "Benzinaria Exemplu SRL", cui, f"BE {mid}", date.fromisoformat(issue), None, total, **kw)
+    xml = ubl(number=f"BE {mid}", total=total, supplier_cui=cui, issue=issue)
+    if prepaid:
+        inclusive = '<cbc:TaxInclusiveAmount currencyID="RON">{}</cbc:TaxInclusiveAmount>'
+        xml = xml.replace(
+            inclusive.format(total).encode(),
+            (
+                inclusive.format(f"{Decimal(total) + Decimal(prepaid):.2f}")
+                + f'<cbc:PrepaidAmount currencyID="RON">{prepaid}</cbc:PrepaidAmount>'
+            ).encode(),
+        )
+    path = finance_home() / "efactura" / co / f"{mid}.zip"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(anaf_zip(xml, mid))
+    ledger.db.execute(
+        "UPDATE efactura SET issues=?, supplier_cui=?, supplier_tax_id=?, raw_path=? WHERE message_id=?",
+        (issues, re.sub(r"\D", "", cui), None if legacy else cui, str(path), mid),
+    )
+    ledger.db.commit()
+
+
+@pytest.mark.parametrize(
+    "fields, paid",
+    [
+        ({"payment": "card"}, True),
+        ({"payment": "cash"}, True),
+        ({"payment": ""}, False),
+        ({"payment": "card", "doc_type": "invoice"}, False),  # an uploaded invoice never proves its own payment
+    ],
+)
+def test_a_read_receipt_finds_the_one_invoice_of_its_purchase(ledger, monkeypatch, fields, paid):
+    sha = read_receipt(ledger, monkeypatch, **fields)
+    shop_invoice(ledger)
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 1
+    invoice = ledger.efactura("701")
+    assert ledger.document(sha)["efactura_id"] == "701"
+    assert (invoice["status"], invoice["paid_tx"]) == (("paid", f"bon:{sha}") if paid else ("open", None))
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 0
+    # a bon's purchase is matched once: a card one waits for its debit (settle_bon_card), a cash one for none, and
+    # neither is offered to the amount matcher again
+    seeking = [r["message_id"] for r in efactura.bon_paid(ledger, "NORD")]
+    assert seeking == (["701"] if paid and fields["payment"] == "card" else [])
+    assert [d["sha"] for d in recon._receipts(ledger, "NORD")] == ([] if paid or fields["payment"] == "cash" else [sha])
+
+
+@pytest.mark.parametrize(
+    "invoices",
+    [
+        [{"total": "86.41"}],
+        [{"cui": "RO7002"}],  # another shop
+        [{"issue": "2026-10-05"}],  # before the purchase
+        [{"issue": "2026-10-14"}],  # more than a week after it
+        [{"co": "STUDIO9"}],
+        [{"cui": "DE7001"}],  # a foreign VAT id with the same digits is another supplier
+        [{"issues": '["buyer CUI 99 is not NORD"]'}],  # an invoice with recorded issues
+        [{}, {"mid": "702"}],  # two invoices fit: neither is chosen
+        [{"status": "paid", "paid_note": "user: paid"}, {"mid": "702"}],  # a rival marked paid still counts
+        [{"legacy": True}],  # a row kept with its tax id's digits only never proves the supplier
+        [{"legacy": True, "cui": "DE7001"}, {"mid": "702"}],  # and it may be this purchase: a rival
+        [{"total": "0.00"}, {"mid": "702"}],  # the purchase's own invoice, its payable zeroed by the till payment
+    ],
+)
+def test_a_receipt_that_fits_no_single_invoice_decides_nothing(ledger, monkeypatch, invoices):
+    sha = read_receipt(ledger, monkeypatch)
+    for kw in invoices:
+        shop_invoice(ledger, **kw)
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 0
+    assert ledger.document(sha)["efactura_id"] is None
+    assert all(r["paid_tx"] is None for r in ledger.efactura_rows())
+
+
+@pytest.mark.parametrize(
+    "mine, others, paid",
+    [
+        ({"prepaid": "86.40"}, [], False),  # a deposit at the till: the rest of the invoice is still due
+        ({}, [{"mid": "702", "total": "0.00", "currency": "EUR"}], True),  # zero due in another currency: no rival
+    ],
+)
+def test_a_receipt_proves_its_invoice_paid_only_for_the_whole_total(ledger, monkeypatch, mine, others, paid):
+    sha = read_receipt(ledger, monkeypatch)
+    for kw in [mine, *others]:
+        shop_invoice(ledger, **kw)
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 1 and ledger.document(sha)["efactura_id"] == "701"
+    assert ledger.efactura("701")["status"] == ("paid" if paid else "open")
+
+
+def test_an_invoice_two_receipts_fit_is_left_alone(ledger, monkeypatch):
+    read_receipt(ledger, monkeypatch)
+    read_receipt(ledger, monkeypatch, data=JPEG + b"2")
+    shop_invoice(ledger)
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 0
+    assert ledger.efactura("701")["status"] == "open"
+
+
+def test_two_connections_associating_one_purchase_have_one_winner(ledger, monkeypatch):
+    sha = read_receipt(ledger, monkeypatch)
+    shop_invoice(ledger)
+
+    def attempt(_):
+        L = Ledger(ledger.path)
+        try:
+            return receipt_invoice.associate(L, date(2026, 10, 20))
+        finally:
+            L.close()
+
+    with ThreadPoolExecutor(2) as pool:
+        assert sorted(pool.map(attempt, range(2))) == [0, 1]
+    assert ledger.efactura("701")["paid_tx"] == f"bon:{sha}"
+
+
+@pytest.mark.parametrize("fields", [{"confidence": "low"}, {"fail": True}])
+def test_a_receipt_a_person_named_for_its_debit_finds_no_invoice(ledger, monkeypatch, fields):
+    sha = read_receipt(ledger, monkeypatch, **fields)
+    links.receipt(ledger, "NORD", card_debit(ledger), sha)  # it takes the debit's amount and day
+    shop_invoice(ledger)
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 0 and ledger.efactura("701")["status"] == "open"
+
+
+def test_a_refused_pair_leaves_the_next_one_decided(ledger, monkeypatch):
+    first = read_receipt(ledger, monkeypatch)
+    second = read_receipt(ledger, monkeypatch, data=JPEG + b"2", total="12.00")
+    shop_invoice(ledger)
+    shop_invoice(ledger, mid="702", total="12.00")
+    with ledger.tx() as db:  # the first receipt's proof is already used
+        db.execute("INSERT INTO settled_tx VALUES(?, 'efactura 999', '2026-10-09')", (f"bon:{first}",))
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 1
+    assert (ledger.efactura("701")["status"], ledger.efactura("702")["paid_tx"]) == ("open", f"bon:{second}")
+
+
+def test_a_trusted_import_never_moves_a_receipt_that_proved_an_invoice(ledger, monkeypatch, home):
+    sha = read_receipt(ledger, monkeypatch)
+    shop_invoice(ledger)
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 1
+    (home / "again.jpg").write_bytes(JPEG)
+    monkeypatch.setattr(docs, "inspect", lambda path: docs.Evidence(str(path), mentions=["STUDIO9"]))
+    docs.add_receipt(ledger, "STUDIO9", home / "again.jpg", month="2026-10", source="manual", amount="86.40")
+    assert (ledger.document(sha)["company"], ledger.document(sha)["efactura_id"]) == ("NORD", "701")
+
+
+@pytest.mark.parametrize("supplier", ["RO99999999", "DE99999999"])  # the same digits abroad are another supplier
+def test_a_purchase_paid_at_the_till_never_reaches_the_autopay_rule(ledger, home, sec, monkeypatch, supplier):
+    _stored(ledger, monkeypatch, **{"3001": ubl(issue="2026-09-15", number="RMBU 1", total="100.00")})
+    ledger.mark_efactura_paid("3001", "statement", "supplier-account-proof", to_iban=SUPPLIER_IBAN)
+    efactura.set_autopay(ledger, "3001")
+    paid = {"seller_tax_id": "RO99999999", "issue_date": "2026-10-15", "total": "250.00", "card_last4": ""}
+    sha = read_receipt(ledger, monkeypatch, day="2026-10-16", **paid)
+    blobs = {"3002": anaf_zip(ubl(number="RMBU 2", supplier_cui=supplier))}  # issued 2026-10-20, 250.00
+    _fake_anaf(monkeypatch, {NORD_CUI: [msg(m) for m in blobs]}, blobs)
+    cli.cmd_efactura_sync(argparse.Namespace(json=True), ledger)
+    paid_at_till = (ledger.efactura("3002")["status"], ledger.efactura("3002")["paid_tx"]) == ("paid", f"bon:{sha}")
+    assert paid_at_till is (supplier == "RO99999999")
+
+
+def test_a_history_invoice_of_the_same_purchase_is_a_rival(ledger, monkeypatch):
+    sha = read_receipt(ledger, monkeypatch)
+    shop_invoice(ledger)
+    ledger.db.execute(
+        "INSERT INTO history(company,xml_sha,direction,doc_type,number,issue_date,currency,total,party_cui,"
+        "party_tax_id,raw_path,imported_at) VALUES('NORD','h1','received','invoice','BE 700','2026-10-07','RON',"
+        "'86.40','7001','RO7001','/synthetic.xml','2026-10-08')"
+    )
+    ledger.db.commit()
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 0 and ledger.document(sha)["efactura_id"] is None
+
+
+def test_a_bon_never_takes_a_debit_of_another_card(ledger, monkeypatch):
+    read_receipt(ledger, monkeypatch, card_last4="9999")
+    shop_invoice(ledger)
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 1
+    assert not ledger.settle_bon_card("701", card_debit(ledger))  # the debit is card 1234
+
+
+def test_a_reading_not_yet_applied_stops_nothing(ledger, monkeypatch):
+    reading(ledger, monkeypatch, seller_tax_id="RO7001")
+    sha = uploaded(ledger)
+    monkeypatch.setattr(receipt_header, "apply", lambda L, sha: False)  # saved, the tick stopped before filling it
+    receipt_header.extract_pending(ledger)
+    shop_invoice(ledger)
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 0 and ledger.document(sha)["doc_date"] is None
+
+
+def test_a_bon_s_card_debit_is_its_own_when_the_invoice_comes_a_week_later(ledger, monkeypatch):
+    read_receipt(ledger, monkeypatch)  # a card purchase on 6 Oct
+    shop_invoice(ledger, issue="2026-10-13")  # its invoice, seven days later
+    assert receipt_invoice.associate(ledger, date(2026, 10, 20)) == 1
+    shop_invoice(ledger, mid="702", cui="RO7002", issue="2026-10-06")  # another shop's open invoice, same amount
+    t = statements.Tx(
+        date(2026, 10, 6), "POS", "Plata 1", "debit", Decimal("86.40"), "RON", "", ref="P1", card_last4="1234"
+    )
+    assert card_debit(ledger) == statements.tx_key(t)  # the purchase's card debit, recorded, its card the firm's
+    # the bon's purchase or 702's: it settles neither
+    efactura.match_statement(ledger, statements.Statement("NORD", None, None, [statements.Account("x", "RON", [t])]))
+    assert ledger.efactura("702")["status"] == "open"

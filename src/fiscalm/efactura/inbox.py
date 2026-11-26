@@ -102,7 +102,12 @@ def mail_proved(L: Ledger, company: str) -> list:
 def bon_paid(L: Ledger, company: str) -> list:
     """Invoices paid at the till (a bon linked through Ledger.link_bon) whose card debit, if there was one, hasn't been seen yet."""
     return L.db.execute(
-        f"SELECT * FROM efactura WHERE {BON_PAID} AND company=? AND NOT EXISTS (SELECT 1 FROM settled_tx "
+        f"SELECT *, (SELECT d.card_last4 FROM documents d WHERE d.efactura_id=efactura.message_id "
+        "AND efactura.paid_tx='bon:'||d.sha) AS bon_card, (SELECT d.doc_date FROM documents d "
+        "WHERE d.efactura_id=efactura.message_id AND efactura.paid_tx='bon:'||d.sha) AS bon_day FROM efactura WHERE "
+        f"{BON_PAID} AND company=? AND NOT EXISTS (SELECT 1 FROM receipt_headers h "
+        "WHERE 'bon:'||h.sha=efactura.paid_tx AND json_extract(h.header, '$.payment')='cash') "
+        "AND NOT EXISTS (SELECT 1 FROM settled_tx "
         "WHERE what='card of bon, efactura ' || message_id) ORDER BY message_id",
         (company,),
     ).fetchall()
@@ -498,8 +503,10 @@ def fill_credit_references(L: Ledger) -> None:
             L.set_credit_reference(row["message_id"], row["raw_path"], inv.billing_ref, inv.billing_date)
 
 
-def sync(L: Ledger, now_dt: datetime | None = None) -> dict:
-    """Fetch new received invoices for every company. Read-only toward ANAF; one download per message."""
+def sync(L: Ledger, now_dt: datetime | None = None, first: Callable[[Ledger, date], object] | None = None) -> dict:
+    """Fetch new received invoices for every company. Read-only toward ANAF; one download per message. `first` runs
+    after the downloads and before any statement or autopay settles them (cli: receipt_invoice.associate, so a purchase
+    a read receipt proves paid at the till is decided first)."""
     if anaf.inbox_env() == "test":
         return {"env": "test", "new": [], "errors": [], "warnings": [], "skipped_test": True}
     now_dt = now_dt or datetime.now()
@@ -551,6 +558,8 @@ def sync(L: Ledger, now_dt: datetime | None = None) -> dict:
                 out["errors"].append(f"{key}: {e}")
                 continue
             out["new"].append(store(L, key, m, raw))
+    if first:
+        first(L, now_dt.date())
     out["paid"] = match_recent_statements(L)
     out["autopay"] = autopay_new(L)
     if denied and len(denied) == len(configured):
@@ -773,10 +782,14 @@ def payment_fits(p, t: statements.Tx) -> bool:
 
 
 def _bon_card_fits(r, t: statements.Tx) -> bool:
-    """A bon paid at the till may have been paid in cash: only a card debit near the purchase is its payment."""
-    days = abs((t.date - date.fromisoformat(r["issue_date"])).days)
+    """A bon paid at the till may have been paid in cash: only a card debit near the purchase is its payment. The
+    purchase is the bon's own day when the bon has one (an invoice may follow it by a week), else the invoice's."""
+    day = min(r["issue_date"], r["bon_day"] or r["issue_date"])
+    r = dict(r) | {"issue_date": day}
+    days = abs((t.date - date.fromisoformat(day)).days)
     card = t.card_last4 or re.search(r"\bE?POS\b", f"{t.title} {t.description}".upper())
-    return bool(card) and not t.counterparty_iban and days <= CARD_DAYS and bool(_fits(r, t))
+    other_card = r["bon_card"] and t.card_last4 and r["bon_card"] != t.card_last4  # the bon names another card
+    return bool(card) and not other_card and not t.counterparty_iban and days <= CARD_DAYS and bool(_fits(r, t))
 
 
 def _payment_rival(p, t: statements.Tx) -> bool:

@@ -41,6 +41,7 @@ PAID = {
     "card": re.compile(r"\b(?:CARD|POS|VISA|MASTERCARD|MAESTRO)\b", re.I),
     "cash": re.compile(r"\b(?:NUMERAR|CASH)\b", re.I),
 }
+DECLINED = re.compile(r"\b(?:DECLINED|DENIED|FAILED|RESPINS[AĂ]?|REFUZAT[AĂ]?|ANULAT[AĂ]?|NEAPROBAT[AĂ]?)\b", re.I)
 SCHEMA = {
     "type": "object",
     "required": [
@@ -103,6 +104,7 @@ class Extraction:
     confident: bool
     rejected: tuple[str, ...] = ()  # fields the AI filled that failed their rule: its reading contradicts the document
     payment: str = ""  # "card", "cash" or "mixed" (both printed) when the document says how it was paid, else ""
+    payment_said: str = ""  # the AI's own answer (card, cash or ""): proof of payment needs it to agree
 
 
 def money(whole: str, cents: str) -> Decimal | None:
@@ -202,6 +204,7 @@ def check(raw: dict, firms: dict[str, companies.Company], text: str = "") -> Ext
         confident=s["confidence"] == "high",
         rejected=tuple(rejected),
         payment=_payment(s["payment"], text),
+        payment_said=s["payment"] if s["payment"] in PAID else "",
     )
 
 
@@ -209,6 +212,8 @@ def _payment(answer: str, text: str) -> str:
     answer = answer if answer in (*PAID, "mixed") else ""
     if not text:
         return answer
+    if DECLINED.search(text):
+        return ""  # a refused or cancelled payment proves nothing
     printed = [k for k, rx in PAID.items() if rx.search(text)]
     return printed[0] if len(printed) == 1 else "mixed" if printed else ""
 

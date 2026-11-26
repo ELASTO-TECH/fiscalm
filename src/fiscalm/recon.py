@@ -510,12 +510,12 @@ def auto_mark_paid(ledger: Ledger, st: statements.Statement) -> list[str]:
 
 
 def _receipts(ledger: Ledger, company: str):
-    """Receipts a matcher may still give to a debit: dated and priced, not an upload the user named for one, and not one
-    whose reading says it was paid in cash (receipt_header): a cash purchase never explains a bank debit."""
+    """Receipts a matcher may still give to a debit: dated and priced, not an upload the user named for one, not one
+    read as paid in cash, and not a bon that paid its invoice at the till (Ledger.receipts_off_debits)."""
     out = [
         d for d in ledger.documents(company=company, kind="receipt") if d["amount"] and d["currency"] and d["doc_date"]
     ]
-    skip = ledger.linked_receipts(company, out) | ledger.cash_receipts(company)
+    skip = ledger.linked_receipts(company, out) | ledger.receipts_off_debits(company)
     return [d for d in out if d["sha"] not in skip]
 
 
