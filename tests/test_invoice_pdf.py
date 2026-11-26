@@ -46,7 +46,7 @@ def cells(raw, with_weight=False):
     with pikepdf.open(io.BytesIO(raw)) as pdf:
         for page in pdf.pages:
             for font, size, x, y, value in re.findall(
-                r"BT /F([123]) ([\d.]+) Tf [\d.]+ Tc 1 0 0 1 ([\d.]+) ([\d.]+) Tm <([0-9a-f]+)>",
+                r"BT /F([123]) ([\d.]+) Tf -?[\d.]+ Tc 1 0 0 1 ([\d.]+) ([\d.]+) Tm <([0-9a-f]+)>",
                 page.Contents.read_bytes().decode(),
             ):
                 cell = (float(size), float(x), float(y), bytes.fromhex(value).decode("utf-16-be"))
@@ -62,7 +62,7 @@ def runs(page):
 
 
 def tax_row(table, label):
-    baseline = next(y for _, x, y, v in table if x == 51 and v == label)
+    baseline = next(y for _, x, y, v in table if x == 45 and v == label)
     return [v for _, _, y, v in table if y == baseline]
 
 
@@ -94,7 +94,7 @@ def test_pdf_pagination_and_draft_refusal(setup_invoice):
         for n, page in enumerate(pdf.pages, 1):
             # Every page repeats the table header, the seller and its own page number, once; no draft watermark.
             values = runs(page)
-            assert {"DESCRIERE", "CANTITATE", "Firma Fictivă SRL, CUI 99999984"} <= set(values)
+            assert {"DESCRIERE", "CANT.", "Firma Fictivă SRL, CUI 99999984"} <= set(values)
             assert values.count(f"Pagina {n} din {count}") == 1 and "/ExtGState" not in page.Resources
             if "Total fără TVA" in values:
                 assert "Total de plată" in values
@@ -131,9 +131,10 @@ def test_a_preview_is_unnumbered_and_prints_romanian_formats(setup_invoice):
     with pikepdf.open(io.BytesIO(raw)) as pdf:
         assert list(pdf.pages[0].MediaBox) == [0, 0, 595, 842]
     table = cells(raw)
-    for name, edge in [("CANTITATE", 309), ("PREȚ UNITAR", 383), ("VALOARE", 452)]:
+    # Numeric headers end where their column's values end.
+    for name, edge in [("CANT.", 309), ("PREȚ UNITAR", 383), ("VALOARE FĂRĂ", 452)]:
         size, x, _, value = next(cell for cell in table if cell[3] == name)
-        assert abs(x + Canvas().measure(value, size, "Medium", 0.405) - edge) < 0.001
+        assert abs(x + Canvas().measure(value, size, "SemiBold", 0.405) - edge) < 0.001
 
 
 @pytest.mark.parametrize(
@@ -194,8 +195,8 @@ def test_summary_alignment_and_bnr_value(setup_invoice):
     top = next(y for _, _, y, v in table if v == "TVA PE COTE")
     assert next(y for _, _, y, v in table if v == "Total fără TVA") == top
     size, x, y, val = next(cell for cell in table if cell[3] == "4,9753 lei/EUR")
-    assert abs(x + Canvas().measure(val, size) - 550) < 0.001
-    assert any(v == "Curs BNR din 30.10.2026" and yy == y and xx == 331 for _, xx, yy, v in table)
+    assert abs(x + Canvas().measure(val, size) - 547) < 0.001
+    assert any(v == "Curs BNR din 30.10.2026" and yy == y and xx == 343 for _, xx, yy, v in table)
 
 
 def test_multirate_storno_rounding_sign(setup_invoice):
@@ -225,8 +226,8 @@ def test_ron_tax_rows_go_from_the_highest_rate(setup_invoice):
     text, raw = render(setup_invoice, DATA | dict(lines=[LINE | dict(vat_rate="11", unit="H87"), LINE]))
     table = cells(raw)
     assert tax_row(table, "21%")[-2:] == ["100,00", "21,00"] and tax_row(table, "11%")[-2:] == ["100,00", "11,00"]
-    assert next(y for _, x, y, v in table if x == 51 and v == "21%") > next(
-        y for _, x, y, v in table if x == 51 and v == "11%"
+    assert next(y for _, x, y, v in table if x == 45 and v == "21%") > next(
+        y for _, x, y, v in table if x == 45 and v == "11%"
     )
     assert "buc" in text
 
@@ -254,11 +255,11 @@ def test_large_amounts_fit_and_no_line_vat(setup_invoice, payer):
             assert 45 <= x < right <= 550.001 and size >= 6, (value, size, x, right)
     assert "TVA 21%" not in text
     assert not any(v == "21,00" and y == line_y for _, _, y, v in table)
-    assert text.count("IBAN:") == 1
+    assert text.count("IBAN") == 1 and "Transfer bancar" not in text
     due = [cell for cell in table if cell[3] == "Total de plată"]
-    assert len(due) == 1 and due[0][0] == 9.75
+    assert len(due) == 1 and due[0][0] == 9
     if not payer:
-        assert "Cota TVA" not in text and "Total TVA" not in text and "TVA lei" not in text
+        assert "COTĂ TVA" not in text and "Total TVA" not in text and "TVA lei" not in text
         assert text.count("art. 310") == 1
 
 
@@ -273,7 +274,10 @@ def test_storno_and_original_print_their_xml_number_and_delivery_date(setup_invo
         assert "Nr. " + number in texts[-1] and "29.10.2026" in texts[-1] and "Data livrării:" not in texts[-1]
     original, storno = texts
     assert "DATA LIVRĂRII" in original and "INIȚIALE" not in original
-    assert "DATA LIVRĂRII FACTURII" in storno and "INIȚIALE" in storno
+    assert "INIȚIALE" in storno and "FACTURII" not in storno
+    # A credit note is owed by nobody: a "Total", never "De plată", and no due date beside it.
+    assert all(value in original for value in ["DE PLATĂ", "Total de plată", "Scadență 30.11.2026"])
+    assert "DE PLATĂ" not in storno and "de plată" not in storno and "Scadență 01.11.2026" not in storno
     assert "Stornare pentru factura TEST-42" in storno and "-21,00" in storno and "-121,00 lei" in storno
 
 
@@ -290,7 +294,7 @@ def test_distinct_exemptions_have_separate_bases(setup_invoice):
         ),
     )
     table = cells(raw)
-    labels = " ".join(v for _, x, _, v in table if x == 51)
+    labels = " ".join(v for _, x, _, v in table if x == 45)
     assert all(labels.count(reason) == 1 for reason in reasons)
     # Two separately identified exemption bases, rather than a single 300,00 base.
     for base in ["100,00", "200,00"]:
@@ -312,7 +316,7 @@ def test_tax_heading_repeats_on_break_and_previews_are_watermarked(setup_invoice
             values = runs(page)
             if "TVA PE COTE" in values:
                 tax_pages += 1
-                assert "COTA TVA" in values and "BAZĂ (LEI)" in values
+                assert "COTĂ TVA" in values and "BAZĂ (LEI)" in values
             assert "/Draft gs" in page.Contents.read_bytes().decode()
             assert float(page.Resources.ExtGState.Draft.ca) == 0.08
         assert tax_pages >= 2
@@ -323,7 +327,7 @@ def test_large_eur_tax_cells_do_not_overlap(setup_invoice):
         setup_invoice, DATA | EUR | dict(exchange_rate="1", lines=[LINE | dict(unit_price="99999999999999")])
     )
     table = cells(raw)
-    baseline = next(y for _, x, y, v in table if x == 51 and v == "21%")
+    baseline = next(y for _, x, y, v in table if x == 45 and v == "21%")
     row = sorted((x, size, v) for size, x, y, v in table if y == baseline)
     for (x, size, value), (next_x, _, _) in zip(row, row[1:], strict=False):
         assert size >= 6 and x + Canvas().measure(value, size) <= next_x
@@ -362,17 +366,9 @@ def test_all_runs_within_columns(setup_invoice, monkeypatch):
                 assert self.measure(value, actual_size, weight) <= column + 0.001, (value, column)
         if value and (set(value) == {"1"} or value.startswith("Societatea")):
             # Description and party/header names have distinct left anchors.
-            edge = (
-                225
-                if x == 73
-                else 425
-                if y == 27
-                else 305
-                if x == 45 and (size == 13.5 or y == 787)
-                else 282.5
-                if x == 45
-                else 550
-            )
+            # The seller's name at the top, the two party cards (seller, client) and the footer's name.
+            edges = {(45, 12.75): 315, (45, 10): 305, (58.5, 9.75): 213.5, (58.5, 7.5): 213.5, (251, 9.75): 406}
+            edge = 225 if x == 73 else 425 if y == 27 else edges.get((x, size), 406 if x == 251 else 550)
             assert end <= edge + 0.001, (value, x, end, edge)
         drawn.append(value)
         return original(self, value, x, y, size, weight, fill, right, width, tracking)
@@ -396,6 +392,18 @@ def test_compact_name_normal_size_and_numeric_space(setup_invoice):
     compact = [(size, v) for size, x, y, v in table if x == 45 and y == 787]
     assert any(size == 10 and v.endswith("…") for size, v in compact)
     assert all(size == 8.25 for size, _, _, v in table if v == "123.456.789,12")
+
+
+def test_party_cards_too_tall_for_the_first_page_continue_on_the_next(setup_invoice):
+    L, _ = setup_invoice
+    # The longest name and trade register entry the engine accepts, in the widest letter.
+    i.save_seller(L, "NORD", PARTY | dict(name="W" * 200, reg_com="J00/0000/2026 " + "W" * 980))
+    text, raw = render(setup_invoice)
+    assert text.count("W") >= 1180 and "Client Fictiv SRL" in text and "Strada Exemplu 1" in text
+    with pikepdf.open(io.BytesIO(raw)) as pdf:
+        assert len(pdf.pages) == 2
+    # Nothing but the footer is drawn below the cards' floor, on either page.
+    assert all(y >= 63 for _, _, y, v in cells(raw) if y != 27)
 
 
 def test_nonvat_102_rows_and_footer_once(setup_invoice):
