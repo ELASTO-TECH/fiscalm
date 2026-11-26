@@ -1542,16 +1542,27 @@ it("changing a draft's VAT keeps the gross prices the customer paid and the deli
   const inv = invoicingData();
   const gross = { ...inv.drafts[0].lines[0], quantity: "1", unit_price: "100.000000000000", gross_unit_price: "121.00" };
   inv.drafts[0] = { ...inv.drafts[0], delivery_date: "2026-10-05", lines: [gross, { ...gross, description: "Livrare" }] };
+  inv.products = [{ id: "7", company: "NORD", kind: "produs", name: "Cană", code: "", unit: "H87", unit_price: "9.00", currency: "EUR",
+    vat_category: "S", vat_rate: "21", exemption: "", description: "", archived: false, version: 1, can_delete: false }];
   const { api, f } = await openInvoice("d1", { invoicing: () => json(inv), onPost: () => answer(inv, "Am salvat ciorna.", "d1") });
   const [first, second] = f.getAllByRole("group", { name: /^Linia / });
   expect(within(first).getByLabelText("Preț cu TVA")).toHaveValue("121.00");
   await choose(within(first).getByLabelText("TVA"), "S11");
   await userEvent.clear(within(second).getByLabelText("Preț cu TVA"));
   await userEvent.type(within(second).getByLabelText("Preț cu TVA"), "50");
+  await userEvent.clear(within(second).getByLabelText("Produs sau serviciu"));
+  await userEvent.type(within(second).getByLabelText("Produs sau serviciu"), "can");
+  await userEvent.click(screen.getByRole("option", { name: /Cană/ })); // priced in EUR: the line keeps its own price
+  await userEvent.click(f.getByRole("button", { name: "Adaugă o linie" }));
+  const third = f.getAllByRole("group", { name: /^Linia / })[2];
+  await userEvent.type(within(third).getByLabelText("Produs sau serviciu"), "Ambalaj");
+  await userEvent.type(within(third).getByLabelText("Preț cu TVA"), "30");
   await userEvent.click(f.getByRole("button", { name: "Salvează ciorna" }));
   await waitFor(() => expect(api.posts()).toHaveLength(1));
   expect(api.posts()[0].body).toMatchObject({ delivery_date: "2026-10-05", lines: [
-    { vat_category: "S", vat_rate: "11", gross_unit_price: "121.00" }, { vat_rate: "21", gross_unit_price: "50" }] });
+    { vat_category: "S", vat_rate: "11", unit_price: "121.00", gross_unit_price: "121.00" },
+    { description: "Cană", unit_price: "50", gross_unit_price: "50", product_id: "7" },
+    { description: "Ambalaj", vat_rate: "21", unit_price: "30", gross_unit_price: "30" }] });
 });
 
 describe("Serii de facturi", () => {

@@ -25,11 +25,11 @@ export const vatLabel = (inv: Pick<Invoicing, "vat">, p: Pick<Product, "vat_cate
 export const priceOf = (inv: Pick<Invoicing, "units">, p: Product) => `${lei(p.unit_price)} ${curOf(p.currency)} / ${unitOf(inv, p.unit)}`;
 
 /** A line filled from a product: its name, unit and VAT, and its price only in the invoice's own currency (never
- * converted); `product_id` links the line, whose values stay its own to edit. */
+ * converted), which replaces a price with VAT; `product_id` links the line, whose values stay its own to edit. */
 export function lineFrom(p: Product, line: InvoiceLine, currency: string): InvoiceLine {
   const next: InvoiceLine = { ...line, description: p.name, unit: p.unit, vat_category: p.vat_category, vat_rate: p.vat_rate,
     exemption: p.exemption, product_id: p.id, ...(p.currency === currency ? { unit_price: p.unit_price } : {}) };
-  delete next.gross_unit_price;
+  if (p.currency === currency) delete next.gross_unit_price;
   return next;
 }
 

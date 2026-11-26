@@ -63,10 +63,16 @@ const NO_ADDRESS: Address = { street: "", city: "", county: "", postal_code: "",
 const choiceOf = (inv: Invoicing, l: InvoiceLine) => inv.vat.choices.find((c) => c.category === l.vat_category
   && Number(c.rate) === Number(l.vat_rate) && c.exemption === l.exemption);
 
-/** A line as the engine takes it: only these fields go back, whatever else a saved draft's line carries. */
+/** A line as the engine takes it: only these fields go back, whatever else a saved draft's line carries. A line priced
+ * with VAT sends its gross price as the price too: the engine derives the net from the gross price and the rate. */
 const LINE_KEYS = ["description", "quantity", "unit", "unit_price", "vat_category", "vat_rate", "exemption"] as const;
-const lineOut = (l: InvoiceLine) => ({ ...Object.fromEntries(LINE_KEYS.map((k) => [k, l[k]])), ...(l.gross_unit_price !== undefined ? { gross_unit_price: l.gross_unit_price } : {}),
+const lineOut = (l: InvoiceLine) => ({ ...Object.fromEntries(LINE_KEYS.map((k) => [k, l[k]])),
+  ...(l.gross_unit_price !== undefined ? { unit_price: l.gross_unit_price, gross_unit_price: l.gross_unit_price } : {}),
   ...(l.product_id ? { product_id: l.product_id } : {}) });
+/** The price a person types on a line: the amount with VAT on a line priced with VAT (a shop order's), else the net. */
+const linePrice = (l: InvoiceLine) => l.gross_unit_price ?? l.unit_price;
+/** "100.00", or "121.00 cu TVA" on a line priced with VAT. */
+const priceText = (l: InvoiceLine) => (l.gross_unit_price !== undefined ? `${l.gross_unit_price} cu TVA` : l.unit_price);
 
 /** The seller's fields the engine takes on save: what it adds when it answers (the logo, whether it can be read) stays out. */
 const SELLER_KEYS = ["legal_name", "cui", "vat_payer", "vat_on_collection", "vat_id", "reg_com", "address", "iban", "bank", "email", "phone"] as const;
@@ -342,7 +348,7 @@ const FIELDS: [string, (f: FormValues) => unknown, (f: FormValues, inv: Invoicin
   ["Monedă", (f) => f.currency, (f) => f.currency],
   ["Scadență", (f) => f.dueDate, (f, inv) => (f.dueDate ? dm(f.dueDate, inv.today) : "")],
   ["Produse și servicii", (f) => f.lines.map(lineOut), (f, inv) => f.lines.map((l) => [l.description,
-    `${l.quantity} ${inv.units.find((u) => u.code === l.unit)?.label ?? l.unit} × ${l.unit_price}`, choiceOf(inv, l)?.label ?? ""]
+    `${l.quantity} ${inv.units.find((u) => u.code === l.unit)?.label ?? l.unit} × ${priceText(l)}`, choiceOf(inv, l)?.label ?? ""]
     .filter(Boolean).join(", ")).join("; ")],
   ["Data livrării", (f) => f.delivery, (f, inv) => (f.delivery ? dm(f.delivery, inv.today) : "")],
   ["Factură de avans", (f) => [f.advance, f.advance ? f.advanceDate : ""],
@@ -644,7 +650,8 @@ function InvoiceForm({ inv, set, draftId, unsavedRef, onEditSeller, partner, any
   // A line priced with VAT (a shop order's) keeps the amount the customer paid: its price field edits that amount and
   // a new VAT rate only changes how the engine splits it, so no edit turns a gross price into a net one.
   const setLine = (i: number, patch: Partial<InvoiceLine>) => editLines(lines.map((l, j) => (j === i ? { ...l, ...patch } : l)));
-  const linePrice = (l: InvoiceLine) => l.gross_unit_price ?? l.unit_price;
+  // A new line in a draft priced with VAT is priced with VAT too: the engine refuses both kinds in one VAT group.
+  const newLine = () => (lines.some((l) => l.gross_unit_price !== undefined) ? { ...emptyLine(inv), gross_unit_price: "" } : emptyLine(inv));
   const setPrice = (i: number, price: string) => setLine(i, lines[i].gross_unit_price !== undefined ? { gross_unit_price: price } : { unit_price: price });
   // A draft's delivery date stays on it, shown and editable, even once no line needs one (a K line changed to another VAT).
   const showsDelivery = needsDelivery || !!init.delivery || !!delivery;
@@ -895,7 +902,7 @@ function InvoiceForm({ inv, set, draftId, unsavedRef, onEditSeller, partner, any
           </div>
         ))}
         <Button type="button" className="btn g" onClick={() => {
-          editLines([...lines, emptyLine(inv)]);
+          editLines([...lines, newLine()]);
           setFocusLine(lines.length);
         }}>Adaugă o linie</Button>
       </fieldset>
@@ -907,7 +914,7 @@ function InvoiceForm({ inv, set, draftId, unsavedRef, onEditSeller, partner, any
       {showsDelivery ? (
         <>
           <Label htmlFor="inv-delivery">{needsDelivery ? "Data livrării" : "Data livrării (opțional)"}</Label>
-          <Input id="inv-delivery" type="date" {...req("inv-delivery")} value={delivery} onChange={(e) => change(setDelivery)(e.target.value)} />
+          <Input id="inv-delivery" type="date" {...(needsDelivery ? req("inv-delivery") : {})} value={delivery} onChange={(e) => change(setDelivery)(e.target.value)} />
           <Err lacking={lacking} id="inv-delivery" />
         </>
       ) : null}
@@ -1040,7 +1047,7 @@ function Paper({ inv, series, clientId, adding, dueDate, lines, children }: {
   // While a new client is being added, the invoice goes to that one, not to the one picked before.
   const client = adding ? "Client nou" : inv.clients.find((c) => c.id === clientId)?.name;
   const unit = (code: string) => inv.units.find((u) => u.code === code)?.label ?? code;
-  const filled = lines.filter((l) => l.description || l.unit_price);
+  const filled = lines.filter((l) => l.description || linePrice(l));
   return (
     <div className="paper min-w-0 min-[1100px]:mb-4 min-[1100px]:rounded-card min-[1100px]:border min-[1100px]:border-solid min-[1100px]:border-line min-[1100px]:bg-surface min-[1100px]:p-8">
       <div className="hidden min-[1100px]:block" aria-hidden="true">
@@ -1052,7 +1059,7 @@ function Paper({ inv, series, clientId, adding, dueDate, lines, children }: {
         </dl>
         {filled.length ? <ul className="m-0 mb-4 list-none divide-x-0 divide-y divide-solid divide-line/60 border-0 border-y border-solid border-line p-0 text-[13px]">
           {filled.map((l, i) => <li key={i} className="flex justify-between gap-4 py-2.5"><span className="min-w-0 wrap-anywhere">{l.description || "Fără descriere"}</span>
-            <span className="shrink-0 text-muted tabular-nums">{l.quantity} {unit(l.unit)} × {l.unit_price}</span></li>)}
+            <span className="shrink-0 text-muted tabular-nums">{l.quantity} {unit(l.unit)} × {priceText(l)}</span></li>)}
         </ul> : null}
       </div>
       {children}
