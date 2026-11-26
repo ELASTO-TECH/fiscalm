@@ -147,6 +147,13 @@ D13 = "13/01/2020"
             "1,000.00",
             None,
         ),
+        (  # the 13th prints a debit but holds no line: the 14th's line can't be read to fit
+            [("14/01/2020", "Plata", "10.00", 124)],
+            ("10.00", "0.00"),
+            {D13: ("10.00", "0.00")},
+            "990.00",
+            None,
+        ),
         (  # the 13th prints no debits (the 14th prints none of its totals): its 10.00 is no debit
             [(D13, "Incasare", "10.00", 124), ("14/01/2020", "Plata", "20.00", 147)],
             ("10.00", "20.00"),

@@ -613,7 +613,7 @@ def _proven(acct: Account, reading: dict[int, str], days: dict) -> bool:
     that disagree prove nothing); it is the only one per day when every line's day has one, else over the section."""
     if None in days.values():
         return False
-    for d in {t.date for t in acct.txs} & set(days):
+    for d in days:  # a day the section prints totals for but holds no line of must total nothing
         lines = [t for t in acct.txs if t.date == d]
         debit = sum((t.amount for t in lines if reading[id(t)] == "debit"), Decimal(0))
         credit = sum((t.amount for t in lines if reading[id(t)] == "credit"), Decimal(0))
