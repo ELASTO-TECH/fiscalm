@@ -1544,10 +1544,10 @@ it("changing a draft's VAT keeps the gross prices the customer paid and the deli
   inv.drafts[0] = { ...inv.drafts[0], delivery_date: "2026-10-05", lines: [gross, { ...gross, description: "Livrare" }] };
   const { api, f } = await openInvoice("d1", { invoicing: () => json(inv), onPost: () => answer(inv, "Am salvat ciorna.", "d1") });
   const [first, second] = f.getAllByRole("group", { name: /^Linia / });
-  expect(within(first).getByLabelText("Preț unitar cu TVA")).toHaveValue("121.00");
+  expect(within(first).getByLabelText("Preț cu TVA")).toHaveValue("121.00");
   await choose(within(first).getByLabelText("TVA"), "S11");
-  await userEvent.clear(within(second).getByLabelText("Preț unitar cu TVA"));
-  await userEvent.type(within(second).getByLabelText("Preț unitar cu TVA"), "50");
+  await userEvent.clear(within(second).getByLabelText("Preț cu TVA"));
+  await userEvent.type(within(second).getByLabelText("Preț cu TVA"), "50");
   await userEvent.click(f.getByRole("button", { name: "Salvează ciorna" }));
   await waitFor(() => expect(api.posts()).toHaveLength(1));
   expect(api.posts()[0].body).toMatchObject({ delivery_date: "2026-10-05", lines: [

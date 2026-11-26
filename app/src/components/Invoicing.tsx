@@ -870,7 +870,7 @@ function InvoiceForm({ inv, set, draftId, unsavedRef, onEditSeller, partner, any
                 </Select>
               </div>
               <div>
-                <Label htmlFor={`l${i}-p`}>{l.gross_unit_price !== undefined ? "Preț unitar cu TVA" : "Preț unitar"}</Label>
+                <Label htmlFor={`l${i}-p`}>{l.gross_unit_price !== undefined ? "Preț cu TVA" : "Preț unitar"}</Label>
                 <Input id={`l${i}-p`} {...req(`l${i}-p`)} inputMode="decimal" value={linePrice(l)} onChange={(e) => setPrice(i, e.target.value)} />
                 <Err lacking={lacking} id={`l${i}-p`} />
               </div>
