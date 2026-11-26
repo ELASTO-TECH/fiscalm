@@ -274,7 +274,7 @@ def test_storno_and_original_print_their_xml_number_and_delivery_date(setup_invo
         assert "Nr. " + number in texts[-1] and "29.10.2026" in texts[-1] and "Data livrării:" not in texts[-1]
     original, storno = texts
     assert "DATA LIVRĂRII" in original and "INIȚIALE" not in original
-    assert "INIȚIALE" in storno and "FACTURII" not in storno
+    assert "DATA LIVRĂRII INIȚIALE" in storno and "FACTURII" not in storno
     # A credit note is owed by nobody: a "Total", never "De plată", and no due date beside it.
     assert all(value in original for value in ["DE PLATĂ", "Total de plată", "Scadență 30.11.2026"])
     assert "DE PLATĂ" not in storno and "de plată" not in storno and "Scadență 01.11.2026" not in storno
@@ -397,9 +397,10 @@ def test_compact_name_normal_size_and_numeric_space(setup_invoice):
 def test_party_cards_too_tall_for_the_first_page_continue_on_the_next(setup_invoice):
     L, _ = setup_invoice
     # The longest name and trade register entry the engine accepts, in the widest letter.
-    i.save_seller(L, "NORD", PARTY | dict(name="W" * 200, reg_com="J00/0000/2026 " + "W" * 980))
+    i.save_seller(L, "NORD", PARTY | dict(name="W" * 200, reg_com="J00/0000/2026 " + "W" * 974 + " FINAL"))
     text, raw = render(setup_invoice)
-    assert text.count("W") >= 1180 and "Client Fictiv SRL" in text and "Strada Exemplu 1" in text
+    # The entry's last row, the rows after it and the other cards all print.
+    assert "FINAL" in text and "Client Fictiv SRL" in text and text.count("Strada Exemplu 1") == 2
     with pikepdf.open(io.BytesIO(raw)) as pdf:
         assert len(pdf.pages) == 2
     # Nothing but the footer is drawn below the cards' floor, on either page.
@@ -563,3 +564,20 @@ def test_pdf_extraction_refuses_unbounded_output_and_time(tmp_path, monkeypatch,
     monkeypatch.setattr(pdftext, "TEXT_TIMEOUT", timeout, raising=False)
     with pytest.raises(RuntimeError):
         pdftext.pdf_text(b"%PDF-synthetic")
+
+
+def test_the_longest_bank_name_keeps_the_payment_panel_on_the_page(setup_invoice):
+    L, _ = setup_invoice
+    # A bank outside the catalogue prints the name the seller typed: at most 100 characters.
+    with L.tx() as db:
+        db.execute("UPDATE firm_accounts SET bank='zz' WHERE company='NORD'")
+    with pytest.raises(i.InvoiceError, match="Banca poate avea cel mult 100"):
+        i.save_seller(L, "NORD", PARTY | dict(bank="W" * 101))
+    bank = " ".join(["WWWWWWWWW"] * 10)  # 99 of the widest letters
+    i.save_seller(L, "NORD", PARTY | dict(bank=bank))
+    text, raw = render(setup_invoice)
+    assert "RO24 BTRL RONC RT00 0000 0001" in text and text.count("WWWWWWWWW") == 10
+    with pikepdf.open(io.BytesIO(raw)) as pdf:
+        assert len(pdf.pages) == 1
+    # Everything above the footer stays on the page, the panel's rows above its bottom edge.
+    assert all(54 < y < 842 for _, _, y, v in cells(raw) if y != 27)
