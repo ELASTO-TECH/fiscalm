@@ -1331,6 +1331,8 @@ def test_a_trusted_import_of_an_upload_read_as_cash_is_matched_again(ledger, mon
         ("FACTURA\nBuyer: Outside Example Ltd\nTOTAL 86.40 RON", "86.40", "RON", False),  # a buyer without a tax id
         ("FACTURA\nBuyer:\nOutside Example Ltd\nTOTAL 86.40 RON", "86.40", "RON", False),  # its name a line below
         ("RETURN\nTOTAL -86.40 RON", "86.40", "RON", False),  # a refund, whatever its title
+        ("RETURN\nTOTAL\n-86.40 RON", "86.40", "RON", False),  # its amount a line below
+        ("Bon fiscal\nCIF CLIENT: 44444444\nTOTAL 86.40 RON", "86.40", "RON", False),  # an outside buyer's tax id
         ("CREDIT NOTE\nTOTAL 86.40 RON", "86.40", "RON", False),  # no invoice title, still a credit note
         ("FACTURA\nIssue date: 2026-09-30\nDue date: 2026-10-06\nTOTAL 86.40 RON", "86.40", "RON", False),
         ("Bon fiscal\nCARD ****9876\nTOTAL 86.40 RON", "86.40", "RON", True),  # the printed card is kept

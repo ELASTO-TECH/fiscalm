@@ -80,7 +80,7 @@ def _labelled_buyer(L: Ledger, text: str) -> str:
         rest = line[label.end() :] if label else ""
         if label and not re.search(r"\w", rest) and n + 1 < len(lines):
             rest = lines[n + 1]
-        if re.search(r"[^\W\d_]{3}", rest):
+        if re.search(r"[^\W\d_]{3}|\d{6}", rest):  # a name, or a tax id
             found = [k for k, co in firms.items() if co.named_in(rest) or co.tax_id_match(rest)]
             return found[0] if len(found) == 1 else "?"
     return ""
@@ -105,7 +105,18 @@ def printed(L: Ledger, data: bytes, text: str) -> dict:
         "buyer": _labelled_buyer(L, text),
         "card": rules.card_last4,
         "date": rules.date,
+        "negative": _negative_amounts(text),
     }
+
+
+def _negative_amounts(text: str) -> list[str]:
+    """Amounts the text prints with a minus sign, wherever they stand: a refund's total may be the AI's reading."""
+    found = set()
+    for m in ai_extract.AMOUNT.finditer(text):
+        before = text[: m.start()].rstrip(" ")
+        if before[-1:] in ("-", "\u2212") and not re.search(r"\w\Z", before[:-1]):
+            found.add(f"{ai_extract.money(m.group(1), m.group(2)):.2f}")
+    return sorted(found)
 
 
 def reliable(header: dict) -> bool:
@@ -145,6 +156,7 @@ def disagrees(header: dict) -> bool:
         and header["card_last4"] not in ("", card)  # the AI read another card than the one printed
         or bool(day)
         and header["issue_date"] != day  # a due date or another date than the printed issue date
+        or header["total"] in printed.get("negative", [])  # the total the text prints is a refund's
     )
 
 
