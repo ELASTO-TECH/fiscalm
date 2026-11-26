@@ -760,6 +760,7 @@ def history_ai(ledger, monkeypatch, fields):
         "total": "119.00",
         "currency": "RON",
         "card_last4": "",
+        "payment": "",
         "confidence": "high",
     } | fields
     monkeypatch.setattr(ai, "ask_json", lambda L, system, prompt, schema, image=None: answer)

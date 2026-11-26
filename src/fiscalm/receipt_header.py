@@ -19,6 +19,7 @@ import hashlib
 import json
 import re
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from fiscalm import ai_extract, companies
@@ -73,9 +74,12 @@ def _labelled_buyer(L: Ledger, text: str) -> str:
     if name or tax_id:
         found = [k for k, co in firms.items() if (tax_token(tax_id) == co.cui if tax_id else co.named_in(name))]
         return found[0] if len(found) == 1 else "?"
-    for line in text.splitlines():  # a buyer label followed by a name, without a tax id
+    lines = [line for line in text.splitlines() if line.strip()]
+    for n, line in enumerate(lines):  # a buyer label followed by a name, without a tax id: on its line, or the next
         label = invoices.BUYER.search(line)
         rest = line[label.end() :] if label else ""
+        if label and not re.search(r"\w", rest) and n + 1 < len(lines):
+            rest = lines[n + 1]
         if re.search(r"[^\W\d_]{3}", rest):
             found = [k for k, co in firms.items() if co.named_in(rest) or co.tax_id_match(rest)]
             return found[0] if len(found) == 1 else "?"
@@ -87,7 +91,12 @@ def printed(L: Ledger, data: bytes, text: str) -> dict:
     firms it disputes, why it is never an expense (a pro forma, a credit note), its totals, and its labelled buyer."""
     rules = invoices.read_pdf(data, allow_ro_supplier=True)
     named = rules.firms
-    never = invoices.PROFORMA.search(text) or invoices.CREDIT.search(text)  # whatever the title says
+    # whatever the title says: a pro forma, a credit note, or a refund printing a negative total
+    never = (
+        invoices.PROFORMA.search(text)
+        or invoices.CREDIT.search(text)
+        or any(Decimal(total) < 0 for total, _ in invoices.totals(text))
+    )
     return {
         "roles": rules.roles,
         "disputed": invoices.disputed(text, named) if named else [],
