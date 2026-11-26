@@ -174,19 +174,30 @@ def _amount(s: str | None) -> Decimal | None:
     return Decimal(value)
 
 
-def storno_reference(note: str) -> tuple[str, str]:
-    match = re.fullmatch(
-        r"\s*storno factura(?: seria)?\s+(.+?)\s+din data\s+(\d{2}/\d{2}/\d{4})\s*[.]?\s*",
-        note,
-        re.IGNORECASE,
-    )
-    if not match:
-        return "", ""
-    try:
-        day = datetime.strptime(match[2], "%d/%m/%Y").date().isoformat()
-    except ValueError:
-        day = "invalid"
-    return match[1], day
+# A storno reference invoicing software writes in a note when it leaves BillingReference empty, alone in one of the
+# note's parts (SmartBill joins its notes with "#"): "Storno factura seria AB nr. 0012 din data 23/10/2026".
+STORNO_NOTE = re.compile(
+    r"\s*storn(?:o|are|area)\s+factur(?:a|ă|ii)(?:\s+seria\s+(?P<series>[A-Z][A-Z0-9]{0,9}))?"
+    r"\s+nr\.?\s*(?P<number>[0-9]{1,12})\s+din(?:\s+data)?\s+(?P<day>\d{2}([/.])\d{2}\4\d{4})\s*[.]?\s*",
+    re.IGNORECASE,
+)
+
+
+def storno_reference(notes: Iterable[str]) -> tuple[str, str]:
+    """(invoice number, issue day) named by the notes of a credit note without BillingReference. Untrusted text: it
+    only feeds the exact matching in efactura.credits.links. Several invoices named link to none; nothing named, or
+    anything else in that part, stays unreferenced; a date that is no day links to none."""
+    found = set()
+    for part in (p for note in notes for p in re.split(r"[#\n]", note)):
+        if match := STORNO_NOTE.fullmatch(part):
+            try:
+                day = datetime.strptime(match["day"].replace(".", "/"), "%d/%m/%Y").date().isoformat()
+            except ValueError:
+                day = "invalid"
+            found.add((" ".join(filter(None, (match["series"], match["number"]))).upper(), day))
+    if len(found) > 1:
+        return "", UNCLEAR_REFERENCE
+    return found.pop() if found else ("", "")
 
 
 def parse_ubl(data: bytes) -> Invoice:
@@ -265,7 +276,7 @@ def parse_ubl(data: bytes) -> Invoice:
     reference = (references[0].text or "").strip() if len(references) == 1 else ""
     reference_day = t("cac:BillingReference/cac:InvoiceDocumentReference/cbc:IssueDate")
     if not root.findall("cac:BillingReference", NS):
-        reference, reference_day = storno_reference(t("cbc:Note"))
+        reference, reference_day = storno_reference(n.text or "" for n in root.findall("cbc:Note", NS))
     elif not reference:  # several invoices, or none identified: it links to none, and never reads as naming none
         reference_day = UNCLEAR_REFERENCE
     return Invoice(

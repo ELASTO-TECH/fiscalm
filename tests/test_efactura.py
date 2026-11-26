@@ -2007,6 +2007,33 @@ def test_unreferenced_credit_fitting_several_waits_for_a_person(ledger, home, mo
     assert "NORDcq3009" not in [key for key, *_ in tasks.references(api.state(ledger, "NORD"))]
 
 
+STORNO_1 = "Storno factura seria SUP nr. 0001 din data 20/10/2026"
+
+
+@pytest.mark.parametrize(
+    "first,second,credited,asked",
+    [  # two invoices of one total, then two notes of the opposite total with no BillingReference
+        ("TVA LA INCASARE#" + STORNO_1, "STORNARE FACTURĂ SERIA SUP NR 3 DIN 21.10.2026.", {"3001", "3002"}, []),
+        (STORNO_1.replace("0001", "0099"), "", set(), ["3009"]),  # names no invoice: links none, never moves
+        (STORNO_1.replace("20/10", "21/10"), "", set(), ["3009"]),  # the right number on another day
+        (STORNO_1.replace("20/10", "31/02"), "", set(), ["3009"]),  # no such day
+        (STORNO_1 + "#" + STORNO_1.replace("0001 din data 20", "0003 din data 21"), "", set(), ["3009"]),  # two
+        (STORNO_1 + " si 0003", "", set(), ["3008", "3009"]),  # garbled: a person decides
+    ],
+)
+def test_a_note_naming_the_cancelled_invoice_links_it(ledger, home, monkeypatch, first, second, credited, asked):
+    docs = {"3001": ubl(number="SUP 0001"), "3002": ubl(number="SUP 0003", issue="2026-10-21")}
+    for mid, note in (("3008", first), ("3009", second)):
+        docs[mid] = ubl(number=f"SUP {mid}", total="-250.00", issue="2026-10-23").replace(
+            b"</Invoice>", f"<cbc:Note>{note}</cbc:Note></Invoice>".encode()
+        )
+    blobs = {mid: anaf_zip(x) for mid, x in docs.items()}
+    _fake_anaf(monkeypatch, {NORD_CUI: [msg(mid, "202610231200") for mid in blobs]}, blobs)
+    efactura.sync(ledger)
+    assert set(efactura.credited(ledger, "NORD")) == credited
+    assert sorted(credits.credit_questions(ledger, "NORD")) == asked
+
+
 def test_a_picked_invoice_taken_since_leaves_the_note_unapplied(ledger, home, monkeypatch):
     docs = [("3001", "SUP 0001", "1000.00", "2026-10-20", "202610231200")]
     docs += [("3002", "SUP 0003", "1000.00", "2026-10-21", "202610231200")]

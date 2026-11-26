@@ -664,6 +664,12 @@ def receipt_headers(db: sqlite3.Connection) -> None:
     )
 
 
+def credit_note_references_reread(db: sqlite3.Connection) -> None:
+    # A received credit note naming its invoice only in one part of a note ("...#Storno factura ...") was stored
+    # without a reference. The next e-Factura sync reads it again from its archive (efactura.fill_credit_references).
+    db.execute("UPDATE efactura SET billing_ref=NULL,billing_date='' WHERE status='credit' AND billing_ref=''")
+
+
 MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     baseline,
     transaction_links,
@@ -711,6 +717,7 @@ MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     ai_transaction_proposals,
     statement_tx_readings,
     receipt_headers,
+    credit_note_references_reread,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 
