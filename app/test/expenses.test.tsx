@@ -655,7 +655,7 @@ describe("Bonuri", () => {
     const img = within(sheet).getByRole("img", { name: "Document, Hetzner" });
     expect(img).toHaveAttribute("src", `/web/docfile?co=NORD&sha=${d.id}&png=1`);
     expect(img.closest("a")).toHaveAttribute("href", `/web/docfile?co=NORD&sha=${d.id}`);
-    expect(sheet).toHaveTextContent("PlatăCard terminat în 4242");
+    expect(sheet).toHaveTextContent("PlatăCard terminat în 0001");
   });
 
   it("says so when the file is not on the server", async () => {
