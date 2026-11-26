@@ -33,11 +33,12 @@ export function lineFrom(p: Product, line: InvoiceLine, currency: string): Invoi
   return next;
 }
 
-/** A blank product, or one started from an invoice line (its name, unit, price and VAT) in the invoice's currency. */
+/** A blank product, or one started from an invoice line (its name, unit, price and VAT) in the invoice's currency. A line
+ * priced with VAT leaves the price blank: a product's price is net, and the person types it. */
 export function productFrom(inv: Invoicing, line?: InvoiceLine, currency = "RON"): ProductFields {
   const c = inv.vat.choices.find((x) => x.key === inv.vat.default) ?? inv.vat.choices[0];
   return { kind: "produs", name: line?.description.trim() ?? "", code: "", unit: line?.unit || inv.units[0]?.code || "H87",
-    unit_price: line?.unit_price.trim() ?? "", currency, vat_category: line?.vat_category ?? c.category, vat_rate: line?.vat_rate ?? c.rate,
+    unit_price: line?.gross_unit_price === undefined ? line?.unit_price.trim() ?? "" : "", currency, vat_category: line?.vat_category ?? c.category, vat_rate: line?.vat_rate ?? c.rate,
     exemption: line?.exemption ?? c.exemption, description: "" };
 }
 

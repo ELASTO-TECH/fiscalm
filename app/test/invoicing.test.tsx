@@ -1563,6 +1563,10 @@ it("changing a draft's VAT keeps the gross prices the customer paid and the deli
     { vat_category: "S", vat_rate: "11", unit_price: "121.00", gross_unit_price: "121.00" },
     { description: "Cană", unit_price: "50", gross_unit_price: "50", product_id: "7" },
     { description: "Ambalaj", vat_rate: "21", unit_price: "30", gross_unit_price: "30" }] });
+  await userEvent.click(within(first).getByRole("button", { name: "Produse" }));
+  await userEvent.click(screen.getByRole("option", { name: "Produs nou" }));
+  // A product's price is net: one started from a line priced with VAT asks for it instead of reading the line's.
+  expect(within(await screen.findByRole("dialog", { name: "Produs nou" })).getByLabelText("Preț unitar")).toHaveValue("");
 });
 
 describe("Serii de facturi", () => {
