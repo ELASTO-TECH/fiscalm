@@ -389,6 +389,7 @@ def parse_text(text: str, company: str) -> Statement:
     debit_end = credit_end = 0
     opening: dict[int, Decimal] = {}  # by id(account): SOLD ANTERIOR, the first one of its section
     final: dict[int, Decimal] = {}  # SOLD FINAL CONT
+    ends: dict[int, int] = {}  # by id(tx): the column its amount ends at, on its own line
 
     def close():
         nonlocal cur, cur_lines
@@ -463,7 +464,7 @@ def parse_text(text: str, company: str) -> Statement:
                 currency=acct.currency,
                 iban=acct.iban,
             )
-            cur_lines = [title]
+            ends[id(cur)], cur_lines = a1_end, [title]
             continue
         if s.startswith(_SKIP_TITLES):
             close()
@@ -473,7 +474,7 @@ def parse_text(text: str, company: str) -> Statement:
         if cur is not None:
             cur_lines.append(s)
     close()
-    _pdf_trust(accounts, opening, final)
+    _pdf_trust(_directions_by_totals(accounts, ends), opening, final)
     if periods := [a.period for a in accounts if a.period]:  # the sections' days, not a period printed elsewhere
         period_start, period_end = min(p[0] for p in periods), max(p[1] for p in periods)
     return Statement(
@@ -566,6 +567,40 @@ def _pdf_balance(
     if title.startswith("RULAJ TOTAL CONT") and row.group("a2"):
         acct.total_debit = parse_amount(row.group("a1"))
         acct.total_credit = parse_amount(row.group("a2"))
+
+
+def _directions_by_totals(accounts: list[Account], ends: dict[int, int]) -> list[Account]:
+    """Older BT PDFs print lines of different widths, so an amount's column measured against the header's can land
+    nearer the wrong one. When the lines read so don't add up to the account's own totals (RULAJ TOTAL CONT: debits,
+    credits), the amounts' columns are split where they leave the widest gap, the left ones debits: that reading is
+    kept only if it is the one reading (that split, or all one side) giving both totals to the cent. Otherwise the
+    section stays as read, and unproven."""
+    for acct in accounts:
+        if not (acct.balanced or acct.total_debit is None or not acct.txs):
+            _redirect(acct, ends)
+    return accounts
+
+
+def _redirect(acct: Account, ends: dict[int, int]) -> None:
+    cols = sorted({ends[id(t)] for t in acct.txs})
+    gap = max(range(1, len(cols)), key=lambda i: cols[i] - cols[i - 1], default=None)
+    readings = [{id(t): side for t in acct.txs} for side in ("debit", "credit")]
+    if gap is not None:
+        readings.append({id(t): "debit" if ends[id(t)] < cols[gap] else "credit" for t in acct.txs})
+
+    def adds_up(reading: dict[int, str]) -> bool:
+        total = {
+            side: sum((t.amount for t in acct.txs if reading[id(t)] == side), Decimal(0)) for side in reading.values()
+        }
+        return (total.get("debit", Decimal(0)), total.get("credit", Decimal(0))) == (
+            acct.total_debit,
+            acct.total_credit,
+        )
+
+    fitting = [r for r in readings if adds_up(r)]
+    if len(fitting) == 1:
+        for t in acct.txs:
+            t.direction = fitting[0][id(t)]
 
 
 def _pdf_trust(accounts: list[Account], opening: dict[int, Decimal], final: dict[int, Decimal]) -> None:

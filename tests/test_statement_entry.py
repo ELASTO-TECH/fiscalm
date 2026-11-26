@@ -10,6 +10,7 @@ from test_efactura import _supplier_twins
 from fiscalm import recon
 from fiscalm.bank import statements
 from fiscalm.efactura import inbox as efactura
+from fiscalm.pdftext import parse_amount
 
 
 @pytest.mark.parametrize("prefix", [b"", b"\n", b"\xef\xbb\xbf"])
@@ -100,3 +101,51 @@ def test_bt_pdf_reads_bts_words_and_the_rules_none():
     for t in st.txs:  # the same lines from a format that said nothing: BT's words alone decide nothing
         t.category, t.country = "", ""
     assert {statements.classify_tx(t) for t in st.txs} == {statements.NEEDS_INVOICE}
+
+
+def _at(text: str, amount: str, end: int) -> str:
+    return text.ljust(end - len(amount)) + amount
+
+
+# Older BT PDFs: the header and the lines are laid out at different widths, so a debit's amount ends nearer the
+# header's Credit column (synthetic, after #39).
+_WIDE = "Data".ljust(13) + "Descriere".ljust(94) + "Debit" + "Credit".rjust(18)  # Debit ends at 112, Credit at 130
+
+
+@pytest.mark.parametrize(
+    "moves,totals,final,directions",
+    [
+        (
+            [("13/01/2020", "Retragere de numerar de la ATM", "200.00", 122), ("", "Comision procesare", "0.80", 124)],
+            ("200.80", "0.00"),
+            "799.20",
+            ["debit", "debit"],
+        ),
+        (
+            [("13/01/2020", "Incasare valutara", "3,400.00", 147), ("", "Comision banca corespondenta", "1.50", 124)],
+            ("1.50", "3,400.00"),
+            "4,398.50",
+            ["credit", "debit"],
+        ),
+        ([("13/01/2020", "Retragere de numerar de la ATM", "200.00", 122)], ("300.00", "0.00"), "700.00", None),
+    ],
+)
+def test_older_bt_lines_of_another_width_are_read_by_the_accounts_own_totals(moves, totals, final, directions):
+    """The bank's RULAJ TOTAL CONT decides which amounts are debits; a reading that doesn't give its totals to the
+    cent leaves the section unproven."""
+    lines = [
+        "EXTRAS CONT Numarul: 2 din 13/01/2020",
+        "CUI:11111111",
+        "CONT 123 Valuta",
+        "RON Cod IBAN: RO24BTRLRONCRT0000000001",
+        _WIDE,
+        _at("             SOLD ANTERIOR", "1,000.00", 130),
+    ]
+    for day, title, amount, end in moves:
+        lines.append(_at(f" {day or ' ' * 10}       {title}", amount, end))
+    lines.append(_at(_at(" 13/01/2020       RULAJ TOTAL CONT", totals[0], 124), totals[1], 147))
+    lines.append(_at("                  SOLD FINAL CONT", final, 147))
+    (account,) = statements.parse_text("\n".join(lines) + "\n", "NORD").accounts
+    assert account.trustworthy is (directions is not None)
+    if directions:
+        assert [t.direction for t in account.txs] == directions and account.closing == parse_amount(final)
